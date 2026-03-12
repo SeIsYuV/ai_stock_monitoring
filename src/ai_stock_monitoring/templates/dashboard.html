@@ -36,17 +36,18 @@
 
     <div class="card">
         <h2>邮箱配置</h2>
+        <p>发件邮箱和收件邮箱都由你手动填写，系统不会预置固定邮箱。</p>
         <form method="post" action="/settings/email">
-            <label>收件人邮箱</label>
+            <label>收件人邮箱（手动填写）</label>
             <input type="email" name="recipient_email" value="{{ email_settings['recipient_email'] }}">
-            <label>SMTP 服务器</label>
+            <label>SMTP 服务器（手动填写或选择）</label>
             <select name="smtp_server">
                 <option value="" {% if not email_settings['smtp_server'] %}selected{% endif %}>请选择</option>
                 <option value="smtp.qq.com" {% if email_settings['smtp_server'] == 'smtp.qq.com' %}selected{% endif %}>QQ 邮箱</option>
                 <option value="smtp.163.com" {% if email_settings['smtp_server'] == 'smtp.163.com' %}selected{% endif %}>163 邮箱</option>
                 <option value="smtp.qiye.163.com" {% if email_settings['smtp_server'] == 'smtp.qiye.163.com' %}selected{% endif %}>网易企业邮</option>
             </select>
-            <label>发件人邮箱</label>
+            <label>发件人邮箱（手动填写）</label>
             <input type="email" name="sender_email" value="{{ email_settings['sender_email'] }}">
             <label>授权码 / 密码</label>
             <input type="password" name="sender_password" value="{{ email_settings['sender_password'] }}">
