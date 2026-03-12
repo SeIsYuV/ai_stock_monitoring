@@ -52,7 +52,13 @@
         .metric-card strong { display: block; margin-bottom: 4px; }
         .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 4px; }
         .wide-table { min-width: 1160px; }
-        .compact-table th, .compact-table td { padding-top: 10px; padding-bottom: 10px; }
+        .monitor-table { min-width: 1280px; table-layout: fixed; }
+        .monitor-table th:nth-child(1), .monitor-table td:nth-child(1) { width: 110px; }
+        .monitor-table th:nth-child(5), .monitor-table td:nth-child(5) { width: 120px; }
+        .monitor-table th:nth-child(9), .monitor-table td:nth-child(9) { width: 280px; }
+        .monitor-table th:nth-child(10), .monitor-table td:nth-child(10) { width: 300px; }
+        .monitor-table th:nth-child(11), .monitor-table td:nth-child(11) { width: 92px; }
+        .compact-table th, .compact-table td { padding-top: 10px; padding-bottom: 10px; vertical-align: top; }
         .nowrap { white-space: nowrap; }
         .soft-panel { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; }
         .stock-name { display: inline-block; max-width: 4em; line-height: 1.35; white-space: normal; word-break: keep-all; overflow-wrap: break-word; }
@@ -62,6 +68,15 @@
         .tight-table th, .tight-table td { padding: 8px 10px; }
         .account-login-empty { color: #94a3b8; font-style: italic; }
         .signal-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+        .signal-groups { display: grid; gap: 8px; }
+        .signal-group { padding: 8px 10px; border-radius: 10px; border: 1px solid #e2e8f0; }
+        .signal-group.buy-group { background: #fff1f2; border-color: #fecdd3; }
+        .signal-group.sell-group { background: #f0fdf4; border-color: #bbf7d0; }
+        .signal-group.neutral-group { background: #f8fafc; }
+        .signal-group-title { display: block; margin-bottom: 6px; font-size: 12px; font-weight: 700; color: #334155; }
+        .signal-group.buy-group .signal-group-title { color: #b91c1c; }
+        .signal-group.sell-group .signal-group-title { color: #15803d; }
+        .signal-detail { margin-top: 6px; }
         .signal-badge { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
         .signal-buy { background: #fee2e2; color: #b91c1c; }
         .signal-sell { background: #dcfce7; color: #15803d; }
@@ -69,11 +84,22 @@
         .action-buy { color: #b91c1c; font-weight: 700; }
         .action-sell { color: #15803d; font-weight: 700; }
         .action-neutral { color: #475569; font-weight: 700; }
-        .advice-card { display: grid; gap: 6px; margin-top: 4px; }
-        .advice-card > div { display: grid; grid-template-columns: 44px 1fr; gap: 8px; align-items: start; }
-        .advice-card strong { color: #0f172a; font-size: 12px; }
-        .advice-card span { color: #64748b; font-size: 12px; line-height: 1.45; }
-        .compact-advice { min-width: 220px; }
+        .advice-card { display: grid; gap: 8px; margin-top: 6px; padding: 10px 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; }
+        .advice-card > div { display: grid; grid-template-columns: 44px 1fr; gap: 8px; align-items: start; padding: 6px 8px; border-radius: 8px; }
+        .advice-card strong { color: #0f172a; font-size: 12px; line-height: 1.4; }
+        .advice-card span { color: #475569; font-size: 12px; line-height: 1.5; }
+        .advice-card > div:nth-child(1) { background: #eff6ff; }
+        .advice-card > div:nth-child(1) strong { color: #1d4ed8; }
+        .advice-card > div:nth-child(2) { background: #ecfdf5; }
+        .advice-card > div:nth-child(2) strong { color: #059669; }
+        .advice-card > div:nth-child(3) { background: #fff7ed; }
+        .advice-card > div:nth-child(3) strong { color: #ea580c; }
+        .advice-card > div:nth-child(4) { background: #faf5ff; }
+        .advice-card > div:nth-child(4) strong { color: #7c3aed; }
+        .compact-advice { min-width: 240px; }
+        .stock-cell .stock-name { max-width: none; }
+        .signal-cell { min-width: 260px; }
+        .advice-cell { min-width: 300px; }
         @media (max-width: 900px) {
             header { flex-direction: column; align-items: flex-start; }
             .top-nav a { margin-left: 0; margin-right: 12px; }

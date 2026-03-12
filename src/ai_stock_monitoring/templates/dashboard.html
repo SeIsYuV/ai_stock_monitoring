@@ -112,7 +112,7 @@
                     {% endif %}
                 </td>
                 <td>{{ item['risk_level'] }}</td>
-                <td>
+                <td class="advice-cell">
                     <div class="action-{{ item['action_color'] }}">{{ item['action'] }}</div>
                     <div class="advice-card compact-advice">
                         <div><strong>结论</strong><span>{{ item['advice_conclusion_line'] }}</span></div>
@@ -349,11 +349,10 @@
         </form>
     </div>
     <div class="table-scroll">
-        <table class="wide-table">
+        <table class="wide-table monitor-table compact-table">
             <thead>
             <tr>
-                <th>代码</th>
-                <th>名称</th>
+                <th>股票</th>
                 <th>{{ price_column_label }}</th>
                 <th>250日线</th>
                 <th>30周/60周</th>
@@ -370,8 +369,10 @@
             <tbody>
             {% for item in snapshots %}
             <tr>
-                <td><a class="inline-link" href="/stocks/{{ item['symbol'] }}">{{ item['symbol'] }}</a></td>
-                <td><span class="stock-name">{{ format_stock_display_name(item['display_name'])|safe }}</span></td>
+                <td class="stock-cell">
+                    <a class="inline-link" href="/stocks/{{ item['symbol'] }}">{{ item['symbol'] }}</a>
+                    <div class="muted stock-name">{{ format_stock_display_name(item['display_name'])|safe }}</div>
+                </td>
                 <td>{{ '%.2f'|format(item['latest_price']) if item['latest_price'] is not none else '-' }}</td>
                 <td>{{ '%.2f'|format(item['ma_250']) if item['ma_250'] is not none else '-' }}</td>
                 <td>
@@ -383,7 +384,9 @@
                 </td>
                 <td>
                     {% if item['boll_mid'] is not none %}
-                    {{ '%.2f'|format(item['boll_upper']) }} / {{ '%.2f'|format(item['boll_mid']) }} / {{ '%.2f'|format(item['boll_lower']) }}
+                    <div>上轨 {{ '%.2f'|format(item['boll_upper']) }}</div>
+                    <div>中轨 {{ '%.2f'|format(item['boll_mid']) }}</div>
+                    <div>下轨 {{ '%.2f'|format(item['boll_lower']) }}</div>
                     {% else %}
                     -
                     {% endif %}
@@ -407,24 +410,43 @@
                     -
                     {% endif %}
                 </td>
-                <td>
-                    {% if item['buy_signals'] or item['sell_signals'] %}
-                    <div class="signal-list">
-                        {% for signal in item['buy_signals'] %}
-                        <span class="signal-badge signal-buy">买入｜{{ signal }}</span>
-                        {% endfor %}
-                        {% for signal in item['sell_signals'] %}
-                        <span class="signal-badge signal-sell">卖出｜{{ signal }}</span>
-                        {% endfor %}
+                <td class="signal-cell">
+                    <div class="signal-groups">
+                        {% if item['buy_signals'] %}
+                        <div class="signal-group buy-group">
+                            <strong class="signal-group-title">买入信号</strong>
+                            <div class="signal-list">
+                                {% for signal in item['buy_signals'] %}
+                                <span class="signal-badge signal-buy">{{ signal }}</span>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
+                        {% if item['sell_signals'] %}
+                        <div class="signal-group sell-group">
+                            <strong class="signal-group-title">卖出信号</strong>
+                            <div class="signal-list">
+                                {% for signal in item['sell_signals'] %}
+                                <span class="signal-badge signal-sell">{{ signal }}</span>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
+                        {% if not item['buy_signals'] and not item['sell_signals'] %}
+                        <div class="signal-group neutral-group">
+                            <strong class="signal-group-title">触发状态</strong>
+                            <span class="signal-badge signal-neutral">暂无信号</span>
+                        </div>
+                        {% endif %}
                     </div>
-                    {% else %}
-                    <span class="signal-badge signal-neutral">暂无信号</span>
+                    {% if item['trigger_state'] and item['trigger_state'] != '正常' %}
+                    <div class="muted signal-detail">原始状态：{{ item['trigger_state'] }}</div>
                     {% endif %}
                     {% if item['trigger_detail'] %}
-                    <div style="font-size: 12px; color: #64748b; margin-top: 4px; min-width: 260px;">{{ item['trigger_detail'] }}</div>
+                    <div style="font-size: 12px; color: #64748b; margin-top: 6px; min-width: 260px;">{{ item['trigger_detail'] }}</div>
                     {% endif %}
                 </td>
-                <td>
+                <td class="advice-cell">
                     <div class="action-{{ item['action_color'] }}">{{ item['action'] }}</div>
                     <div class="advice-card compact-advice">
                         <div><strong>结论</strong><span>{{ item['advice_conclusion_line'] }}</span></div>

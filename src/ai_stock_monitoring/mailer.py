@@ -81,30 +81,33 @@ def build_trade_analysis_email_body(payload: dict[str, Any]) -> str:
         if dcf_intrinsic_value is not None and dcf_valuation_gap_pct is not None
         else dcf_reason
     )
+
     lines = [
         f"股票：{payload['symbol']}",
         f"分析来源：{payload['provider']} / {payload['model_name']}",
         f"生成时间：{payload['created_at']}",
+        "=" * 18,
         f"结论：{analysis['summary']}",
         f"合理性判断：{analysis['judgment']}",
-        "综合建议：",
-        f"- 结论：{advice_card.get('conclusion', analysis['position_advice'])}",
-        f"- 买点：{advice_card.get('buy', analysis.get('recommended_buy_price_range', '暂无明确价位'))}",
-        f"- 卖点：{advice_card.get('sell', analysis.get('recommended_sell_price_range', '暂无明确价位'))}",
-        f"- DCF：{advice_card.get('dcf', dcf_line)}",
-        f"观望关注价：{analysis.get('watch_price_range', '暂无明确价位')}",
         "",
-        "判断依据：",
+        "【综合建议卡】",
+        f"- 结论｜{advice_card.get('conclusion', analysis['position_advice'])}",
+        f"- 买点｜{advice_card.get('buy', analysis.get('recommended_buy_price_range', '暂无明确价位'))}",
+        f"- 卖点｜{advice_card.get('sell', analysis.get('recommended_sell_price_range', '暂无明确价位'))}",
+        f"- DCF｜{advice_card.get('dcf', dcf_line)}",
+        f"- 观望｜{analysis.get('watch_price_range', '暂无明确价位')}",
+        "",
+        "【判断依据】",
     ]
     lines.extend(f"- {item}" for item in analysis["reasoning"])
-    lines.extend(["", "下一步买点："])
+    lines.extend(["", "【下一步买点】"])
     lines.extend(f"- {item}" for item in analysis["next_buy_points"])
-    lines.extend(["", "下一步卖点："])
+    lines.extend(["", "【下一步卖点】"])
     lines.extend(f"- {item}" for item in analysis["next_sell_points"])
-    lines.extend(["", "观望关注位："])
+    lines.extend(["", "【观望关注位】"])
     lines.extend(f"- {item}" for item in analysis.get("watch_points", []))
     if portfolio_profile:
-        lines.extend(["", "组合层面建议："])
+        lines.extend(["", "【组合层面建议】"])
         lines.append(f"- 当前持仓比例：{portfolio_profile.get('holding_ratio', 0)}%")
         lines.append(f"- 模型建议仓位：{portfolio_profile.get('recommended_holding_ratio', '-')}")
         lines.append(f"- 目标仓位中枢：{portfolio_profile.get('target_holding_ratio_mid', '-')}")
@@ -112,7 +115,7 @@ def build_trade_analysis_email_body(payload: dict[str, Any]) -> str:
         lines.extend(f"- {item}" for item in portfolio_profile.get("overall_adjustment_suggestions", []))
         lines.extend(f"- {item}" for item in portfolio_profile.get("priority_reduce_positions", []))
         lines.extend(f"- {item}" for item in portfolio_profile.get("priority_add_positions", []))
-    lines.extend(["", "风控建议："])
+    lines.extend(["", "【风控建议】"])
     lines.extend(f"- {item}" for item in analysis["risk_controls"])
     lines.extend(["", analysis["disclaimer"]])
     return "\n".join(lines)
