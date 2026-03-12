@@ -43,14 +43,14 @@
 
 ## Docker 启动
 
-1. 复制模板：`cp .env.example .env`
-2. 按需修改 `.env`（尤其是 `OPENAI_API_KEY`）
-3. 构建并启动：`docker compose up -d --build`（Dockerfile 已默认优先使用清华 PyPI 镜像）
-4. 如需 HTTPS，请在 `.env` 里填写 `ASM_PUBLIC_DOMAIN` 和 `ASM_TLS_EMAIL`，并确保域名已解析到服务器、80/443 端口已放行
+1. 如需保留一份本地环境文件，可先执行：`./prepare_env.sh`（会在缺失时自动生成 `.env`）
+2. 按需修改 `.env`（尤其是 `OPENAI_API_KEY`、`ASM_PUBLIC_DOMAIN`、`ASM_TLS_EMAIL`）
+3. 直接构建并启动：`docker compose up -d --build`（即使没有 `.env` 也不会再报错）
+4. 如需 HTTPS，请填写 `ASM_PUBLIC_DOMAIN` 和 `ASM_TLS_EMAIL`，并确保域名已解析到服务器、80/443 端口已放行
 5. 本地直连应用可打开：`http://127.0.0.1:11223`
 6. 外网 HTTPS 应访问：`https://你的域名`，不要再访问 `https://你的域名:11223`
 7. 数据文件和 Caddy 证书会落在宿主机 `./data/`
-8. 日常升级可执行：`./upgrade.sh`（会先备份数据库，再用最新基础镜像重建容器）
+8. 日常升级可执行：`./upgrade.sh`（会先自动生成 `.env`，再备份数据库并重建容器）
 
 ## 下载镜像源
 
@@ -63,6 +63,7 @@
 - 当前 Docker 方案已内置 `Caddy` 反向代理，自动申请和续期 HTTPS 证书
 - 应用容器仍然运行在内部 `11223` HTTP 端口，由 `Caddy` 对外提供标准 `443` HTTPS
 - 如果你用域名部署，正确访问方式应是：`https://你的域名`
+- 登录自助解封验证码只会发送到当前账号在 Web 页面填写的“收件邮箱”，不会读取任何写死的固定邮箱
 - `https://你的域名:11223` 仍然会失败，因为 `11223` 端口上跑的是纯 HTTP，不是 TLS
 - 首次签发证书前，请确认域名 A/AAAA 记录已经指向服务器公网 IP，且云防火墙/安全组已开放 `80` 和 `443`
 
@@ -71,6 +72,7 @@
 - 模板文件：`.env.example`
 - 本地或 Docker 使用前建议先执行：`cp .env.example .env`
 - `.env` 已加入 `.gitignore`，不会被误提交
+- `./prepare_env.sh` 会在缺少 `.env` 时自动由 `.env.example` 生成
 
 ## 关键环境变量
 

@@ -2,8 +2,6 @@ version: "3.9"
 
 services:
   ai-stock-monitoring:
-    env_file:
-      - .env
     build:
       context: .
     init: true
@@ -18,6 +16,8 @@ services:
       ASM_LLM_PROVIDER: ${ASM_LLM_PROVIDER:-openai}
       ASM_LLM_MODEL: ${ASM_LLM_MODEL:-gpt-4.1-mini}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ASM_PUBLIC_DOMAIN: ${ASM_PUBLIC_DOMAIN:-}
+      ASM_TLS_EMAIL: ${ASM_TLS_EMAIL:-}
     stop_grace_period: 20s
     volumes:
       - ./data:/app/data
@@ -39,8 +39,6 @@ services:
     depends_on:
       ai-stock-monitoring:
         condition: service_healthy
-    env_file:
-      - .env
     environment:
       ASM_PUBLIC_DOMAIN: ${ASM_PUBLIC_DOMAIN}
       ASM_TLS_EMAIL: ${ASM_TLS_EMAIL}

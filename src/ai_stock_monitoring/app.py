@@ -835,7 +835,7 @@ def _render_login_page(
 
 
 def _resolve_unlock_email_target(email_settings: object) -> str:
-    return str(email_settings["recipient_email"] or email_settings["sender_email"] or "").strip()
+    return str(email_settings["recipient_email"] or "").strip()
 
 
 def _mask_email_address(email: str) -> str:
