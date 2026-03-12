@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.ai_stock_monitoring.app import create_app
 from src.ai_stock_monitoring.config import AppSettings
-from src.ai_stock_monitoring.database import initialize_database
+from src.ai_stock_monitoring.database import get_user, initialize_database
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
 from src.ai_stock_monitoring.monitor import (
     StockMonitor,
@@ -16,6 +16,8 @@ from src.ai_stock_monitoring.monitor import (
     parse_stock_symbols,
     validate_stock_symbol,
 )
+from src.ai_stock_monitoring.quant import build_quant_signal
+from src.ai_stock_monitoring.security import verify_password
 from src.ai_stock_monitoring.trade_advisor import build_position_summary
 
 
@@ -54,14 +56,16 @@ class MonitorTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
             app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
             with TestClient(app) as client:
-                client.post(
+                login_response = client.post(
                     "/login",
                     data={"username": "admin", "password": "admin123"},
                     follow_redirects=False,
                 )
+                self.assertEqual(login_response.status_code, 303)
                 dashboard_response = client.get("/dashboard")
                 self.assertEqual(dashboard_response.status_code, 200)
                 self.assertIn("监控状态", dashboard_response.text)
+                self.assertIn("当前账号：admin", dashboard_response.text)
 
     def test_build_position_summary(self) -> None:
         summary = build_position_summary(
@@ -177,6 +181,7 @@ class MonitorTests(unittest.TestCase):
                 with patch("src.ai_stock_monitoring.app.send_message") as mocked_send:
                     mocked_send.return_value.success = True
                     mocked_send.return_value.error = None
+                    mocked_send.return_value.status = "success"
                     send_response = client.post(
                         "/trades/email-analysis",
                         data={"symbol": "600519"},
@@ -184,6 +189,206 @@ class MonitorTests(unittest.TestCase):
                     )
                     self.assertEqual(send_response.status_code, 303)
                     mocked_send.assert_called_once()
+
+    def test_add_stock_refreshes_snapshot_immediately(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                response = client.post(
+                    "/stocks",
+                    data={"symbols_text": "600111"},
+                    follow_redirects=False,
+                )
+                self.assertEqual(response.status_code, 303)
+
+                dashboard_response = client.get("/dashboard")
+                self.assertEqual(dashboard_response.status_code, 200)
+                self.assertIn("600111", dashboard_response.text)
+                self.assertIn("示例股票600111", dashboard_response.text)
+
+    def test_account_password_change_persists_after_restart(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            settings = AppSettings(db_path=database_file.name, provider_name="mock")
+            app = create_app(settings)
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                change_response = client.post(
+                    "/settings/admin-password",
+                    data={
+                        "current_password": "admin123",
+                        "new_password": "betterpass123",
+                        "confirm_password": "betterpass123",
+                    },
+                    follow_redirects=False,
+                )
+                self.assertEqual(change_response.status_code, 303)
+
+            restarted_app = create_app(settings)
+            with TestClient(restarted_app) as restarted_client:
+                success_response = restarted_client.post(
+                    "/login",
+                    data={"username": "admin", "password": "betterpass123"},
+                    follow_redirects=False,
+                )
+                self.assertEqual(success_response.status_code, 303)
+                failed_response = restarted_client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                self.assertEqual(failed_response.status_code, 400)
+
+    def test_login_guard_locks_after_repeated_failures(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                for _ in range(5):
+                    response = client.post(
+                        "/login",
+                        data={"username": "admin", "password": "wrong-password"},
+                        follow_redirects=False,
+                    )
+                    self.assertEqual(response.status_code, 400)
+
+                locked_response = client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                self.assertEqual(locked_response.status_code, 429)
+                self.assertIn("临时锁定", locked_response.text)
+
+    def test_password_helper_supports_legacy_hashes(self) -> None:
+        self.assertTrue(verify_password("admin123", "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9"))
+
+    def test_admin_can_create_user_and_data_is_isolated(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as admin_client:
+                admin_client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                create_user_response = admin_client.post(
+                    "/settings/users",
+                    data={
+                        "username": "alice",
+                        "password": "alicepass123",
+                        "confirm_password": "alicepass123",
+                    },
+                    follow_redirects=False,
+                )
+                self.assertEqual(create_user_response.status_code, 303)
+                admin_client.post(
+                    "/stocks",
+                    data={"symbols_text": "600519"},
+                    follow_redirects=False,
+                )
+                admin_dashboard = admin_client.get("/dashboard")
+                self.assertIn("600519", admin_dashboard.text)
+
+            with TestClient(app) as alice_client:
+                login_response = alice_client.post(
+                    "/login",
+                    data={"username": "alice", "password": "alicepass123"},
+                    follow_redirects=False,
+                )
+                self.assertEqual(login_response.status_code, 303)
+                alice_client.post(
+                    "/stocks",
+                    data={"symbols_text": "000001"},
+                    follow_redirects=False,
+                )
+                alice_dashboard = alice_client.get("/dashboard")
+                self.assertIn("000001", alice_dashboard.text)
+                self.assertNotIn("600519</a></td>", alice_dashboard.text)
+
+    def test_quant_settings_and_alerts_work(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                client.post(
+                    "/stocks",
+                    data={"symbols_text": "600519"},
+                    follow_redirects=False,
+                )
+                settings_response = client.post(
+                    "/settings/quant",
+                    data={
+                        "enabled": "1",
+                        "probability_threshold": "50",
+                        "selected_models": [
+                            "trend_following",
+                            "mean_reversion",
+                            "dividend_quality",
+                            "weekly_resonance",
+                        ],
+                    },
+                    follow_redirects=False,
+                )
+                self.assertEqual(settings_response.status_code, 303)
+                app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T10:00:00+08:00"))
+                dashboard = client.get("/dashboard")
+                self.assertIn("量化盈利概率", dashboard.text)
+                history = client.get("/history")
+                self.assertIn("量化盈利概率", history.text)
+
+    def test_quant_signal_returns_probability(self) -> None:
+        settings = AppSettings(provider_name="mock")
+        monitor = StockMonitor(settings)
+        bars_daily = monitor.provider.get_daily_bars("600519")
+        bars_weekly = monitor.provider.get_weekly_bars("600519")
+        signal = build_quant_signal(
+            latest_price=monitor.provider.get_quote("600519").latest_price,
+            ma_250=calculate_simple_moving_average([item.close_price for item in bars_daily], 250),
+            boll_mid=calculate_simple_moving_average([item.close_price for item in bars_daily], 20),
+            ma_30w=calculate_simple_moving_average([item.close_price for item in bars_weekly], 30),
+            ma_60w=calculate_simple_moving_average([item.close_price for item in bars_weekly], 60),
+            dividend_yield=monitor.provider.get_trailing_dividend_yield("600519", monitor.provider.get_quote("600519").latest_price),
+            daily_bars=bars_daily,
+            weekly_bars=bars_weekly,
+        )
+        self.assertGreaterEqual(signal.probability, 1)
+        self.assertLessEqual(signal.probability, 99)
+        self.assertIn("模型", signal.summary)
+
+    def test_created_user_password_is_stored(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                client.post(
+                    "/settings/users",
+                    data={
+                        "username": "bob",
+                        "password": "bob-pass-123",
+                        "confirm_password": "bob-pass-123",
+                    },
+                    follow_redirects=False,
+                )
+            user = get_user(database_file.name, "bob")
+            self.assertIsNotNone(user)
+            assert user is not None
+            self.assertTrue(verify_password("bob-pass-123", user["password_hash"]))
 
 
 if __name__ == "__main__":

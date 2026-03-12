@@ -4,6 +4,7 @@
 <section class="grid" style="margin-bottom: 16px;">
     <div class="card">
         <h1>录入交易</h1>
+        <p>当前页面只展示账号 {{ current_user['username'] }} 的交易数据。</p>
         <form method="post" action="/trades">
             <label>股票代码</label>
             <input type="text" name="symbol" maxlength="6" value="{{ selected_symbol }}" placeholder="例如 600519" required>
@@ -35,9 +36,9 @@
         <form method="post" action="/trades/email-analysis">
             <label>发送复盘邮件</label>
             <input type="text" name="symbol" maxlength="6" value="{{ selected_symbol }}" placeholder="例如 600519" required>
-            <button type="submit" class="secondary">发送最新复盘到邮箱</button>
+            <button type="submit" class="secondary">发送最新复盘到当前账号邮箱</button>
         </form>
-        <a class="inline-link" href="/trades/export{% if selected_symbol %}?symbol={{ selected_symbol }}{% endif %}">导出当前交易记录为 Excel</a>
+        <a class="inline-link" href="/trades/export{% if selected_symbol %}?symbol={{ selected_symbol }}{% endif %}">导出当前账号交易记录为 Excel</a>
         {% if position_summary %}
         <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 16px 0;">
         <h3>当前持仓摘要</h3>
@@ -116,7 +117,7 @@
         </tr>
         {% else %}
         <tr>
-            <td colspan="6">还没有交易记录，可以先录入一笔买入或卖出。</td>
+            <td colspan="6">当前账号还没有交易记录，可以先录入一笔买入或卖出。</td>
         </tr>
         {% endfor %}
         </tbody>

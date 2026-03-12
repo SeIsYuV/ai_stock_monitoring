@@ -29,25 +29,25 @@
         <form method="post" action="/stocks">
             <label>新增股票代码</label>
             <textarea name="symbols_text" placeholder="支持批量输入，例如：&#10;600519&#10;000001,300750" required></textarea>
-            <button type="submit">加入监控</button>
+            <button type="submit">加入当前账号监控池</button>
         </form>
-        <p>支持换行、逗号、空格分隔；仅接受 6 位 A 股代码。</p>
+        <p>每个账号维护自己的监控股票列表，彼此互不影响。</p>
     </div>
 
     <div class="card">
         <h2>邮箱配置</h2>
-        <p>发件邮箱和收件邮箱都由你手动填写，系统不会预置固定邮箱。</p>
+        <p>当前账号独立配置发件邮箱和收件邮箱。</p>
         <form method="post" action="/settings/email">
-            <label>收件人邮箱（手动填写）</label>
+            <label>收件人邮箱</label>
             <input type="email" name="recipient_email" value="{{ email_settings['recipient_email'] }}">
-            <label>SMTP 服务器（手动填写或选择）</label>
+            <label>SMTP 服务器</label>
             <select name="smtp_server">
                 <option value="" {% if not email_settings['smtp_server'] %}selected{% endif %}>请选择</option>
                 <option value="smtp.qq.com" {% if email_settings['smtp_server'] == 'smtp.qq.com' %}selected{% endif %}>QQ 邮箱</option>
                 <option value="smtp.163.com" {% if email_settings['smtp_server'] == 'smtp.163.com' %}selected{% endif %}>163 邮箱</option>
                 <option value="smtp.qiye.163.com" {% if email_settings['smtp_server'] == 'smtp.qiye.163.com' %}selected{% endif %}>网易企业邮</option>
             </select>
-            <label>发件人邮箱（手动填写）</label>
+            <label>发件人邮箱</label>
             <input type="email" name="sender_email" value="{{ email_settings['sender_email'] }}">
             <label>授权码 / 密码</label>
             <input type="password" name="sender_password" value="{{ email_settings['sender_password'] }}">
@@ -57,7 +57,88 @@
             <button type="submit" class="secondary">测试发送</button>
         </form>
     </div>
+
+    <div class="card">
+        <h2>量化提醒模型</h2>
+        <p>这里展示的是“模型综合盈利概率评分”，不是实际收益承诺。建议把它当成筛选器，而不是单独决策依据。</p>
+        <form method="post" action="/settings/quant">
+            <div class="checkbox-item" style="margin-bottom: 12px;">
+                <input type="checkbox" name="enabled" value="1" {% if quant_settings['enabled'] %}checked{% endif %}>
+                <label>启用量化盈利概率提醒</label>
+            </div>
+            <label>提醒阈值（50-99）</label>
+            <input type="number" name="probability_threshold" min="50" max="99" step="1" value="{{ quant_settings['probability_threshold'] }}">
+            <label>组合模型</label>
+            <div class="checkbox-group">
+                {% for option in quant_model_options %}
+                <label class="checkbox-item">
+                    <input type="checkbox" name="selected_models" value="{{ option['key'] }}" {% if option['key'] in quant_selected_models %}checked{% endif %}>
+                    <span>{{ option['label'] }}</span>
+                </label>
+                {% endfor %}
+            </div>
+            <button type="submit" class="secondary">保存量化设置</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>账号安全</h2>
+        <p>当前账号：{{ current_user['username'] }}{% if current_user['is_admin'] %}（管理员）{% endif %}</p>
+        <p>同一账号在同一终端连续输错密码过多会触发临时锁定，用于防爆破。</p>
+        <form method="post" action="/settings/admin-password">
+            <label>当前密码</label>
+            <input type="password" name="current_password" required>
+            <label>新密码</label>
+            <input type="password" name="new_password" minlength="8" required>
+            <label>确认新密码</label>
+            <input type="password" name="confirm_password" minlength="8" required>
+            <button type="submit" class="secondary">修改当前账号密码</button>
+        </form>
+    </div>
 </section>
+
+{% if is_admin %}
+<section class="grid" style="margin-top: 16px;">
+    <div class="card">
+        <h2>新增账号</h2>
+        <form method="post" action="/settings/users">
+            <label>账号名</label>
+            <input type="text" name="username" minlength="3" maxlength="32" required>
+            <label>初始密码</label>
+            <input type="password" name="password" minlength="8" required>
+            <label>确认密码</label>
+            <input type="password" name="confirm_password" minlength="8" required>
+            <div class="checkbox-item">
+                <input type="checkbox" name="is_admin" value="1">
+                <label>同时赋予管理员权限</label>
+            </div>
+            <button type="submit">创建账号</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>账号列表</h2>
+        <table>
+            <thead>
+            <tr>
+                <th>账号</th>
+                <th>角色</th>
+                <th>创建时间</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in users %}
+            <tr>
+                <td>{{ item['username'] }}</td>
+                <td>{{ '管理员' if item['is_admin'] else '普通用户' }}</td>
+                <td>{{ item['created_at'][:19].replace('T', ' ') }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
 
 <section class="card" style="margin-top: 16px;">
     <h2>监控列表</h2>
@@ -66,12 +147,14 @@
         <tr>
             <th>代码</th>
             <th>名称</th>
-            <th>最新价</th>
+            <th>{{ price_column_label }}</th>
             <th>250日线</th>
             <th>30周/60周</th>
             <th>BOLL中轨</th>
             <th>股息率</th>
+            <th>量化盈利概率</th>
             <th>触发状态</th>
+            <th>更新时间</th>
             <th>操作</th>
         </tr>
         </thead>
@@ -91,6 +174,13 @@
             </td>
             <td>{{ '%.2f'|format(item['boll_mid']) if item['boll_mid'] is not none else '-' }}</td>
             <td>{{ '%.2f%%'|format(item['dividend_yield']) if item['dividend_yield'] is not none else '-' }}</td>
+            <td>
+                {% if item['quant_probability'] is not none %}
+                {{ '%.2f%%'|format(item['quant_probability']) }}
+                {% else %}
+                -
+                {% endif %}
+            </td>
             <td class="{{ 'danger-text' if item['trigger_state'] and item['trigger_state'] != '正常' else '' }}">
                 {{ item['trigger_state'] if item['trigger_state'] else '待刷新' }}
                 {% if item['trigger_detail'] %}
@@ -98,10 +188,21 @@
                 {% endif %}
             </td>
             <td>
+                {% if item['updated_at'] %}
+                {{ item['updated_at'][:19].replace('T', ' ') }}
+                {% else %}
+                -
+                {% endif %}
+            </td>
+            <td>
                 <form method="post" action="/stocks/{{ item['symbol'] }}/delete">
                     <button type="submit" class="danger">删除</button>
                 </form>
             </td>
+        </tr>
+        {% else %}
+        <tr>
+            <td colspan="11">当前账号还没有监控股票。</td>
         </tr>
         {% endfor %}
         </tbody>

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-"""SQLite persistence layer.
+"""SQLite persistence layer with per-user data isolation.
 
-设计原则：
-- 不引入额外 ORM，降低部署复杂度
-- 每个函数只做一件很具体的数据库操作
-- 路由层和业务层通过这些小函数读写数据，减少 SQL 分散到各处
+当前版本的数据库设计把“账号”和“业务数据”分开：
+- `user_account` 保存登录身份与角色
+- 其它 `user_*` 表都通过 `owner_username` 归属到某个账号
+
+这样新增账号后，每个人看到的监控股票、交易流水、邮箱配置、提醒历史都会自动隔离。
 """
 
 from contextlib import contextmanager
@@ -15,12 +16,12 @@ import sqlite3
 from typing import Any, Iterator
 
 from .config import AppSettings
+from .quant import DEFAULT_QUANT_MODELS
 from .security import hash_password
 
 
 @contextmanager
 def get_connection(db_path: str) -> Iterator[sqlite3.Connection]:
-    """Open a short-lived SQLite connection with row access by column name."""
     connection = sqlite3.connect(db_path)
     connection.row_factory = sqlite3.Row
     try:
@@ -34,27 +35,18 @@ def initialize_database(settings: AppSettings) -> None:
     """Create or migrate the lightweight SQLite schema."""
 
     with get_connection(settings.db_path) as connection:
-        # 这里集中定义所有表结构。
-        # 新人排查数据问题时，优先从这段 schema 看有哪些持久化对象。
         connection.executescript(
             """
-            CREATE TABLE IF NOT EXISTS admin_user (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                username TEXT NOT NULL,
+            CREATE TABLE IF NOT EXISTS user_account (
+                username TEXT PRIMARY KEY,
                 password_hash TEXT NOT NULL,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
 
-            -- 观察池：当前需要监控的股票代码列表
-            CREATE TABLE IF NOT EXISTS monitored_stock (
-                symbol TEXT PRIMARY KEY,
-                display_name TEXT,
-                created_at TEXT NOT NULL
-            );
-
-            -- 邮箱配置：通过 Web 页面手动填写的 SMTP 信息
-            CREATE TABLE IF NOT EXISTS email_settings (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
+            CREATE TABLE IF NOT EXISTS user_email_settings (
+                owner_username TEXT PRIMARY KEY,
                 recipient_email TEXT,
                 smtp_server TEXT,
                 sender_email TEXT,
@@ -62,9 +54,25 @@ def initialize_database(settings: AppSettings) -> None:
                 updated_at TEXT NOT NULL
             );
 
-            -- 最新快照：前端监控列表主要读这里
-            CREATE TABLE IF NOT EXISTS stock_snapshot (
-                symbol TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS user_quant_settings (
+                owner_username TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                probability_threshold REAL NOT NULL DEFAULT 90,
+                selected_models TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_monitored_stock (
+                owner_username TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                display_name TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (owner_username, symbol)
+            );
+
+            CREATE TABLE IF NOT EXISTS user_stock_snapshot (
+                owner_username TEXT NOT NULL,
+                symbol TEXT NOT NULL,
                 display_name TEXT NOT NULL,
                 latest_price REAL NOT NULL,
                 ma_250 REAL NOT NULL,
@@ -72,14 +80,17 @@ def initialize_database(settings: AppSettings) -> None:
                 ma_60w REAL NOT NULL,
                 boll_mid REAL NOT NULL,
                 dividend_yield REAL NOT NULL,
+                quant_probability REAL NOT NULL DEFAULT 0,
+                quant_model_breakdown TEXT NOT NULL DEFAULT '',
                 trigger_state TEXT NOT NULL,
                 trigger_detail TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (owner_username, symbol)
             );
 
-            -- 历史提醒：所有已触发事件的持久化留痕
-            CREATE TABLE IF NOT EXISTS alert_history (
+            CREATE TABLE IF NOT EXISTS user_alert_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_username TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 display_name TEXT NOT NULL,
                 trigger_type TEXT NOT NULL,
@@ -91,8 +102,8 @@ def initialize_database(settings: AppSettings) -> None:
                 read_at TEXT
             );
 
-            -- 信号状态：用于记录连续命中次数和待发送提醒
-            CREATE TABLE IF NOT EXISTS signal_state (
+            CREATE TABLE IF NOT EXISTS user_signal_state (
+                owner_username TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 trigger_type TEXT NOT NULL,
                 consecutive_hits INTEGER NOT NULL DEFAULT 0,
@@ -102,19 +113,20 @@ def initialize_database(settings: AppSettings) -> None:
                 deliver_on TEXT,
                 pending_payload TEXT,
                 updated_at TEXT NOT NULL,
-                PRIMARY KEY (symbol, trigger_type)
+                PRIMARY KEY (owner_username, symbol, trigger_type)
             );
 
-            -- 作业状态：避免 9:25 或周线任务在同一天重复执行
-            CREATE TABLE IF NOT EXISTS job_state (
-                job_name TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS user_job_state (
+                owner_username TEXT NOT NULL,
+                job_name TEXT NOT NULL,
                 last_run_marker TEXT,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (owner_username, job_name)
             );
 
-            -- 交易流水：用户手动录入的买卖记录
-            CREATE TABLE IF NOT EXISTS trade_record (
+            CREATE TABLE IF NOT EXISTS user_trade_record (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_username TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 side TEXT NOT NULL,
                 price REAL NOT NULL,
@@ -124,9 +136,9 @@ def initialize_database(settings: AppSettings) -> None:
                 created_at TEXT NOT NULL
             );
 
-            -- 交易分析：保存每次规则分析 / 大模型分析的结果
-            CREATE TABLE IF NOT EXISTS trade_analysis (
+            CREATE TABLE IF NOT EXISTS user_trade_analysis (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_username TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 analysis_provider TEXT NOT NULL,
                 model_name TEXT NOT NULL,
@@ -137,85 +149,337 @@ def initialize_database(settings: AppSettings) -> None:
                 error_message TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS login_guard (
+                subject TEXT PRIMARY KEY,
+                failed_attempts INTEGER NOT NULL DEFAULT 0,
+                locked_until TEXT,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_user_alert_history_owner_time
+                ON user_alert_history (owner_username, triggered_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_user_trade_record_owner_symbol_time
+                ON user_trade_record (owner_username, symbol, traded_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_user_trade_analysis_owner_symbol_time
+                ON user_trade_analysis (owner_username, symbol, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_user_signal_state_owner_delivery
+                ON user_signal_state (owner_username, pending_delivery, deliver_on);
             """
         )
 
         now = datetime.now(UTC).isoformat()
         connection.execute(
             """
-            INSERT INTO admin_user (id, username, password_hash, updated_at)
-            VALUES (1, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                username = excluded.username,
-                password_hash = excluded.password_hash,
-                updated_at = excluded.updated_at
+            INSERT INTO user_account (username, password_hash, is_admin, created_at, updated_at)
+            VALUES (?, ?, 1, ?, ?)
+            ON CONFLICT(username) DO NOTHING
             """,
-            (settings.admin_username, hash_password(settings.admin_password), now),
+            (settings.admin_username, hash_password(settings.admin_password), now, now),
         )
-        connection.execute(
-            """
-            INSERT INTO email_settings (id, recipient_email, smtp_server, sender_email, sender_password, updated_at)
-            VALUES (1, '', '', '', '', ?)
-            ON CONFLICT(id) DO NOTHING
-            """,
-            (now,),
-        )
+        _ensure_user_config_rows(connection, settings.admin_username, now)
+        _migrate_legacy_data(connection, settings, now)
 
-        if not list_monitored_stocks(connection):
+        if not list_monitored_stocks(connection, settings.admin_username):
             for symbol in settings.default_symbols:
                 connection.execute(
-                    "INSERT OR IGNORE INTO monitored_stock (symbol, display_name, created_at) VALUES (?, ?, ?)",
-                    (symbol, "", now),
+                    """
+                    INSERT OR IGNORE INTO user_monitored_stock (owner_username, symbol, display_name, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (settings.admin_username, symbol, "", now),
                 )
+
+
+def _migrate_legacy_data(connection: sqlite3.Connection, settings: AppSettings, now: str) -> None:
+    admin_username = settings.admin_username
+    if _table_exists(connection, "admin_user"):
+        legacy_admin = connection.execute(
+            "SELECT username, password_hash FROM admin_user WHERE id = 1"
+        ).fetchone()
+        if legacy_admin is not None:
+            connection.execute(
+                """
+                INSERT INTO user_account (username, password_hash, is_admin, created_at, updated_at)
+                VALUES (?, ?, 1, ?, ?)
+                ON CONFLICT(username) DO NOTHING
+                """,
+                (legacy_admin["username"], legacy_admin["password_hash"], now, now),
+            )
+            admin_username = legacy_admin["username"]
+            _ensure_user_config_rows(connection, admin_username, now)
+
+    _copy_legacy_email_settings(connection, admin_username, now)
+    _copy_simple_legacy_table(
+        connection,
+        legacy_table="monitored_stock",
+        target_table="user_monitored_stock",
+        owner_username=admin_username,
+        columns=("symbol", "display_name", "created_at"),
+    )
+    _copy_simple_legacy_table(
+        connection,
+        legacy_table="stock_snapshot",
+        target_table="user_stock_snapshot",
+        owner_username=admin_username,
+        columns=(
+            "symbol",
+            "display_name",
+            "latest_price",
+            "ma_250",
+            "ma_30w",
+            "ma_60w",
+            "boll_mid",
+            "dividend_yield",
+            "trigger_state",
+            "trigger_detail",
+            "updated_at",
+        ),
+        transform=lambda row: (
+            row["symbol"],
+            row["display_name"],
+            row["latest_price"],
+            row["ma_250"],
+            row["ma_30w"],
+            row["ma_60w"],
+            row["boll_mid"],
+            row["dividend_yield"],
+            0.0,
+            "",
+            row["trigger_state"],
+            row["trigger_detail"],
+            row["updated_at"],
+        ),
+        target_columns=(
+            "owner_username",
+            "symbol",
+            "display_name",
+            "latest_price",
+            "ma_250",
+            "ma_30w",
+            "ma_60w",
+            "boll_mid",
+            "dividend_yield",
+            "quant_probability",
+            "quant_model_breakdown",
+            "trigger_state",
+            "trigger_detail",
+            "updated_at",
+        ),
+    )
+    _copy_simple_legacy_table(
+        connection,
+        legacy_table="alert_history",
+        target_table="user_alert_history",
+        owner_username=admin_username,
+        columns=(
+            "symbol",
+            "display_name",
+            "trigger_type",
+            "current_price",
+            "indicator_values",
+            "email_status",
+            "email_error",
+            "triggered_at",
+            "read_at",
+        ),
+    )
+    _copy_simple_legacy_table(
+        connection,
+        legacy_table="signal_state",
+        target_table="user_signal_state",
+        owner_username=admin_username,
+        columns=(
+            "symbol",
+            "trigger_type",
+            "consecutive_hits",
+            "last_condition_met",
+            "last_event_marker",
+            "pending_delivery",
+            "deliver_on",
+            "pending_payload",
+            "updated_at",
+        ),
+    )
+    _copy_simple_legacy_table(
+        connection,
+        legacy_table="job_state",
+        target_table="user_job_state",
+        owner_username=admin_username,
+        columns=("job_name", "last_run_marker", "updated_at"),
+    )
+    _copy_simple_legacy_table(
+        connection,
+        legacy_table="trade_record",
+        target_table="user_trade_record",
+        owner_username=admin_username,
+        columns=("symbol", "side", "price", "quantity", "traded_at", "note", "created_at"),
+    )
+    _copy_simple_legacy_table(
+        connection,
+        legacy_table="trade_analysis",
+        target_table="user_trade_analysis",
+        owner_username=admin_username,
+        columns=(
+            "symbol",
+            "analysis_provider",
+            "model_name",
+            "position_summary",
+            "market_snapshot",
+            "analysis_json",
+            "status",
+            "error_message",
+            "created_at",
+        ),
+    )
+
+
+def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _ensure_user_config_rows(connection: sqlite3.Connection, username: str, now: str) -> None:
+    connection.execute(
+        """
+        INSERT INTO user_email_settings (owner_username, recipient_email, smtp_server, sender_email, sender_password, updated_at)
+        VALUES (?, '', '', '', '', ?)
+        ON CONFLICT(owner_username) DO NOTHING
+        """,
+        (username, now),
+    )
+    connection.execute(
+        """
+        INSERT INTO user_quant_settings (owner_username, enabled, probability_threshold, selected_models, updated_at)
+        VALUES (?, 0, 90, ?, ?)
+        ON CONFLICT(owner_username) DO NOTHING
+        """,
+        (username, json.dumps(list(DEFAULT_QUANT_MODELS), ensure_ascii=False), now),
+    )
+
+
+def _copy_legacy_email_settings(connection: sqlite3.Connection, owner_username: str, now: str) -> None:
+    if not _table_exists(connection, "email_settings"):
+        return
+    existing = connection.execute(
+        "SELECT owner_username FROM user_email_settings WHERE owner_username = ?",
+        (owner_username,),
+    ).fetchone()
+    row = connection.execute(
+        "SELECT recipient_email, smtp_server, sender_email, sender_password, updated_at FROM email_settings WHERE id = 1"
+    ).fetchone()
+    if row is None or existing is None:
+        return
+    blank = not any(existing_value for existing_value in connection.execute(
+        "SELECT recipient_email, smtp_server, sender_email, sender_password FROM user_email_settings WHERE owner_username = ?",
+        (owner_username,),
+    ).fetchone())
+    if not blank:
+        return
+    connection.execute(
+        """
+        UPDATE user_email_settings
+        SET recipient_email = ?, smtp_server = ?, sender_email = ?, sender_password = ?, updated_at = ?
+        WHERE owner_username = ?
+        """,
+        (
+            row["recipient_email"] or "",
+            row["smtp_server"] or "",
+            row["sender_email"] or "",
+            row["sender_password"] or "",
+            row["updated_at"] or now,
+            owner_username,
+        ),
+    )
+
+
+def _copy_simple_legacy_table(
+    connection: sqlite3.Connection,
+    legacy_table: str,
+    target_table: str,
+    owner_username: str,
+    columns: tuple[str, ...],
+    transform: Any | None = None,
+    target_columns: tuple[str, ...] | None = None,
+) -> None:
+    if not _table_exists(connection, legacy_table):
+        return
+    target_count = connection.execute(f"SELECT COUNT(*) AS count FROM {target_table} WHERE owner_username = ?", (owner_username,)).fetchone()["count"]
+    if target_count:
+        return
+    select_columns = ", ".join(columns)
+    rows = connection.execute(f"SELECT {select_columns} FROM {legacy_table}").fetchall()
+    if not rows:
+        return
+    target_columns = target_columns or (("owner_username",) + columns)
+    placeholder = ", ".join("?" for _ in target_columns)
+    sql = f"INSERT INTO {target_table} ({', '.join(target_columns)}) VALUES ({placeholder})"
+    for row in rows:
+        payload = transform(row) if transform else tuple(row[column] for column in columns)
+        connection.execute(sql, (owner_username, *payload))
+
+
+def create_user(db_path: str, username: str, password_hash: str, is_admin: bool = False) -> None:
+    now = datetime.now(UTC).isoformat()
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO user_account (username, password_hash, is_admin, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (username, password_hash, 1 if is_admin else 0, now, now),
+        )
+        _ensure_user_config_rows(connection, username, now)
+
+
+def list_users(db_path: str) -> list[sqlite3.Row]:
+    with get_connection(db_path) as connection:
+        return list(
+            connection.execute(
+                "SELECT username, is_admin, created_at, updated_at FROM user_account ORDER BY is_admin DESC, username ASC"
+            ).fetchall()
+        )
+
+
+def get_user(db_path: str, username: str) -> sqlite3.Row | None:
+    with get_connection(db_path) as connection:
+        return connection.execute(
+            "SELECT username, password_hash, is_admin, created_at, updated_at FROM user_account WHERE username = ?",
+            (username,),
+        ).fetchone()
 
 
 def get_admin_user(db_path: str) -> sqlite3.Row:
     with get_connection(db_path) as connection:
         row = connection.execute(
-            "SELECT username, password_hash FROM admin_user WHERE id = 1"
+            "SELECT username, password_hash, is_admin, created_at, updated_at FROM user_account WHERE is_admin = 1 ORDER BY username LIMIT 1"
         ).fetchone()
     if row is None:
         raise RuntimeError("Admin user not initialized")
     return row
 
 
-def list_monitored_stocks(connection: sqlite3.Connection) -> list[sqlite3.Row]:
-    return list(
-        connection.execute(
-            "SELECT symbol, display_name, created_at FROM monitored_stock ORDER BY symbol"
-        ).fetchall()
-    )
-
-
-def get_monitored_stocks(db_path: str) -> list[sqlite3.Row]:
-    """Return the configured watchlist sorted by symbol."""
-
-    with get_connection(db_path) as connection:
-        return list_monitored_stocks(connection)
-
-
-def add_monitored_stock(db_path: str, symbol: str, display_name: str = "") -> None:
-    now = datetime.now(UTC).isoformat()
+def update_user_password(db_path: str, username: str, password_hash: str) -> None:
     with get_connection(db_path) as connection:
         connection.execute(
-            "INSERT OR IGNORE INTO monitored_stock (symbol, display_name, created_at) VALUES (?, ?, ?)",
-            (symbol, display_name, now),
+            "UPDATE user_account SET password_hash = ?, updated_at = ? WHERE username = ?",
+            (password_hash, datetime.now(UTC).isoformat(), username),
         )
 
 
-def remove_monitored_stock(db_path: str, symbol: str) -> None:
-    with get_connection(db_path) as connection:
-        connection.execute("DELETE FROM monitored_stock WHERE symbol = ?", (symbol,))
-        connection.execute("DELETE FROM stock_snapshot WHERE symbol = ?", (symbol,))
-        connection.execute("DELETE FROM signal_state WHERE symbol = ?", (symbol,))
+def update_admin_password(db_path: str, password_hash: str) -> None:
+    admin = get_admin_user(db_path)
+    update_user_password(db_path, admin["username"], password_hash)
 
 
-def get_email_settings(db_path: str) -> sqlite3.Row:
-    """Load the single SMTP configuration row."""
-
+def get_email_settings(db_path: str, owner_username: str) -> sqlite3.Row:
     with get_connection(db_path) as connection:
         row = connection.execute(
-            "SELECT recipient_email, smtp_server, sender_email, sender_password, updated_at FROM email_settings WHERE id = 1"
+            "SELECT owner_username, recipient_email, smtp_server, sender_email, sender_password, updated_at FROM user_email_settings WHERE owner_username = ?",
+            (owner_username,),
         ).fetchone()
     if row is None:
         raise RuntimeError("Email settings not initialized")
@@ -224,6 +488,7 @@ def get_email_settings(db_path: str) -> sqlite3.Row:
 
 def save_email_settings(
     db_path: str,
+    owner_username: str,
     recipient_email: str,
     smtp_server: str,
     sender_email: str,
@@ -233,22 +498,125 @@ def save_email_settings(
     with get_connection(db_path) as connection:
         connection.execute(
             """
-            UPDATE email_settings
+            UPDATE user_email_settings
             SET recipient_email = ?, smtp_server = ?, sender_email = ?, sender_password = ?, updated_at = ?
-            WHERE id = 1
+            WHERE owner_username = ?
             """,
-            (recipient_email, smtp_server, sender_email, sender_password, now),
+            (recipient_email, smtp_server, sender_email, sender_password, now, owner_username),
         )
 
 
-def get_snapshots(db_path: str) -> list[sqlite3.Row]:
-    """Load the latest per-symbol monitoring snapshot for the dashboard."""
+def get_quant_settings(db_path: str, owner_username: str) -> sqlite3.Row:
+    with get_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT owner_username, enabled, probability_threshold, selected_models, updated_at FROM user_quant_settings WHERE owner_username = ?",
+            (owner_username,),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("Quant settings not initialized")
+    return row
 
+
+def save_quant_settings(
+    db_path: str,
+    owner_username: str,
+    enabled: bool,
+    probability_threshold: float,
+    selected_models: list[str],
+) -> None:
+    now = datetime.now(UTC).isoformat()
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE user_quant_settings
+            SET enabled = ?, probability_threshold = ?, selected_models = ?, updated_at = ?
+            WHERE owner_username = ?
+            """,
+            (
+                1 if enabled else 0,
+                probability_threshold,
+                json.dumps(selected_models, ensure_ascii=False),
+                now,
+                owner_username,
+            ),
+        )
+
+
+def get_login_guard_state(db_path: str, subject: str) -> sqlite3.Row | None:
+    with get_connection(db_path) as connection:
+        return connection.execute(
+            "SELECT subject, failed_attempts, locked_until, updated_at FROM login_guard WHERE subject = ?",
+            (subject,),
+        ).fetchone()
+
+
+def record_failed_login(db_path: str, subject: str, lock_minutes: int = 15) -> sqlite3.Row:
+    current = get_login_guard_state(db_path, subject)
+    failed_attempts = 1 if current is None else int(current["failed_attempts"]) + 1
+    locked_until = None
+    if failed_attempts >= 5:
+        locked_until = (datetime.now(UTC) + timedelta(minutes=lock_minutes)).isoformat()
+    updated_at = datetime.now(UTC).isoformat()
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO login_guard (subject, failed_attempts, locked_until, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(subject) DO UPDATE SET
+                failed_attempts = excluded.failed_attempts,
+                locked_until = excluded.locked_until,
+                updated_at = excluded.updated_at
+            """,
+            (subject, failed_attempts, locked_until, updated_at),
+        )
+    guard = get_login_guard_state(db_path, subject)
+    if guard is None:
+        raise RuntimeError("Login guard state not persisted")
+    return guard
+
+
+def clear_login_guard_state(db_path: str, subject: str) -> None:
+    with get_connection(db_path) as connection:
+        connection.execute("DELETE FROM login_guard WHERE subject = ?", (subject,))
+
+
+def list_monitored_stocks(connection: sqlite3.Connection, owner_username: str | None = None) -> list[sqlite3.Row]:
+    query = "SELECT owner_username, symbol, display_name, created_at FROM user_monitored_stock"
+    parameters: list[str] = []
+    if owner_username:
+        query += " WHERE owner_username = ?"
+        parameters.append(owner_username)
+    query += " ORDER BY owner_username, symbol"
+    return list(connection.execute(query, parameters).fetchall())
+
+
+def get_monitored_stocks(db_path: str, owner_username: str | None = None) -> list[sqlite3.Row]:
+    with get_connection(db_path) as connection:
+        return list_monitored_stocks(connection, owner_username)
+
+
+def add_monitored_stock(db_path: str, owner_username: str, symbol: str, display_name: str = "") -> None:
+    with get_connection(db_path) as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO user_monitored_stock (owner_username, symbol, display_name, created_at) VALUES (?, ?, ?, ?)",
+            (owner_username, symbol, display_name, datetime.now(UTC).isoformat()),
+        )
+
+
+def remove_monitored_stock(db_path: str, owner_username: str, symbol: str) -> None:
+    with get_connection(db_path) as connection:
+        connection.execute("DELETE FROM user_monitored_stock WHERE owner_username = ? AND symbol = ?", (owner_username, symbol))
+        connection.execute("DELETE FROM user_stock_snapshot WHERE owner_username = ? AND symbol = ?", (owner_username, symbol))
+        connection.execute("DELETE FROM user_signal_state WHERE owner_username = ? AND symbol = ?", (owner_username, symbol))
+
+
+def get_snapshots(db_path: str, owner_username: str) -> list[sqlite3.Row]:
     with get_connection(db_path) as connection:
         return list(
             connection.execute(
                 """
-                SELECT ms.symbol,
+                SELECT ms.owner_username,
+                       ms.symbol,
                        COALESCE(ss.display_name, ms.display_name, '') AS display_name,
                        ss.latest_price,
                        ss.ma_250,
@@ -256,26 +624,33 @@ def get_snapshots(db_path: str) -> list[sqlite3.Row]:
                        ss.ma_60w,
                        ss.boll_mid,
                        ss.dividend_yield,
+                       ss.quant_probability,
+                       ss.quant_model_breakdown,
                        ss.trigger_state,
                        ss.trigger_detail,
                        ss.updated_at
-                FROM monitored_stock ms
-                LEFT JOIN stock_snapshot ss ON ms.symbol = ss.symbol
+                FROM user_monitored_stock ms
+                LEFT JOIN user_stock_snapshot ss
+                  ON ms.owner_username = ss.owner_username AND ms.symbol = ss.symbol
+                WHERE ms.owner_username = ?
                 ORDER BY ms.symbol
-                """
+                """,
+                (owner_username,),
             ).fetchall()
         )
 
 
-def get_snapshot(db_path: str, symbol: str) -> sqlite3.Row | None:
+def get_snapshot(db_path: str, owner_username: str, symbol: str) -> sqlite3.Row | None:
     with get_connection(db_path) as connection:
         return connection.execute(
-            "SELECT * FROM stock_snapshot WHERE symbol = ?", (symbol,)
+            "SELECT * FROM user_stock_snapshot WHERE owner_username = ? AND symbol = ?",
+            (owner_username, symbol),
         ).fetchone()
 
 
 def upsert_snapshot(
     db_path: str,
+    owner_username: str,
     symbol: str,
     display_name: str,
     latest_price: float,
@@ -284,6 +659,8 @@ def upsert_snapshot(
     ma_60w: float,
     boll_mid: float,
     dividend_yield: float,
+    quant_probability: float,
+    quant_model_breakdown: str,
     trigger_state: str,
     trigger_detail: str,
     updated_at: str,
@@ -291,12 +668,13 @@ def upsert_snapshot(
     with get_connection(db_path) as connection:
         connection.execute(
             """
-            INSERT INTO stock_snapshot (
-                symbol, display_name, latest_price, ma_250, ma_30w, ma_60w, boll_mid,
-                dividend_yield, trigger_state, trigger_detail, updated_at
+            INSERT INTO user_stock_snapshot (
+                owner_username, symbol, display_name, latest_price, ma_250, ma_30w, ma_60w,
+                boll_mid, dividend_yield, quant_probability, quant_model_breakdown,
+                trigger_state, trigger_detail, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(symbol) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(owner_username, symbol) DO UPDATE SET
                 display_name = excluded.display_name,
                 latest_price = excluded.latest_price,
                 ma_250 = excluded.ma_250,
@@ -304,11 +682,14 @@ def upsert_snapshot(
                 ma_60w = excluded.ma_60w,
                 boll_mid = excluded.boll_mid,
                 dividend_yield = excluded.dividend_yield,
+                quant_probability = excluded.quant_probability,
+                quant_model_breakdown = excluded.quant_model_breakdown,
                 trigger_state = excluded.trigger_state,
                 trigger_detail = excluded.trigger_detail,
                 updated_at = excluded.updated_at
             """,
             (
+                owner_username,
                 symbol,
                 display_name,
                 latest_price,
@@ -317,6 +698,8 @@ def upsert_snapshot(
                 ma_60w,
                 boll_mid,
                 dividend_yield,
+                quant_probability,
+                quant_model_breakdown,
                 trigger_state,
                 trigger_detail,
                 updated_at,
@@ -326,6 +709,7 @@ def upsert_snapshot(
 
 def add_alert_history(
     db_path: str,
+    owner_username: str,
     symbol: str,
     display_name: str,
     trigger_type: str,
@@ -338,13 +722,14 @@ def add_alert_history(
     with get_connection(db_path) as connection:
         connection.execute(
             """
-            INSERT INTO alert_history (
-                symbol, display_name, trigger_type, current_price, indicator_values,
+            INSERT INTO user_alert_history (
+                owner_username, symbol, display_name, trigger_type, current_price, indicator_values,
                 email_status, email_error, triggered_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                owner_username,
                 symbol,
                 display_name,
                 trigger_type,
@@ -359,22 +744,22 @@ def add_alert_history(
 
 def get_alert_history(
     db_path: str,
+    owner_username: str,
     symbol: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     days: int = 90,
 ) -> list[sqlite3.Row]:
-    """List recent alerts with optional symbol and date filters."""
-
     start = date_from or (datetime.now(UTC).date() - timedelta(days=days))
     end = date_to or datetime.now(UTC).date()
     query = """
-        SELECT id, symbol, display_name, trigger_type, current_price, indicator_values,
+        SELECT id, owner_username, symbol, display_name, trigger_type, current_price, indicator_values,
                email_status, email_error, triggered_at, read_at
-        FROM alert_history
-        WHERE date(triggered_at) BETWEEN ? AND ?
+        FROM user_alert_history
+        WHERE owner_username = ?
+          AND date(triggered_at) BETWEEN ? AND ?
     """
-    parameters: list[str] = [start.isoformat(), end.isoformat()]
+    parameters: list[str] = [owner_username, start.isoformat(), end.isoformat()]
     if symbol:
         query += " AND symbol = ?"
         parameters.append(symbol)
@@ -383,40 +768,42 @@ def get_alert_history(
         return list(connection.execute(query, parameters).fetchall())
 
 
-def get_unread_alerts(db_path: str) -> list[sqlite3.Row]:
+def get_unread_alerts(db_path: str, owner_username: str) -> list[sqlite3.Row]:
     with get_connection(db_path) as connection:
         return list(
             connection.execute(
                 """
-                SELECT id, symbol, display_name, trigger_type, current_price, indicator_values,
+                SELECT id, owner_username, symbol, display_name, trigger_type, current_price, indicator_values,
                        email_status, triggered_at
-                FROM alert_history
-                WHERE read_at IS NULL
+                FROM user_alert_history
+                WHERE owner_username = ? AND read_at IS NULL
                 ORDER BY triggered_at DESC
                 LIMIT 5
-                """
+                """,
+                (owner_username,),
             ).fetchall()
         )
 
 
-def mark_alert_as_read(db_path: str, alert_id: int) -> None:
+def mark_alert_as_read(db_path: str, owner_username: str, alert_id: int) -> None:
     with get_connection(db_path) as connection:
         connection.execute(
-            "UPDATE alert_history SET read_at = ? WHERE id = ?",
-            (datetime.now(UTC).isoformat(), alert_id),
+            "UPDATE user_alert_history SET read_at = ? WHERE owner_username = ? AND id = ?",
+            (datetime.now(UTC).isoformat(), owner_username, alert_id),
         )
 
 
-def get_signal_state(db_path: str, symbol: str, trigger_type: str) -> sqlite3.Row | None:
+def get_signal_state(db_path: str, owner_username: str, symbol: str, trigger_type: str) -> sqlite3.Row | None:
     with get_connection(db_path) as connection:
         return connection.execute(
-            "SELECT * FROM signal_state WHERE symbol = ? AND trigger_type = ?",
-            (symbol, trigger_type),
+            "SELECT * FROM user_signal_state WHERE owner_username = ? AND symbol = ? AND trigger_type = ?",
+            (owner_username, symbol, trigger_type),
         ).fetchone()
 
 
 def upsert_signal_state(
     db_path: str,
+    owner_username: str,
     symbol: str,
     trigger_type: str,
     consecutive_hits: int,
@@ -431,12 +818,12 @@ def upsert_signal_state(
     with get_connection(db_path) as connection:
         connection.execute(
             """
-            INSERT INTO signal_state (
-                symbol, trigger_type, consecutive_hits, last_condition_met, last_event_marker,
-                pending_delivery, deliver_on, pending_payload, updated_at
+            INSERT INTO user_signal_state (
+                owner_username, symbol, trigger_type, consecutive_hits, last_condition_met,
+                last_event_marker, pending_delivery, deliver_on, pending_payload, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(symbol, trigger_type) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(owner_username, symbol, trigger_type) DO UPDATE SET
                 consecutive_hits = excluded.consecutive_hits,
                 last_condition_met = excluded.last_condition_met,
                 last_event_marker = excluded.last_event_marker,
@@ -446,6 +833,7 @@ def upsert_signal_state(
                 updated_at = excluded.updated_at
             """,
             (
+                owner_username,
                 symbol,
                 trigger_type,
                 consecutive_hits,
@@ -459,48 +847,49 @@ def upsert_signal_state(
         )
 
 
-def list_pending_signal_states(db_path: str, deliver_on_or_before: str) -> list[sqlite3.Row]:
+def list_pending_signal_states(db_path: str, deliver_on_or_before: str, owner_username: str | None = None) -> list[sqlite3.Row]:
+    query = """
+        SELECT *
+        FROM user_signal_state
+        WHERE pending_delivery = 1
+          AND deliver_on IS NOT NULL
+          AND deliver_on <= ?
+    """
+    parameters: list[str] = [deliver_on_or_before]
+    if owner_username:
+        query += " AND owner_username = ?"
+        parameters.append(owner_username)
+    query += " ORDER BY deliver_on, owner_username, symbol"
     with get_connection(db_path) as connection:
-        return list(
-            connection.execute(
-                """
-                SELECT *
-                FROM signal_state
-                WHERE pending_delivery = 1
-                  AND deliver_on IS NOT NULL
-                  AND deliver_on <= ?
-                ORDER BY deliver_on, symbol
-                """,
-                (deliver_on_or_before,),
-            ).fetchall()
-        )
+        return list(connection.execute(query, parameters).fetchall())
 
 
-def get_job_state(db_path: str, job_name: str) -> sqlite3.Row | None:
+def get_job_state(db_path: str, owner_username: str, job_name: str) -> sqlite3.Row | None:
     with get_connection(db_path) as connection:
         return connection.execute(
-            "SELECT * FROM job_state WHERE job_name = ?",
-            (job_name,),
+            "SELECT * FROM user_job_state WHERE owner_username = ? AND job_name = ?",
+            (owner_username, job_name),
         ).fetchone()
 
 
-def set_job_state(db_path: str, job_name: str, marker: str) -> None:
+def set_job_state(db_path: str, owner_username: str, job_name: str, marker: str) -> None:
     updated_at = datetime.now(UTC).isoformat()
     with get_connection(db_path) as connection:
         connection.execute(
             """
-            INSERT INTO job_state (job_name, last_run_marker, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(job_name) DO UPDATE SET
+            INSERT INTO user_job_state (owner_username, job_name, last_run_marker, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(owner_username, job_name) DO UPDATE SET
                 last_run_marker = excluded.last_run_marker,
                 updated_at = excluded.updated_at
             """,
-            (job_name, marker, updated_at),
+            (owner_username, job_name, marker, updated_at),
         )
 
 
 def add_trade_record(
     db_path: str,
+    owner_username: str,
     symbol: str,
     side: str,
     price: float,
@@ -508,54 +897,50 @@ def add_trade_record(
     traded_at: str,
     note: str,
 ) -> None:
-    """Persist a manual buy or sell record entered by the user."""
-
     created_at = datetime.now(UTC).isoformat()
     with get_connection(db_path) as connection:
         connection.execute(
             """
-            INSERT INTO trade_record (symbol, side, price, quantity, traded_at, note, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO user_trade_record (owner_username, symbol, side, price, quantity, traded_at, note, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (symbol, side, price, quantity, traded_at, note, created_at),
+            (owner_username, symbol, side, price, quantity, traded_at, note, created_at),
         )
 
 
-def list_trade_records(db_path: str, symbol: str | None = None) -> list[sqlite3.Row]:
-    """Load trade journal entries, newest first by trade time."""
-
+def list_trade_records(db_path: str, owner_username: str, symbol: str | None = None) -> list[sqlite3.Row]:
     query = """
-        SELECT id, symbol, side, price, quantity, traded_at, note, created_at
-        FROM trade_record
+        SELECT id, owner_username, symbol, side, price, quantity, traded_at, note, created_at
+        FROM user_trade_record
+        WHERE owner_username = ?
     """
-    parameters: list[str] = []
+    parameters: list[str] = [owner_username]
     if symbol:
-        query += " WHERE symbol = ?"
+        query += " AND symbol = ?"
         parameters.append(symbol)
     query += " ORDER BY traded_at DESC, id DESC"
     with get_connection(db_path) as connection:
         return list(connection.execute(query, parameters).fetchall())
 
 
-def list_trade_records_for_symbol(db_path: str, symbol: str) -> list[sqlite3.Row]:
-    """Load trade records oldest first for position reconstruction."""
-
+def list_trade_records_for_symbol(db_path: str, owner_username: str, symbol: str) -> list[sqlite3.Row]:
     with get_connection(db_path) as connection:
         return list(
             connection.execute(
                 """
-                SELECT id, symbol, side, price, quantity, traded_at, note, created_at
-                FROM trade_record
-                WHERE symbol = ?
+                SELECT id, owner_username, symbol, side, price, quantity, traded_at, note, created_at
+                FROM user_trade_record
+                WHERE owner_username = ? AND symbol = ?
                 ORDER BY traded_at ASC, id ASC
                 """,
-                (symbol,),
+                (owner_username, symbol),
             ).fetchall()
         )
 
 
 def add_trade_analysis(
     db_path: str,
+    owner_username: str,
     symbol: str,
     analysis_provider: str,
     model_name: str,
@@ -565,19 +950,18 @@ def add_trade_analysis(
     status: str,
     error_message: str | None,
 ) -> None:
-    """Store every LLM or rule-based trade analysis result for auditability."""
-
     created_at = datetime.now(UTC).isoformat()
     with get_connection(db_path) as connection:
         connection.execute(
             """
-            INSERT INTO trade_analysis (
-                symbol, analysis_provider, model_name, position_summary, market_snapshot,
+            INSERT INTO user_trade_analysis (
+                owner_username, symbol, analysis_provider, model_name, position_summary, market_snapshot,
                 analysis_json, status, error_message, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                owner_username,
                 symbol,
                 analysis_provider,
                 model_name,
@@ -591,17 +975,16 @@ def add_trade_analysis(
         )
 
 
-def get_latest_trade_analysis(db_path: str, symbol: str | None = None) -> sqlite3.Row | None:
-    """Return the latest saved trade analysis, optionally for one symbol only."""
-
+def get_latest_trade_analysis(db_path: str, owner_username: str, symbol: str | None = None) -> sqlite3.Row | None:
     query = """
-        SELECT id, symbol, analysis_provider, model_name, position_summary, market_snapshot,
+        SELECT id, owner_username, symbol, analysis_provider, model_name, position_summary, market_snapshot,
                analysis_json, status, error_message, created_at
-        FROM trade_analysis
+        FROM user_trade_analysis
+        WHERE owner_username = ?
     """
-    parameters: list[str] = []
+    parameters: list[str] = [owner_username]
     if symbol:
-        query += " WHERE symbol = ?"
+        query += " AND symbol = ?"
         parameters.append(symbol)
     query += " ORDER BY created_at DESC, id DESC LIMIT 1"
     with get_connection(db_path) as connection:

@@ -5,10 +5,11 @@ from __future__ import annotations
 这是业务核心模块。
 如果你只想理解“系统到底怎么判断要不要提醒”，优先看：
 - `run_cycle`：整轮监控的调度入口
-- `_refresh_open_session`：盘中 30 秒刷新逻辑
+- `_refresh_open_session`：盘中刷新逻辑
 - `_prepare_dividend_alerts`：开盘前股息率提醒
 - `_prepare_weekly_cross_alerts`：周线交叉次日提醒
-- `_process_intraday_signal`：连续 2 次触发才真正报警
+- `_process_intraday_signal`：按不同信号类型决定是否真正触发告警
+- `build_snapshot`：统一计算技术指标与量化综合评分
 """
 
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from .database import (
     get_email_settings,
     get_job_state,
     get_monitored_stocks,
+    get_quant_settings,
     get_signal_state,
     list_pending_signal_states,
     set_job_state,
@@ -34,6 +36,7 @@ from .mailer import build_alert_email_body, send_message
 from .market_hours import MarketStatus, TradeCalendar, get_market_status
 from .providers import load_provider
 from .providers.base import PriceBar, Quote
+from .quant import DEFAULT_QUANT_MODELS, build_quant_signal, normalize_selected_models
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,8 @@ class SnapshotComputation:
     prev_ma_60w: float
     boll_mid: float
     dividend_yield: float
+    quant_probability: float
+    quant_model_breakdown: str
     trigger_state: str
     trigger_detail: str
     triggered_labels: tuple[str, ...]
@@ -56,18 +61,10 @@ class SnapshotComputation:
 
 
 def validate_stock_symbol(symbol: str) -> bool:
-    """Validate the simplified A-share symbol format used by this app."""
     return len(symbol) == 6 and symbol.isdigit()
 
 
 def parse_stock_symbols(raw_text: str) -> tuple[list[str], list[str]]:
-    """Split pasted text into valid and invalid stock codes.
-
-    页面支持用户一次粘贴多只股票，所以这里会同时处理：
-    - 换行
-    - 中英文逗号
-    - 空格和分号
-    """
     candidates = [item.strip() for item in re.split(r"[\s,，;；]+", raw_text) if item.strip()]
     valid_symbols: list[str] = []
     invalid_symbols: list[str] = []
@@ -81,7 +78,6 @@ def parse_stock_symbols(raw_text: str) -> tuple[list[str], list[str]]:
 
 
 def calculate_simple_moving_average(values: list[float], window: int) -> float:
-    """Return a simple moving average for the last `window` values."""
     if len(values) < window:
         return 0.0
     return round(sum(values[-window:]) / window, 2)
@@ -106,12 +102,9 @@ def compute_snapshot_metrics(
     daily_bars: list[PriceBar],
     weekly_bars: list[PriceBar],
     dividend_yield: float,
+    quant_probability: float,
+    quant_model_breakdown: str,
 ) -> SnapshotComputation:
-    """Build a one-symbol monitoring snapshot from quote and history data.
-
-    这里把不同来源的数据压缩成前端和告警都能直接消费的统一结构。
-    """
-
     daily_closes = [item.close_price for item in daily_bars]
     weekly_closes = [item.close_price for item in weekly_bars]
 
@@ -137,7 +130,8 @@ def compute_snapshot_metrics(
     trigger_detail = (
         f"现价 {quote.latest_price:.2f} | 250日线 {ma_250:.2f} | "
         f"30周/60周 {ma_30w:.2f}/{ma_60w:.2f} | "
-        f"BOLL中轨 {boll_mid:.2f} | 股息率 {dividend_yield:.2f}%"
+        f"BOLL中轨 {boll_mid:.2f} | 股息率 {dividend_yield:.2f}% | "
+        f"量化综合盈利概率 {quant_probability:.2f}%"
     )
     return SnapshotComputation(
         symbol=symbol,
@@ -150,6 +144,8 @@ def compute_snapshot_metrics(
         prev_ma_60w=prev_ma_60w,
         boll_mid=boll_mid,
         dividend_yield=dividend_yield,
+        quant_probability=quant_probability,
+        quant_model_breakdown=quant_model_breakdown,
         trigger_state=trigger_state,
         trigger_detail=trigger_detail,
         triggered_labels=tuple(triggered_labels),
@@ -160,8 +156,8 @@ def compute_snapshot_metrics(
 
 class StockMonitor:
     """Coordinate time rules, market data refresh, alerts and chart payloads."""
+
     def __init__(self, settings: AppSettings) -> None:
-        """Prepare provider, trade calendar and runtime state."""
         self.settings = settings
         self.provider = load_provider(settings.provider_name)
         try:
@@ -186,54 +182,106 @@ class StockMonitor:
             now=now,
         )
 
-    def build_chart_payload(self, symbol: str) -> dict[str, Any]:
-        daily_bars = self.provider.get_daily_bars(symbol, limit=self.settings.detail_chart_days)
-        labels = [item.traded_on.isoformat() for item in daily_bars]
-        closes = [item.close_price for item in daily_bars]
-        ma_250_series = [
-            round(sum(closes[max(0, index - 249) : index + 1]) / min(index + 1, 250), 2)
-            if index >= 249
-            else None
-            for index in range(len(closes))
-        ]
-        boll_mid_series = [
-            round(sum(closes[max(0, index - 19) : index + 1]) / min(index + 1, 20), 2)
-            if index >= 19
-            else None
-            for index in range(len(closes))
-        ]
+    def build_chart_payload(self, symbol: str) -> dict[str, list[float | str | None]]:
+        daily_bars = self.provider.get_daily_bars(symbol, limit=max(self.settings.detail_chart_days, 20))
+        closes = [float(item.close_price) for item in daily_bars]
+        labels = [item.traded_on.isoformat() for item in daily_bars[-self.settings.detail_chart_days :]]
+        close_series = closes[-self.settings.detail_chart_days :]
+        ma_250_series: list[float | None] = []
+        boll_mid_series: list[float | None] = []
+        for index in range(len(daily_bars)):
+            ma_250_series.append(
+                calculate_simple_moving_average(closes[: index + 1], 250) if index >= 249 else None
+            )
+            boll_mid_series.append(
+                calculate_simple_moving_average(closes[: index + 1], 20) if index >= 19 else None
+            )
         return {
             "labels": labels,
-            "close": closes,
-            "ma250": ma_250_series,
-            "bollMid": boll_mid_series,
+            "close": close_series,
+            "ma250": ma_250_series[-self.settings.detail_chart_days :],
+            "bollMid": boll_mid_series[-self.settings.detail_chart_days :],
         }
 
-    def build_snapshot(self, symbol: str) -> SnapshotComputation:
+    def build_snapshot(
+        self,
+        symbol: str,
+        selected_models: list[str] | tuple[str, ...] | None = None,
+    ) -> SnapshotComputation:
+        """Build a snapshot for one symbol.
+
+        盘中优先使用实时价格；如果盘后或接口短暂返回 0，
+        就退回到最近一个日线收盘价，这样新增股票后在非交易时段也能立刻看到最近可用数据。
+        """
+
         quote = self.provider.get_quote(symbol)
         daily_bars = self.provider.get_daily_bars(symbol)
         weekly_bars = self.provider.get_weekly_bars(symbol)
-        dividend_yield = self.provider.get_trailing_dividend_yield(symbol, quote.latest_price)
+
+        effective_quote = quote
+        if quote.latest_price <= 0 and daily_bars:
+            latest_daily_bar = daily_bars[-1]
+            effective_quote = Quote(
+                symbol=quote.symbol,
+                name=quote.name,
+                latest_price=latest_daily_bar.close_price,
+                updated_at=datetime.combine(
+                    latest_daily_bar.traded_on,
+                    datetime.min.time(),
+                    tzinfo=quote.updated_at.tzinfo,
+                ),
+            )
+
+        dividend_yield = self.provider.get_trailing_dividend_yield(symbol, effective_quote.latest_price)
+        quant_signal = build_quant_signal(
+            latest_price=effective_quote.latest_price,
+            ma_250=calculate_simple_moving_average([item.close_price for item in daily_bars], 250),
+            boll_mid=calculate_simple_moving_average([item.close_price for item in daily_bars], 20),
+            ma_30w=calculate_simple_moving_average([item.close_price for item in weekly_bars], 30),
+            ma_60w=calculate_simple_moving_average([item.close_price for item in weekly_bars], 60),
+            dividend_yield=dividend_yield,
+            daily_bars=daily_bars,
+            weekly_bars=weekly_bars,
+            selected_models=normalize_selected_models(selected_models),
+        )
         return compute_snapshot_metrics(
             symbol=symbol,
-            quote=quote,
+            quote=effective_quote,
             daily_bars=daily_bars,
             weekly_bars=weekly_bars,
             dividend_yield=dividend_yield,
+            quant_probability=quant_signal.probability,
+            quant_model_breakdown=quant_signal.breakdown_json,
         )
 
-    def run_cycle(self, now: datetime | None = None) -> None:
-        """Execute one monitoring cycle.
+    def refresh_symbol_snapshot(self, owner_username: str, symbol: str) -> SnapshotComputation:
+        settings = get_quant_settings(self.settings.db_path, owner_username)
+        selected_models = json.loads(settings["selected_models"] or "[]")
+        snapshot = self.build_snapshot(symbol, selected_models=selected_models)
+        upsert_snapshot(
+            db_path=self.settings.db_path,
+            owner_username=owner_username,
+            symbol=snapshot.symbol,
+            display_name=snapshot.display_name,
+            latest_price=snapshot.latest_price,
+            ma_250=snapshot.ma_250,
+            ma_30w=snapshot.ma_30w,
+            ma_60w=snapshot.ma_60w,
+            boll_mid=snapshot.boll_mid,
+            dividend_yield=snapshot.dividend_yield,
+            quant_probability=snapshot.quant_probability,
+            quant_model_breakdown=snapshot.quant_model_breakdown,
+            trigger_state=snapshot.trigger_state,
+            trigger_detail=snapshot.trigger_detail,
+            updated_at=snapshot.updated_at.isoformat(),
+        )
+        self.last_refresh_at = datetime.now(UTC)
+        return snapshot
 
-        一轮 cycle 会根据当前时间进入不同分支：
-        - 9:25~9:30：准备股息率提醒
-        - 9:30~15:00：刷新行情并检查盘中触发
-        - 收盘后且为周最后交易日：准备周线交叉提醒
-        """
+    def run_cycle(self, now: datetime | None = None) -> None:
         if not self._lock.acquire(blocking=False):
             return
         try:
-            # 先判定当前时间处于哪个业务窗口，再决定要做哪些事。
             status = self.get_market_status(now)
             trade_date = status.current_time.date()
             if status.is_pre_open_window:
@@ -243,21 +291,28 @@ class StockMonitor:
                 self._refresh_open_session(trade_date)
             if status.is_post_close and self.trade_calendar.is_last_trading_day_of_week(trade_date):
                 self._prepare_weekly_cross_alerts(trade_date)
-        except Exception as exc:  # pragma: no cover - runtime guard
+        except Exception as exc:  # pragma: no cover
             self.last_error_message = str(exc)
         finally:
             self._lock.release()
 
     def _refresh_open_session(self, trade_date: date) -> None:
-        """Refresh snapshots and evaluate intraday alerts during market hours."""
-        email_settings = get_email_settings(self.settings.db_path)
+        snapshot_cache: dict[tuple[str, tuple[str, ...]], SnapshotComputation] = {}
         for stock in get_monitored_stocks(self.settings.db_path):
+            owner_username = stock["owner_username"]
             symbol = stock["symbol"]
             try:
-                # 先拿到统一快照，再分别喂给快照表、告警逻辑、前端页面。
-                snapshot = self.build_snapshot(symbol)
+                email_settings = get_email_settings(self.settings.db_path, owner_username)
+                quant_settings = get_quant_settings(self.settings.db_path, owner_username)
+                selected_models = tuple(json.loads(quant_settings["selected_models"] or "[]")) or DEFAULT_QUANT_MODELS
+                cache_key = (symbol, tuple(selected_models))
+                snapshot = snapshot_cache.get(cache_key)
+                if snapshot is None:
+                    snapshot = self.build_snapshot(symbol, selected_models=selected_models)
+                    snapshot_cache[cache_key] = snapshot
                 upsert_snapshot(
                     db_path=self.settings.db_path,
+                    owner_username=owner_username,
                     symbol=snapshot.symbol,
                     display_name=snapshot.display_name,
                     latest_price=snapshot.latest_price,
@@ -266,11 +321,14 @@ class StockMonitor:
                     ma_60w=snapshot.ma_60w,
                     boll_mid=snapshot.boll_mid,
                     dividend_yield=snapshot.dividend_yield,
+                    quant_probability=snapshot.quant_probability,
+                    quant_model_breakdown=snapshot.quant_model_breakdown,
                     trigger_state=snapshot.trigger_state,
                     trigger_detail=snapshot.trigger_detail,
                     updated_at=snapshot.updated_at.isoformat(),
                 )
                 self._process_intraday_signal(
+                    owner_username=owner_username,
                     symbol=symbol,
                     display_name=snapshot.display_name,
                     trigger_type="250日线",
@@ -283,8 +341,10 @@ class StockMonitor:
                         "latest_price": snapshot.latest_price,
                     },
                     email_settings=email_settings,
+                    required_hits=2,
                 )
                 self._process_intraday_signal(
+                    owner_username=owner_username,
                     symbol=symbol,
                     display_name=snapshot.display_name,
                     trigger_type="BOLL中轨",
@@ -297,14 +357,35 @@ class StockMonitor:
                         "latest_price": snapshot.latest_price,
                     },
                     email_settings=email_settings,
+                    required_hits=2,
                 )
+                threshold = float(quant_settings["probability_threshold"])
+                if bool(quant_settings["enabled"]):
+                    self._process_intraday_signal(
+                        owner_username=owner_username,
+                        symbol=symbol,
+                        display_name=snapshot.display_name,
+                        trigger_type="量化盈利概率",
+                        trade_marker=f"{trade_date.isoformat()}-{datetime.now(UTC).hour}",
+                        condition_met=bool(snapshot.quant_probability >= threshold),
+                        detail=f"{snapshot.trigger_detail} | 量化阈值 {threshold:.2f}%",
+                        current_price=snapshot.latest_price,
+                        indicator_values={
+                            "quant_probability": snapshot.quant_probability,
+                            "probability_threshold": threshold,
+                            "selected_models": ", ".join(selected_models),
+                        },
+                        email_settings=email_settings,
+                        required_hits=1,
+                    )
                 self.last_refresh_at = datetime.now(UTC)
                 self.last_error_message = None
             except Exception as exc:
-                self.last_error_message = f"{symbol} 刷新失败：{exc}"
+                self.last_error_message = f"{owner_username}/{symbol} 刷新失败：{exc}"
 
     def _process_intraday_signal(
         self,
+        owner_username: str,
         symbol: str,
         display_name: str,
         trigger_type: str,
@@ -314,14 +395,9 @@ class StockMonitor:
         current_price: float,
         indicator_values: dict[str, float | str],
         email_settings: Any,
+        required_hits: int = 2,
     ) -> None:
-        """Apply the “two consecutive hits” rule for intraday alerts.
-
-        需求里要求 250 日线和 BOLL 中轨要连续两次刷新都满足，才算真正触发。
-        因此这里会把每只股票、每种信号的连续命中次数持久化到数据库。
-        """
-
-        state = get_signal_state(self.settings.db_path, symbol, trigger_type)
+        state = get_signal_state(self.settings.db_path, owner_username, symbol, trigger_type)
         hits = 1 if condition_met and state is None else 0
         if condition_met and state is not None:
             hits = state["consecutive_hits"] + 1
@@ -329,9 +405,10 @@ class StockMonitor:
             hits = 0
 
         last_event_marker = state["last_event_marker"] if state else None
-        should_alert = condition_met and hits >= 2 and last_event_marker != trade_marker
+        should_alert = condition_met and hits >= required_hits and last_event_marker != trade_marker
         if should_alert:
             self._emit_alert(
+                owner_username=owner_username,
                 symbol=symbol,
                 display_name=display_name,
                 trigger_type=trigger_type,
@@ -345,6 +422,7 @@ class StockMonitor:
 
         upsert_signal_state(
             db_path=self.settings.db_path,
+            owner_username=owner_username,
             symbol=symbol,
             trigger_type=trigger_type,
             consecutive_hits=hits,
@@ -356,89 +434,101 @@ class StockMonitor:
         )
 
     def _prepare_dividend_alerts(self, trade_date: date) -> None:
-        """Prepare dividend-yield alerts before the market opens."""
         marker = trade_date.isoformat()
-        job_state = get_job_state(self.settings.db_path, "dividend_prep")
-        if job_state and job_state["last_run_marker"] == marker:
-            return
-
-        for stock in get_monitored_stocks(self.settings.db_path):
-            snapshot = self.build_snapshot(stock["symbol"])
-            state = get_signal_state(self.settings.db_path, stock["symbol"], "股息率")
-            if snapshot.dividend_yield >= 4.5 and (state is None or state["last_event_marker"] != marker):
-                payload = self._build_pending_payload(
-                    symbol=snapshot.symbol,
-                    display_name=snapshot.display_name,
-                    trigger_type="股息率",
-                    current_price=snapshot.latest_price,
-                    detail=snapshot.trigger_detail,
-                    indicator_values={
-                        "dividend_yield": snapshot.dividend_yield,
-                        "latest_price": snapshot.latest_price,
-                    },
-                    event_marker=marker,
-                )
-                upsert_signal_state(
-                    db_path=self.settings.db_path,
-                    symbol=snapshot.symbol,
-                    trigger_type="股息率",
-                    consecutive_hits=1,
-                    last_condition_met=True,
-                    last_event_marker=state["last_event_marker"] if state else None,
-                    pending_delivery=True,
-                    deliver_on=marker,
-                    pending_payload=payload,
-                )
-        set_job_state(self.settings.db_path, "dividend_prep", marker)
+        snapshot_cache: dict[str, SnapshotComputation] = {}
+        owners = sorted({row["owner_username"] for row in get_monitored_stocks(self.settings.db_path)})
+        for owner_username in owners:
+            job_state = get_job_state(self.settings.db_path, owner_username, "dividend_prep")
+            if job_state and job_state["last_run_marker"] == marker:
+                continue
+            for stock in get_monitored_stocks(self.settings.db_path, owner_username):
+                snapshot = snapshot_cache.get(stock["symbol"])
+                if snapshot is None:
+                    snapshot = self.build_snapshot(stock["symbol"])
+                    snapshot_cache[stock["symbol"]] = snapshot
+                state = get_signal_state(self.settings.db_path, owner_username, stock["symbol"], "股息率")
+                if snapshot.dividend_yield >= 4.5 and (state is None or state["last_event_marker"] != marker):
+                    payload = self._build_pending_payload(
+                        owner_username=owner_username,
+                        symbol=snapshot.symbol,
+                        display_name=snapshot.display_name,
+                        trigger_type="股息率",
+                        current_price=snapshot.latest_price,
+                        detail=snapshot.trigger_detail,
+                        indicator_values={
+                            "dividend_yield": snapshot.dividend_yield,
+                            "latest_price": snapshot.latest_price,
+                        },
+                        event_marker=marker,
+                    )
+                    upsert_signal_state(
+                        db_path=self.settings.db_path,
+                        owner_username=owner_username,
+                        symbol=snapshot.symbol,
+                        trigger_type="股息率",
+                        consecutive_hits=1,
+                        last_condition_met=True,
+                        last_event_marker=state["last_event_marker"] if state else None,
+                        pending_delivery=True,
+                        deliver_on=marker,
+                        pending_payload=payload,
+                    )
+            set_job_state(self.settings.db_path, owner_username, "dividend_prep", marker)
 
     def _prepare_weekly_cross_alerts(self, trade_date: date) -> None:
-        """Prepare weekly MA cross alerts for delivery on next trading day."""
         marker = trade_date.isoformat()
-        job_state = get_job_state(self.settings.db_path, "weekly_cross_prep")
-        if job_state and job_state["last_run_marker"] == marker:
-            return
-
         next_trade_day = self.trade_calendar.next_trading_day(trade_date)
         if next_trade_day is None:
             return
-        for stock in get_monitored_stocks(self.settings.db_path):
-            snapshot = self.build_snapshot(stock["symbol"])
-            state = get_signal_state(self.settings.db_path, stock["symbol"], "30周/60周均线")
-            if snapshot.weekly_crossed and (state is None or state["last_event_marker"] != marker):
-                payload = self._build_pending_payload(
-                    symbol=snapshot.symbol,
-                    display_name=snapshot.display_name,
-                    trigger_type="30周/60周均线",
-                    current_price=snapshot.latest_price,
-                    detail=snapshot.trigger_detail,
-                    indicator_values={
-                        "ma_30w": snapshot.ma_30w,
-                        "ma_60w": snapshot.ma_60w,
-                    },
-                    event_marker=marker,
-                )
-                upsert_signal_state(
-                    db_path=self.settings.db_path,
-                    symbol=snapshot.symbol,
-                    trigger_type="30周/60周均线",
-                    consecutive_hits=1,
-                    last_condition_met=True,
-                    last_event_marker=state["last_event_marker"] if state else None,
-                    pending_delivery=True,
-                    deliver_on=next_trade_day.isoformat(),
-                    pending_payload=payload,
-                )
-        set_job_state(self.settings.db_path, "weekly_cross_prep", marker)
+        snapshot_cache: dict[str, SnapshotComputation] = {}
+        owners = sorted({row["owner_username"] for row in get_monitored_stocks(self.settings.db_path)})
+        for owner_username in owners:
+            job_state = get_job_state(self.settings.db_path, owner_username, "weekly_cross_prep")
+            if job_state and job_state["last_run_marker"] == marker:
+                continue
+            for stock in get_monitored_stocks(self.settings.db_path, owner_username):
+                snapshot = snapshot_cache.get(stock["symbol"])
+                if snapshot is None:
+                    snapshot = self.build_snapshot(stock["symbol"])
+                    snapshot_cache[stock["symbol"]] = snapshot
+                state = get_signal_state(self.settings.db_path, owner_username, stock["symbol"], "30周/60周均线")
+                if snapshot.weekly_crossed and (state is None or state["last_event_marker"] != marker):
+                    payload = self._build_pending_payload(
+                        owner_username=owner_username,
+                        symbol=snapshot.symbol,
+                        display_name=snapshot.display_name,
+                        trigger_type="30周/60周均线",
+                        current_price=snapshot.latest_price,
+                        detail=snapshot.trigger_detail,
+                        indicator_values={
+                            "ma_30w": snapshot.ma_30w,
+                            "ma_60w": snapshot.ma_60w,
+                        },
+                        event_marker=marker,
+                    )
+                    upsert_signal_state(
+                        db_path=self.settings.db_path,
+                        owner_username=owner_username,
+                        symbol=snapshot.symbol,
+                        trigger_type="30周/60周均线",
+                        consecutive_hits=1,
+                        last_condition_met=True,
+                        last_event_marker=state["last_event_marker"] if state else None,
+                        pending_delivery=True,
+                        deliver_on=next_trade_day.isoformat(),
+                        pending_payload=payload,
+                    )
+            set_job_state(self.settings.db_path, owner_username, "weekly_cross_prep", marker)
 
     def _deliver_pending_alerts(self, trade_date: date) -> None:
-        """Deliver alerts that were prepared earlier but should fire today."""
-        email_settings = get_email_settings(self.settings.db_path)
         for state in list_pending_signal_states(self.settings.db_path, trade_date.isoformat()):
             payload = json.loads(state["pending_payload"] or "{}")
             if not payload:
                 continue
+            email_settings = get_email_settings(self.settings.db_path, state["owner_username"])
             triggered_at = datetime.now(UTC).isoformat()
             self._emit_alert(
+                owner_username=state["owner_username"],
                 symbol=payload["symbol"],
                 display_name=payload["display_name"],
                 trigger_type=payload["trigger_type"],
@@ -450,6 +540,7 @@ class StockMonitor:
             )
             upsert_signal_state(
                 db_path=self.settings.db_path,
+                owner_username=state["owner_username"],
                 symbol=state["symbol"],
                 trigger_type=state["trigger_type"],
                 consecutive_hits=state["consecutive_hits"],
@@ -462,6 +553,7 @@ class StockMonitor:
 
     def _emit_alert(
         self,
+        owner_username: str,
         symbol: str,
         display_name: str,
         trigger_type: str,
@@ -471,8 +563,6 @@ class StockMonitor:
         email_settings: Any,
         triggered_at: str,
     ) -> None:
-        """Persist one alert event and try to send its email notification."""
-
         payload = {
             "symbol": symbol,
             "display_name": display_name,
@@ -489,6 +579,7 @@ class StockMonitor:
         )
         add_alert_history(
             db_path=self.settings.db_path,
+            owner_username=owner_username,
             symbol=symbol,
             display_name=display_name,
             trigger_type=trigger_type,
@@ -501,6 +592,7 @@ class StockMonitor:
 
     @staticmethod
     def _build_pending_payload(
+        owner_username: str,
         symbol: str,
         display_name: str,
         trigger_type: str,
@@ -510,6 +602,7 @@ class StockMonitor:
         event_marker: str,
     ) -> dict[str, Any]:
         return {
+            "owner_username": owner_username,
             "symbol": symbol,
             "display_name": display_name,
             "trigger_type": trigger_type,

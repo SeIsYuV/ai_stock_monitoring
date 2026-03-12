@@ -5,6 +5,7 @@
     <h1>股票详情：{{ symbol }}</h1>
     {% if snapshot %}
     <p>{{ snapshot['display_name'] }} | 最新价 {{ '%.2f'|format(snapshot['latest_price']) if snapshot['latest_price'] is not none else '-' }}</p>
+    <p>量化综合盈利概率：{{ '%.2f%%'|format(snapshot['quant_probability']) if snapshot['quant_probability'] is not none else '-' }}</p>
     <p>{{ snapshot['trigger_detail'] }}</p>
     {% endif %}
 </section>

@@ -3,6 +3,7 @@
 {% block content %}
 <section class="card" style="margin-bottom: 16px;">
     <h1>历史提醒</h1>
+    <p>这里只展示账号 {{ current_user['username'] }} 的提醒历史。</p>
     <form method="get" action="/history">
         <label>股票代码</label>
         <input type="text" name="symbol" maxlength="6" value="{{ symbol }}" placeholder="例如 600519">
