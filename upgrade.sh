@@ -21,6 +21,8 @@ fi
 
 cd "$PROJECT_DIR"
 
+./prepare_env.sh
+
 # `build --pull` 会尽量获取更新过的 Python 基础镜像，
 # 即使项目源码没变，也能通过这个命令拿到更近的安全补丁。
 docker compose build --pull

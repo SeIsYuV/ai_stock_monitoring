@@ -45,7 +45,7 @@
 
 1. 如需保留一份本地环境文件，可先执行：`./prepare_env.sh`（会在缺失时自动生成 `.env`）
 2. 按需修改 `.env`（尤其是 `OPENAI_API_KEY`、`ASM_PUBLIC_DOMAIN`、`ASM_TLS_EMAIL`）
-3. 直接构建并启动：`docker compose up -d --build`（即使没有 `.env` 也不会再报错）
+3. 直接构建并启动：`docker compose up -d --build`（即使没有 `.env` 也不会再报错，且默认优先使用国内 Docker 镜像源）
 4. 如需 HTTPS，请填写 `ASM_PUBLIC_DOMAIN` 和 `ASM_TLS_EMAIL`，并确保域名已解析到服务器、80/443 端口已放行
 5. 本地直连应用可打开：`http://127.0.0.1:11223`
 6. 外网 HTTPS 应访问：`https://你的域名`，不要再访问 `https://你的域名:11223`
@@ -54,6 +54,9 @@
 
 ## 下载镜像源
 
+- Docker 基础镜像默认改为国内镜像：`swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.12-slim`
+- `Caddy` 代理镜像默认改为国内镜像：`swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/caddy:2`
+- 如果你的服务器对某个镜像源访问不稳定，可以在 `.env` 中自行改 `BASE_IMAGE` 和 `CADDY_IMAGE`
 - Docker 构建安装 Python 依赖时，默认优先使用清华 PyPI 镜像
 - 本地安装依赖时，README 中也默认使用清华 PyPI 镜像命令
 - 如果你后续想换成别的国内镜像，可以在 Docker 构建时覆盖 `PIP_INDEX_URL` 和 `PIP_TRUSTED_HOST`

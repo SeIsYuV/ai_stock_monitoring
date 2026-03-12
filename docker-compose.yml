@@ -1,9 +1,9 @@
-version: "3.9"
-
 services:
   ai-stock-monitoring:
     build:
       context: .
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.12-slim}
     init: true
     container_name: ai-stock-monitoring
     ports:
@@ -34,14 +34,14 @@ services:
       start_period: 20s
 
   caddy:
-    image: caddy:2
+    image: ${CADDY_IMAGE:-swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/caddy:2}
     container_name: ai-stock-monitoring-caddy
     depends_on:
       ai-stock-monitoring:
         condition: service_healthy
     environment:
-      ASM_PUBLIC_DOMAIN: ${ASM_PUBLIC_DOMAIN}
-      ASM_TLS_EMAIL: ${ASM_TLS_EMAIL}
+      ASM_PUBLIC_DOMAIN: ${ASM_PUBLIC_DOMAIN:-}
+      ASM_TLS_EMAIL: ${ASM_TLS_EMAIL:-}
       ASM_PORT: ${ASM_PORT:-11223}
     ports:
       - "80:80"
