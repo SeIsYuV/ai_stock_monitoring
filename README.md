@@ -45,27 +45,29 @@
 
 1. 如需保留一份本地环境文件，可先执行：`./prepare_env.sh`（会在缺失时自动生成 `.env`）
 2. 按需修改 `.env`（尤其是 `OPENAI_API_KEY`、`ASM_PUBLIC_DOMAIN`、`ASM_TLS_EMAIL`）
-3. 直接构建并启动：`docker compose up -d --build`（即使没有 `.env` 也不会再报错，且默认优先使用国内 Docker 镜像源）
+3. 直接构建并启动应用：`docker compose up -d --build`（默认只启动应用本体，不再因为 HTTPS 代理镜像拉取失败而整体报错）
 4. 如需 HTTPS，请填写 `ASM_PUBLIC_DOMAIN` 和 `ASM_TLS_EMAIL`，并确保域名已解析到服务器、80/443 端口已放行
-5. 本地直连应用可打开：`http://127.0.0.1:11223`
-6. 外网 HTTPS 应访问：`https://你的域名`，不要再访问 `https://你的域名:11223`
-7. 数据文件和 Caddy 证书会落在宿主机 `./data/`
-8. 日常升级可执行：`./upgrade.sh`（会先自动生成 `.env`，再备份数据库并重建容器）
+5. 建议先执行一次：`sudo ./docker-enable-mirrors.sh`，为 Docker Daemon 配置国内镜像加速器
+6. 启动 HTTPS 版本：`./start-https.sh` 或 `COMPOSE_PROFILES=https docker compose up -d --build`
+7. 本地直连应用可打开：`http://127.0.0.1:11223`
+8. 外网 HTTPS 应访问：`https://你的域名`，不要再访问 `https://你的域名:11223`
+9. 数据文件和 Caddy 证书会落在宿主机 `./data/`
+10. 日常升级可执行：`./upgrade.sh`（会先自动生成 `.env`，再备份数据库并重建容器）
 
 ## 下载镜像源
 
 - Docker 基础镜像默认改为国内镜像：`swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.12-slim`
-- `Caddy` 代理镜像默认改为国内代理镜像：`dockerproxy.com/library/caddy:2`
+- Python 基础镜像仍默认使用国内源：`swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.12-slim`
+- `Caddy` 默认改回官方镜像 `caddy:2`，并建议通过 Docker Daemon 镜像加速器来解决拉取问题
 - 如果你的服务器对某个镜像源访问不稳定，可以在 `.env` 中自行改 `BASE_IMAGE` 和 `CADDY_IMAGE`
-- 如果你已经给 Docker Daemon 配好了国内镜像加速器，也可以把 `CADDY_IMAGE` 改回 `caddy:2`
 - Docker 构建安装 Python 依赖时，默认优先使用清华 PyPI 镜像
 - 本地安装依赖时，README 中也默认使用清华 PyPI 镜像命令
 - 如果你后续想换成别的国内镜像，可以在 Docker 构建时覆盖 `PIP_INDEX_URL` 和 `PIP_TRUSTED_HOST`
 
 ## HTTPS 说明
 
-- 当前 Docker 方案已内置 `Caddy` 反向代理，自动申请和续期 HTTPS 证书
-- 应用容器仍然运行在内部 `11223` HTTP 端口，由 `Caddy` 对外提供标准 `443` HTTPS
+- 当前 Docker 方案内置可选的 `Caddy` 反向代理，自动申请和续期 HTTPS 证书
+- 应用容器仍然运行在 `11223` HTTP 端口；只有启用 `https` profile 后，`Caddy` 才会对外提供标准 `443` HTTPS
 - 如果你用域名部署，正确访问方式应是：`https://你的域名`
 - 登录自助解封验证码只会发送到当前账号在 Web 页面填写的“收件邮箱”，不会读取任何写死的固定邮箱
 - `https://你的域名:11223` 仍然会失败，因为 `11223` 端口上跑的是纯 HTTP，不是 TLS

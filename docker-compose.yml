@@ -7,7 +7,7 @@ services:
     init: true
     container_name: ai-stock-monitoring
     ports:
-      - "127.0.0.1:${ASM_PORT:-11223}:${ASM_PORT:-11223}"
+      - "${ASM_PORT:-11223}:${ASM_PORT:-11223}"
     environment:
       ASM_HOST: ${ASM_HOST:-0.0.0.0}
       ASM_PORT: ${ASM_PORT:-11223}
@@ -34,7 +34,8 @@ services:
       start_period: 20s
 
   caddy:
-    image: ${CADDY_IMAGE:-dockerproxy.com/library/caddy:2}
+    profiles: ["https"]
+    image: ${CADDY_IMAGE:-caddy:2}
     container_name: ai-stock-monitoring-caddy
     depends_on:
       ai-stock-monitoring:
