@@ -157,6 +157,14 @@ def initialize_database(settings: AppSettings) -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS login_unlock_code (
+                username TEXT PRIMARY KEY,
+                verification_code TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                consumed_at TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_user_alert_history_owner_time
                 ON user_alert_history (owner_username, triggered_at DESC);
             CREATE INDEX IF NOT EXISTS idx_user_trade_record_owner_symbol_time
@@ -578,6 +586,62 @@ def record_failed_login(db_path: str, subject: str, lock_minutes: int = 15) -> s
 def clear_login_guard_state(db_path: str, subject: str) -> None:
     with get_connection(db_path) as connection:
         connection.execute("DELETE FROM login_guard WHERE subject = ?", (subject,))
+
+
+def clear_login_guard_states_for_username(db_path: str, username: str) -> None:
+    """Clear all temporary lock records associated with one account.
+
+    登录锁定是按 `username|ip|user-agent` 这类 subject 维度存储的。
+    邮箱确认解封时，需要把该账号对应的所有 subject 一并清掉。
+    """
+
+    with get_connection(db_path) as connection:
+        connection.execute(
+            "DELETE FROM login_guard WHERE subject LIKE ?",
+            (f"{username.lower()}|%",),
+        )
+
+
+def save_login_unlock_code(
+    db_path: str,
+    username: str,
+    verification_code: str,
+    expires_at: str,
+) -> None:
+    created_at = datetime.now(UTC).isoformat()
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO login_unlock_code (username, verification_code, expires_at, created_at, consumed_at)
+            VALUES (?, ?, ?, ?, NULL)
+            ON CONFLICT(username) DO UPDATE SET
+                verification_code = excluded.verification_code,
+                expires_at = excluded.expires_at,
+                created_at = excluded.created_at,
+                consumed_at = NULL
+            """,
+            (username, verification_code, expires_at, created_at),
+        )
+
+
+def get_login_unlock_code(db_path: str, username: str) -> sqlite3.Row | None:
+    with get_connection(db_path) as connection:
+        return connection.execute(
+            """
+            SELECT username, verification_code, expires_at, created_at, consumed_at
+            FROM login_unlock_code
+            WHERE username = ?
+            """,
+            (username,),
+        ).fetchone()
+
+
+def consume_login_unlock_code(db_path: str, username: str) -> None:
+    with get_connection(db_path) as connection:
+        connection.execute(
+            "UPDATE login_unlock_code SET consumed_at = ? WHERE username = ?",
+            (datetime.now(UTC).isoformat(), username),
+        )
 
 
 def list_monitored_stocks(connection: sqlite3.Connection, owner_username: str | None = None) -> list[sqlite3.Row]:

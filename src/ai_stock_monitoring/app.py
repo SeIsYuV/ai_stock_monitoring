@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 import json
 from pathlib import Path
+import secrets
 import sqlite3
 from urllib.parse import quote
 
@@ -30,12 +31,15 @@ from .database import (
     add_trade_analysis,
     add_trade_record,
     clear_login_guard_state,
+    clear_login_guard_states_for_username,
+    consume_login_unlock_code,
     create_user,
     get_admin_user,
     get_alert_history,
     get_email_settings,
     get_latest_trade_analysis,
     get_login_guard_state,
+    get_login_unlock_code,
     get_quant_settings,
     get_snapshot,
     get_snapshots,
@@ -49,10 +53,11 @@ from .database import (
     record_failed_login,
     remove_monitored_stock,
     save_email_settings,
+    save_login_unlock_code,
     save_quant_settings,
     update_user_password,
 )
-from .mailer import build_trade_analysis_email_body, send_message
+from .mailer import build_login_unlock_email_body, build_trade_analysis_email_body, send_message
 from .monitor import StockMonitor, parse_stock_symbols
 from .quant import available_quant_models, normalize_selected_models
 from .security import hash_password, password_hash_needs_rehash, verify_password
@@ -94,15 +99,17 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         return RedirectResponse(url="/login", status_code=303)
 
     @app.get("/login", response_class=HTMLResponse)
-    async def login_page(request: Request, error: str | None = None) -> Response:
-        return templates.TemplateResponse(
+    async def login_page(
+        request: Request,
+        error: str | None = None,
+        message: str | None = None,
+        unlock_username: str | None = None,
+    ) -> Response:
+        return _render_login_page(
             request,
-            "login.html",
-            {
-                "error": error,
-                "page_title": "登录",
-                "request": request,
-            },
+            error=error,
+            message=message,
+            unlock_username=unlock_username or "",
         )
 
     @app.post("/login")
@@ -120,28 +127,23 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             if locked_until > now:
                 remaining_seconds = max(1, int((locked_until - now).total_seconds()))
                 remaining_minutes = (remaining_seconds + 59) // 60
-                return templates.TemplateResponse(
+                return _render_login_page(
                     request,
-                    "login.html",
-                    {
-                        "error": f"登录失败次数过多，当前访问已被临时锁定，请约 {remaining_minutes} 分钟后再试。",
-                        "page_title": "登录",
-                        "request": request,
-                    },
+                    error=(
+                        f"登录失败次数过多，当前访问已被临时锁定，请约 {remaining_minutes} 分钟后再试。"
+                        " 如已绑定邮箱，可直接在下方发送验证码解封。"
+                    ),
+                    unlock_username=normalized_username,
                     status_code=429,
                 )
 
         user = get_user(resolved_settings.db_path, normalized_username)
         if user is None or not verify_password(password, user["password_hash"]):
             record_failed_login(resolved_settings.db_path, client_subject)
-            return templates.TemplateResponse(
+            return _render_login_page(
                 request,
-                "login.html",
-                {
-                    "error": "用户名或密码错误",
-                    "page_title": "登录",
-                    "request": request,
-                },
+                error="用户名或密码错误",
+                unlock_username=normalized_username,
                 status_code=400,
             )
 
@@ -150,10 +152,10 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             update_user_password(resolved_settings.db_path, user["username"], hash_password(password))
             user = get_user(resolved_settings.db_path, normalized_username)
         if user is None:
-            return templates.TemplateResponse(
+            return _render_login_page(
                 request,
-                "login.html",
-                {"error": "登录态初始化失败，请重试", "page_title": "登录", "request": request},
+                error="登录态初始化失败，请重试",
+                unlock_username=normalized_username,
                 status_code=500,
             )
 
@@ -165,6 +167,107 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             samesite="lax",
         )
         return response
+
+    @app.post("/login/unlock/request")
+    async def request_login_unlock(
+        request: Request,
+        username: str = Form(...),
+    ) -> Response:
+        normalized_username = username.strip()
+        user = get_user(resolved_settings.db_path, normalized_username)
+        if user is None:
+            return _render_login_page(
+                request,
+                error="未找到该账号，无法发送解封验证码。",
+                unlock_username=normalized_username,
+                status_code=404,
+            )
+
+        email_settings = get_email_settings(resolved_settings.db_path, normalized_username)
+        target_email = _resolve_unlock_email_target(email_settings)
+        if not target_email:
+            return _render_login_page(
+                request,
+                error="该账号尚未配置可用邮箱，暂时无法自助解封，请联系管理员。",
+                unlock_username=normalized_username,
+                status_code=400,
+            )
+
+        verification_code = f"{secrets.randbelow(1_000_000):06d}"
+        expires_minutes = 10
+        expires_at = (datetime.now(UTC) + timedelta(minutes=expires_minutes)).isoformat()
+        save_login_unlock_code(
+            resolved_settings.db_path,
+            normalized_username,
+            verification_code,
+            expires_at,
+        )
+        unlock_email_settings = dict(email_settings)
+        unlock_email_settings["recipient_email"] = target_email
+        result = send_message(
+            unlock_email_settings,
+            subject=f"[登录解封] {normalized_username} 验证码",
+            body=build_login_unlock_email_body(normalized_username, verification_code, expires_minutes),
+        )
+        if not result.success:
+            return _render_login_page(
+                request,
+                error=f"解封邮件发送失败：{result.error}",
+                unlock_username=normalized_username,
+                status_code=400,
+            )
+        masked_email = _mask_email_address(target_email)
+        return _render_login_page(
+            request,
+            message=f"验证码已发送到 {masked_email}，请输入验证码完成解封。",
+            unlock_username=normalized_username,
+        )
+
+    @app.post("/login/unlock/confirm")
+    async def confirm_login_unlock(
+        request: Request,
+        username: str = Form(...),
+        verification_code: str = Form(...),
+    ) -> Response:
+        normalized_username = username.strip()
+        unlock_row = get_login_unlock_code(resolved_settings.db_path, normalized_username)
+        if unlock_row is None:
+            return _render_login_page(
+                request,
+                error="请先发送解封验证码。",
+                unlock_username=normalized_username,
+                status_code=400,
+            )
+        if unlock_row["consumed_at"]:
+            return _render_login_page(
+                request,
+                error="该验证码已使用，请重新发送新的验证码。",
+                unlock_username=normalized_username,
+                status_code=400,
+            )
+        expires_at = datetime.fromisoformat(unlock_row["expires_at"])
+        if expires_at <= datetime.now(expires_at.tzinfo):
+            return _render_login_page(
+                request,
+                error="验证码已过期，请重新发送新的验证码。",
+                unlock_username=normalized_username,
+                status_code=400,
+            )
+        if verification_code.strip() != str(unlock_row["verification_code"]):
+            return _render_login_page(
+                request,
+                error="验证码不正确，请重新输入。",
+                unlock_username=normalized_username,
+                status_code=400,
+            )
+
+        clear_login_guard_states_for_username(resolved_settings.db_path, normalized_username)
+        consume_login_unlock_code(resolved_settings.db_path, normalized_username)
+        return _render_login_page(
+            request,
+            message="邮箱验证成功，账号锁定已解除，请重新登录。",
+            unlock_username=normalized_username,
+        )
 
     @app.get("/logout")
     async def logout() -> RedirectResponse:
@@ -708,6 +811,42 @@ def _base_template_context(request: Request, current_user: object, **kwargs: obj
     }
     context.update(kwargs)
     return context
+
+
+def _render_login_page(
+    request: Request,
+    error: str | None = None,
+    message: str | None = None,
+    unlock_username: str = "",
+    status_code: int = 200,
+) -> Response:
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {
+            "error": error,
+            "message": message,
+            "page_title": "登录",
+            "request": request,
+            "unlock_username": unlock_username,
+        },
+        status_code=status_code,
+    )
+
+
+def _resolve_unlock_email_target(email_settings: object) -> str:
+    return str(email_settings["recipient_email"] or email_settings["sender_email"] or "").strip()
+
+
+def _mask_email_address(email: str) -> str:
+    if "@" not in email:
+        return email
+    local_part, domain = email.split("@", 1)
+    if len(local_part) <= 2:
+        masked_local = local_part[:1] + "*"
+    else:
+        masked_local = local_part[:2] + "***" + local_part[-1:]
+    return f"{masked_local}@{domain}"
 
 
 def _build_session_cookie_value(user: object) -> str:

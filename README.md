@@ -46,15 +46,25 @@
 1. 复制模板：`cp .env.example .env`
 2. 按需修改 `.env`（尤其是 `OPENAI_API_KEY`）
 3. 构建并启动：`docker compose up -d --build`（Dockerfile 已默认优先使用清华 PyPI 镜像）
-4. 打开：`http://127.0.0.1:11223`
-5. 数据文件会落在宿主机 `./data/`
-6. 日常升级可执行：`./upgrade.sh`（会先备份数据库，再用最新基础镜像重建容器）
+4. 如需 HTTPS，请在 `.env` 里填写 `ASM_PUBLIC_DOMAIN` 和 `ASM_TLS_EMAIL`，并确保域名已解析到服务器、80/443 端口已放行
+5. 本地直连应用可打开：`http://127.0.0.1:11223`
+6. 外网 HTTPS 应访问：`https://你的域名`，不要再访问 `https://你的域名:11223`
+7. 数据文件和 Caddy 证书会落在宿主机 `./data/`
+8. 日常升级可执行：`./upgrade.sh`（会先备份数据库，再用最新基础镜像重建容器）
 
 ## 下载镜像源
 
 - Docker 构建安装 Python 依赖时，默认优先使用清华 PyPI 镜像
 - 本地安装依赖时，README 中也默认使用清华 PyPI 镜像命令
 - 如果你后续想换成别的国内镜像，可以在 Docker 构建时覆盖 `PIP_INDEX_URL` 和 `PIP_TRUSTED_HOST`
+
+## HTTPS 说明
+
+- 当前 Docker 方案已内置 `Caddy` 反向代理，自动申请和续期 HTTPS 证书
+- 应用容器仍然运行在内部 `11223` HTTP 端口，由 `Caddy` 对外提供标准 `443` HTTPS
+- 如果你用域名部署，正确访问方式应是：`https://你的域名`
+- `https://你的域名:11223` 仍然会失败，因为 `11223` 端口上跑的是纯 HTTP，不是 TLS
+- 首次签发证书前，请确认域名 A/AAAA 记录已经指向服务器公网 IP，且云防火墙/安全组已开放 `80` 和 `443`
 
 ## 环境模板
 

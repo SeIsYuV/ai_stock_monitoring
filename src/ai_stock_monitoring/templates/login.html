@@ -5,28 +5,248 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>登录 - AI Stock Monitoring</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #eef2ff; display: grid; place-items: center; min-height: 100vh; margin: 0; }
-        .panel { background: #fff; border-radius: 16px; padding: 32px; width: min(420px, calc(100vw - 32px)); box-shadow: 0 20px 40px rgba(15, 23, 42, 0.12); }
-        input, button { width: 100%; padding: 12px; margin-top: 8px; margin-bottom: 16px; border-radius: 8px; border: 1px solid #cbd5e1; box-sizing: border-box; }
-        button { background: #2563eb; color: #fff; border: none; cursor: pointer; }
-        .error { background: #fee2e2; color: #b91c1c; padding: 10px 12px; border-radius: 8px; margin-bottom: 16px; }
+        :root {
+            color-scheme: light;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background:
+                radial-gradient(circle at top left, rgba(59, 130, 246, 0.18), transparent 32%),
+                radial-gradient(circle at bottom right, rgba(16, 185, 129, 0.16), transparent 28%),
+                linear-gradient(135deg, #eff6ff 0%, #eef2ff 38%, #f8fafc 100%);
+            color: #0f172a;
+            display: grid;
+            place-items: center;
+            padding: 24px;
+        }
+        .shell {
+            width: min(1080px, 100%);
+            display: grid;
+            grid-template-columns: minmax(320px, 460px) minmax(320px, 1fr);
+            gap: 20px;
+            align-items: stretch;
+        }
+        .hero, .panel {
+            background: rgba(255, 255, 255, 0.88);
+            backdrop-filter: blur(14px);
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            border-radius: 24px;
+            box-shadow: 0 22px 50px rgba(15, 23, 42, 0.12);
+        }
+        .hero {
+            padding: 36px 32px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+        .hero-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            width: fit-content;
+            padding: 8px 12px;
+            border-radius: 999px;
+            background: #dbeafe;
+            color: #1d4ed8;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .hero h1 {
+            margin: 18px 0 12px;
+            font-size: 34px;
+            line-height: 1.15;
+        }
+        .hero p {
+            margin: 0;
+            color: #475569;
+            line-height: 1.75;
+        }
+        .feature-list {
+            margin: 28px 0 0;
+            padding: 0;
+            list-style: none;
+            display: grid;
+            gap: 12px;
+        }
+        .feature-list li {
+            padding: 14px 16px;
+            border-radius: 16px;
+            background: rgba(248, 250, 252, 0.92);
+            border: 1px solid #e2e8f0;
+        }
+        .feature-list strong {
+            display: block;
+            margin-bottom: 4px;
+            font-size: 14px;
+        }
+        .panel {
+            padding: 30px;
+        }
+        .panel h2 {
+            margin: 0 0 8px;
+            font-size: 26px;
+        }
+        .subtext {
+            margin: 0 0 18px;
+            color: #64748b;
+            line-height: 1.7;
+            font-size: 14px;
+        }
+        .notice, .error {
+            margin-bottom: 14px;
+            padding: 12px 14px;
+            border-radius: 12px;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        .notice {
+            background: #dcfce7;
+            color: #166534;
+            border: 1px solid #bbf7d0;
+        }
+        .error {
+            background: #fee2e2;
+            color: #b91c1c;
+            border: 1px solid #fecaca;
+        }
+        .section {
+            padding: 18px 0 6px;
+            border-top: 1px solid #e2e8f0;
+        }
+        .section:first-of-type {
+            padding-top: 0;
+            border-top: none;
+        }
+        label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #334155;
+        }
+        input, button {
+            width: 100%;
+            border-radius: 12px;
+            padding: 12px 14px;
+            border: 1px solid #cbd5e1;
+            font: inherit;
+            margin-bottom: 14px;
+            transition: 0.2s ease;
+        }
+        input:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.12);
+        }
+        button {
+            border: none;
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        button.secondary {
+            background: linear-gradient(135deg, #334155 0%, #1e293b 100%);
+        }
+        .tiny {
+            color: #64748b;
+            font-size: 13px;
+            line-height: 1.7;
+            margin: -4px 0 14px;
+        }
+        .tip-box {
+            border-radius: 16px;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            padding: 14px 16px;
+            color: #475569;
+            font-size: 13px;
+            line-height: 1.7;
+        }
+        .tip-box strong {
+            color: #0f172a;
+        }
+        @media (max-width: 920px) {
+            .shell {
+                grid-template-columns: 1fr;
+            }
+            .hero h1 {
+                font-size: 28px;
+            }
+        }
     </style>
 </head>
 <body>
-<section class="panel">
-    <h1>管理员登录</h1>
-    <p>默认账号：admin / admin123</p>
-    <p style="color:#475569; font-size:14px;">连续多次输错密码会触发临时锁定，防止暴力破解。</p>
-    {% if error %}
-    <div class="error">{{ error }}</div>
-    {% endif %}
-    <form method="post" action="/login">
-        <label>用户名</label>
-        <input type="text" name="username" required>
-        <label>密码</label>
-        <input type="password" name="password" required>
-        <button type="submit">登录</button>
-    </form>
+<section class="shell">
+    <aside class="hero">
+        <div>
+            <span class="hero-badge">AI Stock Monitoring</span>
+            <h1>更稳地看盘、记录、复盘与提醒</h1>
+            <p>这是一个面向个人投资者的轻量化 A 股监控平台。你可以按账号独立维护股票池、交易记录、邮箱提醒与量化评分阈值。</p>
+            <ul class="feature-list">
+                <li>
+                    <strong>多账号隔离</strong>
+                    不同账号之间的监控股票、交易流水、提醒历史与邮箱配置彼此独立。
+                </li>
+                <li>
+                    <strong>量化综合评分</strong>
+                    趋势、均值、股息与周线信号一起打分，帮助你更快筛选重点标的。
+                </li>
+                <li>
+                    <strong>邮箱解封确认</strong>
+                    登录被临时锁定时，可向已绑定邮箱发送验证码，自助完成解封。
+                </li>
+            </ul>
+        </div>
+        <div class="tip-box">
+            <strong>安全说明</strong><br>
+            登录页不再展示内置口令；连续输错密码会触发临时锁定。若账号已配置邮箱，可在右侧直接发验证码解封。
+        </div>
+    </aside>
+
+    <section class="panel">
+        <h2>账号登录</h2>
+        <p class="subtext">请输入你的账号和密码进入系统。系统只提供监控与分析参考，不构成投资建议。</p>
+
+        {% if message %}
+        <div class="notice">{{ message }}</div>
+        {% endif %}
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+
+        <div class="section">
+            <form method="post" action="/login">
+                <label>用户名</label>
+                <input type="text" name="username" value="{{ unlock_username or '' }}" autocomplete="username" required>
+                <label>密码</label>
+                <input type="password" name="password" autocomplete="current-password" required>
+                <button type="submit">登录</button>
+            </form>
+            <p class="tiny">连续多次输错密码会触发临时锁定，用于防止暴力破解。</p>
+        </div>
+
+        <div class="section">
+            <h3 style="margin: 0 0 8px;">账号被锁定？</h3>
+            <p class="subtext" style="margin-bottom: 12px;">如果当前账号已经绑定邮箱，可以先发送验证码，再输入验证码完成解封。</p>
+            <form method="post" action="/login/unlock/request">
+                <label>需要解封的账号</label>
+                <input type="text" name="username" value="{{ unlock_username or '' }}" required>
+                <button type="submit" class="secondary">发送解封验证码</button>
+            </form>
+            <form method="post" action="/login/unlock/confirm">
+                <label>账号</label>
+                <input type="text" name="username" value="{{ unlock_username or '' }}" required>
+                <label>邮箱验证码</label>
+                <input type="text" name="verification_code" maxlength="6" placeholder="6 位验证码" required>
+                <button type="submit">验证并解封</button>
+            </form>
+            <p class="tiny">验证码默认有效期 10 分钟。若该账号还没配置邮箱，则暂时无法自助解封。</p>
+        </div>
+    </section>
 </section>
 </body>
 </html>

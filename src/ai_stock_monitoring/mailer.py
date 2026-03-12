@@ -75,3 +75,15 @@ def build_trade_analysis_email_body(payload: dict[str, Any]) -> str:
     lines.extend(f"- {item}" for item in analysis["risk_controls"])
     lines.extend(["", analysis["disclaimer"]])
     return "\n".join(lines)
+
+
+def build_login_unlock_email_body(username: str, verification_code: str, expires_minutes: int) -> str:
+    """Render a short email body for login unlock verification."""
+
+    return (
+        f"账号：{username}\n"
+        f"解封验证码：{verification_code}\n"
+        f"有效期：{expires_minutes} 分钟\n\n"
+        "如果这不是你本人操作，请尽快修改密码并检查邮箱配置。\n"
+        "本系统仅为监控参考，不构成任何投资建议。"
+    )

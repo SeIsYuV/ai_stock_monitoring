@@ -16,8 +16,18 @@
 <section class="card" style="margin-bottom: 16px;">
     <h1>监控状态</h1>
     <p class="{{ 'status-ok' if status.is_market_open else 'status-danger' }}">{{ status.label }}</p>
-    <p>当前时间：{{ status.current_time.strftime('%Y-%m-%d %H:%M:%S') }}</p>
-    <p>距离下次刷新：{{ status.next_refresh_seconds if status.next_refresh_seconds is not none else '-' }} 秒</p>
+    <p>
+        当前时间：
+        <span id="dashboard-current-time"
+              data-server-time="{{ status.current_time.isoformat() }}"
+              data-server-timezone="Asia/Shanghai">{{ status.current_time.strftime('%Y-%m-%d %H:%M:%S') }}</span>
+    </p>
+    <p>
+        距离下次刷新：
+        <span id="dashboard-refresh-countdown"
+              data-next-refresh-seconds="{{ status.next_refresh_seconds if status.next_refresh_seconds is not none else '' }}">{{ status.next_refresh_seconds if status.next_refresh_seconds is not none else '-' }}</span>
+        秒
+    </p>
     {% if monitor.last_error_message %}
     <p class="danger-text">最近一次异常：{{ monitor.last_error_message }}</p>
     {% endif %}
@@ -216,7 +226,65 @@
         <span>数据接口：{{ system_status['provider'] }}</span>
         <span>邮件服务：{{ system_status['mail'] }}</span>
         <span>最近刷新：{{ system_status['last_refresh'] }}</span>
-        <span>当前时间：{{ status.current_time.strftime('%Y-%m-%d %H:%M:%S') }}</span>
+        <span>当前时间：<span id="dashboard-footer-current-time">{{ status.current_time.strftime('%Y-%m-%d %H:%M:%S') }}</span></span>
     </div>
 </section>
+
+<script>
+    (function () {
+        const timeElement = document.getElementById('dashboard-current-time');
+        const footerTimeElement = document.getElementById('dashboard-footer-current-time');
+        const countdownElement = document.getElementById('dashboard-refresh-countdown');
+        if (!timeElement) {
+            return;
+        }
+
+        const timezone = timeElement.dataset.serverTimezone || 'Asia/Shanghai';
+        const rawServerTime = timeElement.dataset.serverTime;
+        let currentTime = rawServerTime ? new Date(rawServerTime) : new Date();
+        let nextRefreshSeconds = null;
+
+        if (countdownElement && countdownElement.dataset.nextRefreshSeconds !== '') {
+            nextRefreshSeconds = Number.parseInt(countdownElement.dataset.nextRefreshSeconds, 10);
+            if (Number.isNaN(nextRefreshSeconds)) {
+                nextRefreshSeconds = null;
+            }
+        }
+
+        const formatter = new Intl.DateTimeFormat('zh-CN', {
+            timeZone: timezone,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
+        });
+
+        function formatDate(date) {
+            return formatter.format(date).replace(/\//g, '-');
+        }
+
+        function render() {
+            const formatted = formatDate(currentTime);
+            timeElement.textContent = formatted;
+            if (footerTimeElement) {
+                footerTimeElement.textContent = formatted;
+            }
+            if (countdownElement) {
+                countdownElement.textContent = nextRefreshSeconds === null ? '-' : String(nextRefreshSeconds);
+            }
+        }
+
+        render();
+        window.setInterval(function () {
+            currentTime = new Date(currentTime.getTime() + 1000);
+            if (nextRefreshSeconds !== null) {
+                nextRefreshSeconds = Math.max(0, nextRefreshSeconds - 1);
+            }
+            render();
+        }, 1000);
+    })();
+</script>
 {% endblock %}

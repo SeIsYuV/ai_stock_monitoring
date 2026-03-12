@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.ai_stock_monitoring.app import create_app
 from src.ai_stock_monitoring.config import AppSettings
-from src.ai_stock_monitoring.database import get_user, initialize_database
+from src.ai_stock_monitoring.database import get_login_unlock_code, get_user, initialize_database
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
 from src.ai_stock_monitoring.monitor import (
     StockMonitor,
@@ -66,6 +66,18 @@ class MonitorTests(unittest.TestCase):
                 self.assertEqual(dashboard_response.status_code, 200)
                 self.assertIn("监控状态", dashboard_response.text)
                 self.assertIn("当前账号：admin", dashboard_response.text)
+                self.assertIn("dashboard-current-time", dashboard_response.text)
+                self.assertIn("dashboard-refresh-countdown", dashboard_response.text)
+
+    def test_login_page_hides_default_credentials(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                response = client.get("/login")
+                self.assertEqual(response.status_code, 200)
+                self.assertNotIn("admin123", response.text)
+                self.assertNotIn("默认账号", response.text)
+                self.assertIn("发送解封验证码", response.text)
 
     def test_build_position_summary(self) -> None:
         summary = build_position_summary(
@@ -389,6 +401,73 @@ class MonitorTests(unittest.TestCase):
             self.assertIsNotNone(user)
             assert user is not None
             self.assertTrue(verify_password("bob-pass-123", user["password_hash"]))
+
+    def test_email_unlock_flow_clears_login_guard(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                client.post(
+                    "/settings/email",
+                    data={
+                        "recipient_email": "to@example.com",
+                        "smtp_server": "smtp.qq.com",
+                        "sender_email": "from@example.com",
+                        "sender_password": "secret",
+                    },
+                    follow_redirects=False,
+                )
+                client.get("/logout", follow_redirects=False)
+
+                for _ in range(5):
+                    response = client.post(
+                        "/login",
+                        data={"username": "admin", "password": "wrong-password"},
+                        follow_redirects=False,
+                    )
+                    self.assertEqual(response.status_code, 400)
+
+                locked_response = client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                self.assertEqual(locked_response.status_code, 429)
+
+                with patch("src.ai_stock_monitoring.app.send_message") as mocked_send:
+                    mocked_send.return_value.success = True
+                    mocked_send.return_value.status = "发送成功"
+                    mocked_send.return_value.error = None
+                    unlock_request = client.post(
+                        "/login/unlock/request",
+                        data={"username": "admin"},
+                        follow_redirects=False,
+                    )
+                    self.assertEqual(unlock_request.status_code, 200)
+                    self.assertIn("验证码已发送", unlock_request.text)
+
+                unlock_row = get_login_unlock_code(database_file.name, "admin")
+                self.assertIsNotNone(unlock_row)
+                assert unlock_row is not None
+                confirm_response = client.post(
+                    "/login/unlock/confirm",
+                    data={"username": "admin", "verification_code": unlock_row["verification_code"]},
+                    follow_redirects=False,
+                )
+                self.assertEqual(confirm_response.status_code, 200)
+                self.assertIn("账号锁定已解除", confirm_response.text)
+
+                login_response = client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                self.assertEqual(login_response.status_code, 303)
+
 
 
 if __name__ == "__main__":

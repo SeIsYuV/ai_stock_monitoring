@@ -9,7 +9,7 @@ services:
     init: true
     container_name: ai-stock-monitoring
     ports:
-      - "${ASM_PORT:-11223}:${ASM_PORT:-11223}"
+      - "127.0.0.1:${ASM_PORT:-11223}:${ASM_PORT:-11223}"
     environment:
       ASM_HOST: ${ASM_HOST:-0.0.0.0}
       ASM_PORT: ${ASM_PORT:-11223}
@@ -32,3 +32,24 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
+
+  caddy:
+    image: caddy:2
+    container_name: ai-stock-monitoring-caddy
+    depends_on:
+      ai-stock-monitoring:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      ASM_PUBLIC_DOMAIN: ${ASM_PUBLIC_DOMAIN}
+      ASM_TLS_EMAIL: ${ASM_TLS_EMAIL}
+      ASM_PORT: ${ASM_PORT:-11223}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy_data:/data
+      - ./data/caddy_config:/config
+    restart: unless-stopped
