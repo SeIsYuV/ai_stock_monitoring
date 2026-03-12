@@ -2,14 +2,16 @@ version: "3.9"
 
 services:
   ai-stock-monitoring:
+    env_file:
+      - .env
     build: .
     container_name: ai-stock-monitoring
     ports:
-      - "1217:1217"
+      - "${ASM_PORT:-1217}:${ASM_PORT:-1217}"
     environment:
-      ASM_HOST: 0.0.0.0
-      ASM_PORT: 1217
-      ASM_DB_PATH: /app/data/stock_monitor.db
+      ASM_HOST: ${ASM_HOST:-0.0.0.0}
+      ASM_PORT: ${ASM_PORT:-1217}
+      ASM_DB_PATH: ${ASM_DB_PATH:-/app/data/stock_monitor.db}
       ASM_PROVIDER: ${ASM_PROVIDER:-akshare}
       ASM_LLM_PROVIDER: ${ASM_LLM_PROVIDER:-openai}
       ASM_LLM_MODEL: ${ASM_LLM_MODEL:-gpt-4.1-mini}

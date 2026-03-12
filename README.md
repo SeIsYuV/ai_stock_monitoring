@@ -25,8 +25,9 @@
 
 1. 创建并激活虚拟环境
 2. 安装依赖：`pip install -r requirements.txt`
-3. 启动服务：`./start.sh` 或 `python main.py`
-4. 打开：`http://127.0.0.1:1217`
+3. 如需大模型分析，可先执行：`cp .env.example .env` 并填写 `OPENAI_API_KEY`
+4. 启动服务：`./start.sh` 或 `python main.py`
+5. 打开：`http://127.0.0.1:1217`
 
 默认管理员账号：
 
@@ -35,9 +36,17 @@
 
 ## Docker 启动
 
-1. 构建并启动：`docker-compose up -d --build`
-2. 打开：`http://127.0.0.1:1217`
-3. 数据文件会落在宿主机 `./data/`
+1. 复制模板：`cp .env.example .env`
+2. 按需修改 `.env`（尤其是 `OPENAI_API_KEY`）
+3. 构建并启动：`docker compose up -d --build`
+4. 打开：`http://127.0.0.1:1217`
+5. 数据文件会落在宿主机 `./data/`
+
+## 环境模板
+
+- 模板文件：`.env.example`
+- 本地或 Docker 使用前建议先执行：`cp .env.example .env`
+- `.env` 已加入 `.gitignore`，不会被误提交
 
 ## 关键环境变量
 
