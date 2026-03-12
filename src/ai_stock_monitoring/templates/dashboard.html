@@ -211,8 +211,15 @@
 {% endif %}
 
 <section class="card" style="margin-top: 16px;">
-    <h2>监控列表</h2>
-    <p class="hint-text">表格支持左右滑动查看更多字段，适合在手机和平板上查看。</p>
+    <div class="toolbar-row">
+        <div>
+            <h2 style="margin-bottom: 6px;">监控列表</h2>
+            <p class="hint-text" style="margin-bottom: 0;">表格支持左右滑动查看更多字段，适合在手机和平板上查看。</p>
+        </div>
+        <form method="post" action="/dashboard/refresh" class="inline-form">
+            <button type="submit" class="secondary">手动刷新监控列表</button>
+        </form>
+    </div>
     <div class="table-scroll">
         <table class="wide-table">
             <thead>
@@ -234,7 +241,7 @@
             {% for item in snapshots %}
             <tr>
                 <td><a class="inline-link" href="/stocks/{{ item['symbol'] }}">{{ item['symbol'] }}</a></td>
-                <td>{{ item['display_name'] or '-' }}</td>
+                <td><span class="stock-name">{{ format_stock_display_name(item['display_name'])|safe }}</span></td>
                 <td>{{ '%.2f'|format(item['latest_price']) if item['latest_price'] is not none else '-' }}</td>
                 <td>{{ '%.2f'|format(item['ma_250']) if item['ma_250'] is not none else '-' }}</td>
                 <td>
@@ -267,7 +274,7 @@
                 </td>
                 <td class="nowrap">
                     {% if item['updated_at'] %}
-                    {{ item['updated_at'][:19].replace('T', ' ') }}
+                    {{ format_snapshot_timestamp(item['updated_at']) }}
                     {% else %}
                     -
                     {% endif %}

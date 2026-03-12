@@ -24,7 +24,16 @@
         table { width: 100%; border-collapse: collapse; }
         th, td { padding: 12px 10px; border-bottom: 1px solid #e5e7eb; text-align: left; vertical-align: top; }
         th { font-size: 13px; color: #64748b; white-space: nowrap; }
-        .message { background: #dbeafe; color: #1d4ed8; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; }
+        .message { padding: 12px 16px; border-radius: 10px; margin-bottom: 16px; border: 1px solid transparent; display: flex; align-items: center; gap: 10px; }
+        .message::before { font-weight: 700; }
+        .message-success { background: #dcfce7; color: #166534; border-color: #86efac; }
+        .message-success::before { content: "✓"; }
+        .message-error { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
+        .message-error::before { content: "!"; }
+        .message-warning { background: #fef3c7; color: #92400e; border-color: #fcd34d; }
+        .message-warning::before { content: "⚠"; }
+        .message-info { background: #dbeafe; color: #1d4ed8; border-color: #93c5fd; }
+        .message-info::before { content: "i"; }
         .status-danger, .danger-text { color: #dc2626; }
         .status-ok { color: #059669; }
         .top-nav a { color: #fff; margin-left: 12px; text-decoration: none; }
@@ -46,6 +55,10 @@
         .compact-table th, .compact-table td { padding-top: 10px; padding-bottom: 10px; }
         .nowrap { white-space: nowrap; }
         .soft-panel { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; }
+        .stock-name { display: inline-block; max-width: 4em; line-height: 1.35; white-space: normal; word-break: keep-all; overflow-wrap: break-word; }
+        .toolbar-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+        .inline-form { display: inline-flex; margin: 0; }
+        .inline-form button { width: auto; margin: 0; }
         @media (max-width: 900px) {
             header { flex-direction: column; align-items: flex-start; }
             .top-nav a { margin-left: 0; margin-right: 12px; }
@@ -71,7 +84,7 @@
 <main>
     <div class="banner">本系统提供的是监控和模型评分参考，不构成任何投资建议，也不承诺真实收益率。</div>
     {% if message %}
-    <div class="message">{{ message }}</div>
+    <div class="message message-{{ message_type|default('info') }}">{{ message }}</div>
     {% endif %}
     {% block content %}{% endblock %}
 </main>

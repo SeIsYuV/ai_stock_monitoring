@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
+import html
 from io import BytesIO
 import json
 from pathlib import Path
@@ -68,6 +69,38 @@ from .trade_advisor import TradeAdvisor, build_position_summary
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+
+def _format_snapshot_timestamp(raw_value: str | None) -> str:
+    """Show a compact timestamp in the dashboard table."""
+
+    if not raw_value:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(raw_value)
+    except ValueError:
+        return raw_value[:16].replace("T", " ")
+    now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+    if parsed.date() == now.date():
+        return parsed.strftime("%H:%M")
+    return parsed.strftime("%m-%d %H:%M")
+
+
+def _format_stock_display_name(name: str | None, chunk_size: int = 4) -> str:
+    """Insert soft-wrap opportunities only for long pure-Chinese stock names."""
+
+    if not name:
+        return "-"
+    escaped = html.escape(name)
+    if len(name) <= chunk_size:
+        return escaped
+    if not all("一" <= char <= "鿿" for char in name):
+        return escaped
+    return "<wbr>".join(html.escape(name[index : index + chunk_size]) for index in range(0, len(name), chunk_size))
+
+
+templates.env.globals["format_snapshot_timestamp"] = _format_snapshot_timestamp
+templates.env.globals["format_stock_display_name"] = _format_stock_display_name
 
 
 def create_app(settings: AppSettings | None = None) -> FastAPI:
@@ -288,6 +321,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         request: Request,
         symbol: str | None = None,
         message: str | None = None,
+        message_type: str = "info",
     ) -> Response:
         current_user = _require_login(request, resolved_settings)
         if isinstance(current_user, RedirectResponse):
@@ -318,6 +352,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 request,
                 current_user,
                 message=message,
+                message_type=message_type,
                 page_title="交易复盘",
                 selected_symbol=selected_symbol,
                 snapshots=get_snapshots(resolved_settings.db_path, owner_username),
@@ -386,7 +421,11 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         )
 
     @app.get("/dashboard", response_class=HTMLResponse)
-    async def dashboard(request: Request, message: str | None = None) -> Response:
+    async def dashboard(
+        request: Request,
+        message: str | None = None,
+        message_type: str = "info",
+    ) -> Response:
         current_user = _require_login(request, resolved_settings)
         if isinstance(current_user, RedirectResponse):
             return current_user
@@ -408,6 +447,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 request,
                 current_user,
                 message=message,
+                message_type=message_type,
                 page_title="监控面板",
                 admin_username=get_admin_user(resolved_settings.db_path)["username"],
                 email_settings=email_settings,
@@ -426,6 +466,29 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 users=list_users(resolved_settings.db_path) if current_user["is_admin"] else [],
             ),
         )
+
+    @app.post("/dashboard/refresh")
+    async def refresh_dashboard(request: Request) -> RedirectResponse:
+        current_user = _require_login(request, resolved_settings)
+        if isinstance(current_user, RedirectResponse):
+            return current_user
+
+        snapshots = get_snapshots(resolved_settings.db_path, current_user["username"])
+        if not snapshots:
+            return _redirect_with_message("/dashboard", "当前账号还没有监控股票")
+
+        refresh_failed_symbols: list[str] = []
+        for item in snapshots:
+            try:
+                await asyncio.to_thread(app.state.monitor.refresh_symbol_snapshot, current_user["username"], item["symbol"])
+            except Exception:
+                refresh_failed_symbols.append(item["symbol"])
+        if refresh_failed_symbols:
+            return _redirect_with_message(
+                "/dashboard",
+                f"已完成部分刷新，失败股票：{', '.join(refresh_failed_symbols)}",
+            )
+        return _redirect_with_message("/dashboard", f"已手动刷新 {len(snapshots)} 只股票")
 
     @app.post("/stocks")
     async def add_stocks(request: Request, symbols_text: str = Form(...)) -> RedirectResponse:
@@ -786,6 +849,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         symbol: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        message: str | None = None,
+        message_type: str = "info",
     ) -> Response:
         current_user = _require_login(request, resolved_settings)
         if isinstance(current_user, RedirectResponse):
@@ -807,6 +872,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 request,
                 current_user,
                 alerts=alerts,
+                message=message,
+                message_type=message_type,
                 date_from=date_from or "",
                 date_to=date_to or "",
                 page_title="历史提醒",
@@ -842,6 +909,7 @@ def _base_template_context(request: Request, current_user: object, **kwargs: obj
         "request": request,
         "current_user": current_user,
         "is_admin": bool(current_user["is_admin"]),
+        "message_type": "info",
     }
     context.update(kwargs)
     return context
@@ -940,6 +1008,23 @@ def _send_trade_analysis_email_if_configured(db_path: str, owner_username: str, 
     return f"复盘结果邮件发送失败：{result.error}"
 
 
+def _normalize_message_type(message_type: str | None) -> str:
+    if message_type in {"success", "error", "warning", "info"}:
+        return str(message_type)
+    return "info"
+
+
+def _guess_message_type(message: str) -> str:
+    lowered = message.lower()
+    error_keywords = ("失败", "错误", "不正确", "无效", "未找到", "不能", "不存在", "请先", "不一致", "已锁定")
+    warning_keywords = ("部分", "稍后", "暂无", "暂未", "未配置", "待", "还没有")
+    if any(keyword in message for keyword in error_keywords) or "error" in lowered or "failed" in lowered:
+        return "error"
+    if any(keyword in message for keyword in warning_keywords) or "warning" in lowered:
+        return "warning"
+    return "success"
+
+
 def _require_login(request: Request, settings: AppSettings) -> object | RedirectResponse:
     current_user = _get_authenticated_user(request, settings)
     if current_user is not None:
@@ -947,8 +1032,13 @@ def _require_login(request: Request, settings: AppSettings) -> object | Redirect
     return RedirectResponse(url="/login", status_code=303)
 
 
-def _redirect_with_message(path: str, message: str) -> RedirectResponse:
-    return RedirectResponse(url=f"{path}?message={quote(message)}", status_code=303)
+def _redirect_with_message(path: str, message: str, message_type: str | None = None) -> RedirectResponse:
+    resolved_type = _normalize_message_type(message_type or _guess_message_type(message))
+    separator = "&" if "?" in path else "?"
+    return RedirectResponse(
+        url=f"{path}{separator}message={quote(message)}&message_type={quote(resolved_type)}",
+        status_code=303,
+    )
 
 
 def _login_subject(request: Request, username: str = "") -> str:
@@ -961,11 +1051,15 @@ async def _load_dashboard_snapshots(app: FastAPI, owner_username: str) -> list[o
     settings: AppSettings = app.state.settings
     monitor: StockMonitor = app.state.monitor
     snapshots = get_snapshots(settings.db_path, owner_username)
-    missing_symbols = [item["symbol"] for item in snapshots if item["latest_price"] is None]
-    if not missing_symbols:
+    refresh_symbols = [
+        item["symbol"]
+        for item in snapshots
+        if item["latest_price"] is None or not float(item["boll_upper"] or 0)
+    ]
+    if not refresh_symbols:
         return snapshots
 
-    for symbol in missing_symbols:
+    for symbol in refresh_symbols:
         try:
             await asyncio.to_thread(monitor.refresh_symbol_snapshot, owner_username, symbol)
         except Exception:

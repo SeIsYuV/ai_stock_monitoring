@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from src.ai_stock_monitoring.app import create_app
 from src.ai_stock_monitoring.config import AppSettings
-from src.ai_stock_monitoring.database import get_alert_history, get_login_unlock_code, get_user, initialize_database, list_recent_login_events
+from src.ai_stock_monitoring.database import get_alert_history, get_login_unlock_code, get_snapshot, get_user, initialize_database, list_recent_login_events, upsert_snapshot
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
 from src.ai_stock_monitoring.monitor import (
     StockMonitor,
@@ -277,6 +277,63 @@ class MonitorTests(unittest.TestCase):
                 bars_daily = app.state.monitor.provider.get_daily_bars("600519")
                 lower_band = calculate_bollinger_lower_band([item.close_price for item in bars_daily], 20)
                 self.assertGreater(lower_band, 0)
+
+    def test_dashboard_can_manually_refresh_snapshots(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                dashboard_response = client.get("/dashboard")
+                self.assertEqual(dashboard_response.status_code, 200)
+                self.assertIn("手动刷新监控列表", dashboard_response.text)
+
+                refresh_response = client.post("/dashboard/refresh", follow_redirects=False)
+                self.assertEqual(refresh_response.status_code, 303)
+
+    def test_dashboard_backfills_zero_boll_upper_snapshot(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                snapshot = app.state.monitor.refresh_symbol_snapshot("admin", "600519")
+                upsert_snapshot(
+                    db_path=database_file.name,
+                    owner_username="admin",
+                    symbol=snapshot.symbol,
+                    display_name=snapshot.display_name,
+                    latest_price=snapshot.latest_price,
+                    ma_250=snapshot.ma_250,
+                    ma_30w=snapshot.ma_30w,
+                    ma_60w=snapshot.ma_60w,
+                    boll_mid=snapshot.boll_mid,
+                    boll_lower=snapshot.boll_lower,
+                    boll_upper=0.0,
+                    dividend_yield=snapshot.dividend_yield,
+                    quant_probability=snapshot.quant_probability,
+                    quant_model_breakdown=snapshot.quant_model_breakdown,
+                    trigger_state=snapshot.trigger_state,
+                    trigger_detail=snapshot.trigger_detail,
+                    updated_at=snapshot.updated_at.isoformat(),
+                )
+                zero_snapshot = get_snapshot(database_file.name, "admin", "600519")
+                self.assertIsNotNone(zero_snapshot)
+                assert zero_snapshot is not None
+                self.assertEqual(float(zero_snapshot["boll_upper"]), 0.0)
+
+                dashboard_response = client.get("/dashboard")
+                self.assertEqual(dashboard_response.status_code, 200)
+                refreshed_snapshot = get_snapshot(database_file.name, "admin", "600519")
+                self.assertIsNotNone(refreshed_snapshot)
+                assert refreshed_snapshot is not None
+                self.assertGreater(float(refreshed_snapshot["boll_upper"]), 0.0)
 
     def test_add_stock_refreshes_snapshot_immediately(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
@@ -596,6 +653,36 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(sell_signal.should_alert)
         self.assertGreaterEqual(sell_signal.confirmation_count, 2)
         self.assertIn("量化综合盈利概率", "；".join(sell_signal.reasons))
+
+    def test_quant_settings_redirect_contains_success_message_type(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                response = client.post(
+                    "/settings/quant",
+                    data={
+                        "enabled": "1",
+                        "probability_threshold": "90",
+                        "selected_models": ["trend_following", "mean_reversion"],
+                        "min_dividend_yield": "3",
+                        "max_20d_volatility_pct": "4",
+                        "min_20d_momentum_pct": "1",
+                        "max_boll_deviation_pct": "4",
+                    },
+                    follow_redirects=False,
+                )
+                self.assertEqual(response.status_code, 303)
+                self.assertIn("message_type=success", response.headers["location"])
+
+                dashboard = client.get(response.headers["location"])
+                self.assertEqual(dashboard.status_code, 200)
+                self.assertIn("message-success", dashboard.text)
+                self.assertIn("量化提醒设置已保存", dashboard.text)
 
     def test_quant_alert_is_deduplicated_within_same_day(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
