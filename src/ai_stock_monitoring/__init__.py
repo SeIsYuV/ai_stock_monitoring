@@ -1,0 +1,2 @@
+"""AI stock monitoring package."""
+
