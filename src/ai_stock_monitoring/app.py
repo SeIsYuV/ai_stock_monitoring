@@ -41,6 +41,7 @@ from .database import (
     get_email_settings,
     get_latest_trade_analysis,
     get_login_guard_state,
+    get_portfolio_settings,
     get_login_unlock_code,
     get_quant_settings,
     get_snapshot,
@@ -51,15 +52,19 @@ from .database import (
     list_recent_login_events,
     list_trade_records,
     list_trade_records_for_symbol,
+    list_trade_records_paginated,
     list_users,
     mark_alert_as_read,
     record_failed_login,
     record_login_event,
     remove_monitored_stock,
+    save_portfolio_settings,
     save_email_settings,
     save_login_unlock_code,
     save_quant_settings,
     update_user_password,
+    delete_trade_record,
+    delete_trade_records_for_symbol,
 )
 from .mailer import build_login_unlock_email_body, build_test_email_body, build_trade_analysis_email_body, send_message
 from .monitor import StockMonitor, parse_stock_symbols
@@ -367,6 +372,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     async def trades_page(
         request: Request,
         symbol: str | None = None,
+        page: int = 1,
         message: str | None = None,
         message_type: str = "info",
     ) -> Response:
@@ -376,7 +382,14 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
         selected_symbol = (symbol or "").strip()
         owner_username = current_user["username"]
-        trade_records = list_trade_records(resolved_settings.db_path, owner_username, selected_symbol or None)
+        portfolio_settings = get_portfolio_settings(resolved_settings.db_path, owner_username)
+        trade_records, total_trade_records = list_trade_records_paginated(
+            resolved_settings.db_path,
+            owner_username,
+            selected_symbol or None,
+            page=page,
+            page_size=10,
+        )
         all_trade_records = list_trade_records(resolved_settings.db_path, owner_username, None)
         snapshots = get_snapshots(resolved_settings.db_path, owner_username)
         latest_analysis_row = get_latest_trade_analysis(
@@ -394,7 +407,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 list_trade_records_for_symbol(resolved_settings.db_path, owner_username, selected_symbol)
             )
 
-        portfolio_profile = build_portfolio_profile(all_trade_records, snapshots)
+        portfolio_profile = build_portfolio_profile(all_trade_records, snapshots, float(portfolio_settings["total_investment_amount"] or 0.0))
 
         return templates.TemplateResponse(
             request,
@@ -411,8 +424,52 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 latest_analysis=latest_analysis,
                 position_summary=position_summary,
                 portfolio_profile=portfolio_profile,
+                portfolio_settings=portfolio_settings,
+                trade_pagination={
+                    "page": max(page, 1),
+                    "page_size": 10,
+                    "total": total_trade_records,
+                    "total_pages": max((total_trade_records + 9) // 10, 1),
+                },
             ),
         )
+
+    @app.post("/settings/portfolio")
+    async def save_portfolio_setting(
+        request: Request,
+        total_investment_amount: float = Form(0.0),
+        next_path: str = Form("/trades"),
+    ) -> RedirectResponse:
+        current_user = _require_login(request, resolved_settings)
+        if isinstance(current_user, RedirectResponse):
+            return current_user
+        save_portfolio_settings(
+            resolved_settings.db_path,
+            current_user["username"],
+            max(float(total_investment_amount), 0.0),
+        )
+        return _redirect_with_message(next_path or "/trades", "股市总投入金额已更新")
+
+    @app.post("/trades/records/{trade_id}/delete")
+    async def delete_trade_record_route(request: Request, trade_id: int) -> RedirectResponse:
+        current_user = _require_login(request, resolved_settings)
+        if isinstance(current_user, RedirectResponse):
+            return current_user
+        symbol = (request.query_params.get("symbol") or "").strip()
+        page_value = request.query_params.get("page") or "1"
+        delete_trade_record(resolved_settings.db_path, current_user["username"], trade_id)
+        redirect_url = f"/trades?page={quote(page_value)}"
+        if symbol:
+            redirect_url = f"/trades?symbol={quote(symbol)}&page={quote(page_value)}"
+        return _redirect_with_message(redirect_url, "交易记录已删除")
+
+    @app.post("/trades/positions/{symbol}/delete")
+    async def delete_position_records_route(request: Request, symbol: str) -> RedirectResponse:
+        current_user = _require_login(request, resolved_settings)
+        if isinstance(current_user, RedirectResponse):
+            return current_user
+        delete_trade_records_for_symbol(resolved_settings.db_path, current_user["username"], symbol)
+        return _redirect_with_message("/trades", f"{symbol} 持仓记录已清空")
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -527,9 +584,11 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         status = monitor.get_market_status()
         raw_snapshots = await _load_dashboard_snapshots(app, owner_username)
         snapshots = [_decorate_snapshot_for_display(item) for item in raw_snapshots]
+        portfolio_settings = get_portfolio_settings(resolved_settings.db_path, owner_username)
         portfolio_profile = build_portfolio_profile(
             list_trade_records(resolved_settings.db_path, owner_username, None),
             raw_snapshots,
+            float(portfolio_settings["total_investment_amount"] or 0.0),
         )
         email_settings = get_email_settings(resolved_settings.db_path, owner_username)
         quant_settings = get_quant_settings(resolved_settings.db_path, owner_username)

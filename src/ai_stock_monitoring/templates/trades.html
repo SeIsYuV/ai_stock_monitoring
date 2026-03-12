@@ -52,11 +52,23 @@
 {% if portfolio_profile %}
 <section class="card" style="margin-bottom: 16px;">
     <h2>当前账户持仓画像</h2>
+    <form method="post" action="/settings/portfolio" class="inline-form" style="display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px;">
+        <input type="hidden" name="next_path" value="/trades{% if selected_symbol %}?symbol={{ selected_symbol }}{% endif %}">
+        <div>
+            <label>当前股市总投入金额</label>
+            <input type="number" name="total_investment_amount" min="0" step="0.01" value="{{ '%.2f'|format(portfolio_settings['total_investment_amount']) if portfolio_settings else '0.00' }}">
+        </div>
+        <button type="submit" class="secondary">更新投入金额</button>
+    </form>
     {% if portfolio_profile['has_positions'] %}
     <div class="metric-grid" style="margin-bottom: 16px;">
         <div class="metric-card">
             <strong>当前持仓比例</strong>
             <span class="muted">{{ '%.2f%%'|format(portfolio_profile['holding_ratio']) }}</span>
+        </div>
+        <div class="metric-card">
+            <strong>股市总投入金额</strong>
+            <span class="muted">{{ '%.2f'|format(portfolio_profile['total_investment_amount']) if portfolio_profile['total_investment_amount'] else '-' }}</span>
         </div>
         <div class="metric-card">
             <strong>模型建议仓位</strong>
@@ -84,6 +96,12 @@
     </div>
     <p><strong>综合建议：</strong>{{ portfolio_profile['comprehensive_advice'] }}</p>
     <p><strong>组合说明：</strong>{{ portfolio_profile['analysis_note'] }}</p>
+    <h3>专业综合分析</h3>
+    <ul>
+        {% for item in portfolio_profile.get('professional_advice', []) %}
+        <li>{{ item }}</li>
+        {% endfor %}
+    </ul>
     <h3>目标仓位调整建议</h3>
     <ul>
         {% for item in portfolio_profile['overall_adjustment_suggestions'] %}
@@ -120,6 +138,7 @@
                 <th>持仓风格</th>
                 <th>风险</th>
                 <th>综合建议</th>
+                <th>操作</th>
             </tr>
             </thead>
             <tbody>
@@ -170,11 +189,16 @@
                 <td>
                     <div class="action-{{ item['action_color'] }}">{{ item['action'] }}</div>
                     <div class="advice-card compact-advice">
-                        <div><strong>结论</strong><span>{{ item['advice_conclusion_line'] }}</span></div>
-                        <div><strong>买点</strong><span>{{ item['advice_buy_line'] }}</span></div>
-                        <div><strong>卖点</strong><span>{{ item['advice_sell_line'] }}</span></div>
-                        <div><strong>DCF</strong><span>{{ item['advice_dcf_line'] }}</span></div>
+                        <div><strong>结论</strong><span>{{ item.get('advice_conclusion_line', '暂无建议') }}</span></div>
+                        <div><strong>买点</strong><span>{{ item.get('advice_buy_line', '暂无建议') }}</span></div>
+                        <div><strong>卖点</strong><span>{{ item.get('advice_sell_line', '暂无建议') }}</span></div>
+                        <div><strong>DCF</strong><span>{{ item.get('advice_dcf_line', '暂无建议') }}</span></div>
                     </div>
+                </td>
+                <td>
+                    <form method="post" action="/trades/positions/{{ item['symbol'] }}/delete" onsubmit="return confirm('确认清空 {{ item['display_name'] }} 的持仓记录吗？');">
+                        <button type="submit" class="danger">删除持仓</button>
+                    </form>
                 </td>
             </tr>
             {% endfor %}
@@ -248,7 +272,8 @@
 
 <section class="card">
     <h2>交易流水</h2>
-    <table>
+    <div class="table-scroll">
+    <table class="compact-table">
         <thead>
         <tr>
             <th>成交时间</th>
@@ -257,24 +282,44 @@
             <th>价格</th>
             <th>数量</th>
             <th>备注</th>
+            <th>操作</th>
         </tr>
         </thead>
         <tbody>
         {% for trade in trade_records %}
         <tr>
-            <td>{{ trade['traded_at'] }}</td>
+            <td>{{ format_full_timestamp(trade['traded_at']) }}</td>
             <td><a class="inline-link" href="/trades?symbol={{ trade['symbol'] }}">{{ trade['symbol'] }}</a></td>
             <td>{{ '买入' if trade['side'] == 'buy' else '卖出' }}</td>
             <td>{{ '%.5f'|format(trade['price']) }}</td>
             <td>{{ trade['quantity'] }}</td>
             <td>{{ trade['note'] or '-' }}</td>
+            <td>
+                <form method="post" action="/trades/records/{{ trade['id'] }}/delete?{% if selected_symbol %}symbol={{ selected_symbol }}&{% endif %}page={{ trade_pagination['page'] }}" onsubmit="return confirm('确认删除这条交易记录吗？');">
+                    <button type="submit" class="danger">删除</button>
+                </form>
+            </td>
         </tr>
         {% else %}
         <tr>
-            <td colspan="6">当前账号还没有交易记录，可以先录入一笔买入或卖出。</td>
+            <td colspan="7">当前账号还没有交易记录，可以先录入一笔买入或卖出。</td>
         </tr>
         {% endfor %}
         </tbody>
     </table>
+    </div>
+    {% if trade_pagination and trade_pagination['total_pages'] > 1 %}
+    <div class="toolbar-row" style="margin-top: 12px;">
+        <div class="muted">第 {{ trade_pagination['page'] }} / {{ trade_pagination['total_pages'] }} 页，共 {{ trade_pagination['total'] }} 条</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            {% if trade_pagination['page'] > 1 %}
+            <a class="inline-link" href="/trades?{% if selected_symbol %}symbol={{ selected_symbol }}&{% endif %}page={{ trade_pagination['page'] - 1 }}">上一页</a>
+            {% endif %}
+            {% if trade_pagination['page'] < trade_pagination['total_pages'] %}
+            <a class="inline-link" href="/trades?{% if selected_symbol %}symbol={{ selected_symbol }}&{% endif %}page={{ trade_pagination['page'] + 1 }}">下一页</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
 </section>
 {% endblock %}

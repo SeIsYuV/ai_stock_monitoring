@@ -4,53 +4,197 @@
 <section class="card" style="margin-bottom: 16px;">
     <h1>股票详情：{{ symbol }}</h1>
     {% if snapshot %}
-    <p>{{ snapshot['display_name'] }} | 最新价 {{ '%.2f'|format(snapshot['latest_price']) if snapshot['latest_price'] is not none else '-' }}</p>
+    <p>{{ snapshot['display_name'] }} | 最新价 {{ '%.2f'|format(snapshot['latest_price']) if snapshot['latest_price'] is not none else '-' }} 元</p>
     <p>量化综合盈利概率：{{ '%.2f%%'|format(snapshot['quant_probability']) if snapshot['quant_probability'] is not none else '-' }}</p>
     <p>DCF 代理内在价值：{{ '%.2f'|format(snapshot['dcf_intrinsic_value']) if snapshot['dcf_intrinsic_value'] is not none else '暂无估值' }}{% if snapshot['dcf_valuation_gap_pct'] is not none %} ｜ 估值偏差 {{ '%.2f%%'|format(snapshot['dcf_valuation_gap_pct']) }}{% elif snapshot['dcf_reason'] %} ｜ {{ snapshot['dcf_reason'] }}{% endif %}</p>
     <div>
         <strong>BOLL 上 / 中 / 下轨：</strong>
-        <div>上轨 {{ '%.2f'|format(snapshot['boll_upper']) if snapshot['boll_upper'] is not none else '-' }}</div>
-        <div>中轨 {{ '%.2f'|format(snapshot['boll_mid']) if snapshot['boll_mid'] is not none else '-' }}</div>
-        <div>下轨 {{ '%.2f'|format(snapshot['boll_lower']) if snapshot['boll_lower'] is not none else '-' }}</div>
+        <div>上轨 {{ '%.2f'|format(snapshot['boll_upper']) if snapshot['boll_upper'] is not none else '-' }} 元</div>
+        <div>中轨 {{ '%.2f'|format(snapshot['boll_mid']) if snapshot['boll_mid'] is not none else '-' }} 元</div>
+        <div>下轨 {{ '%.2f'|format(snapshot['boll_lower']) if snapshot['boll_lower'] is not none else '-' }} 元</div>
     </div>
     <p>{{ snapshot['trigger_detail'] }}</p>
     {% endif %}
 </section>
 
 <section class="card">
-    <h2>当日日线图（最近 {{ chart_payload['labels']|length }} 个交易日）</h2>
-    <canvas id="stockChart" width="1100" height="420" style="width: 100%; max-width: 1100px;"></canvas>
-    <p style="font-size: 13px; color: #64748b;">蓝线为收盘价，绿线为 250 日线，紫线为 BOLL 上轨，橙线为 BOLL 中轨，红线为 BOLL 下轨。</p>
-    <script>
-        const payload = {{ chart_payload | tojson }};
-        const canvas = document.getElementById('stockChart');
+    <div class="toolbar-row" style="margin-bottom: 16px;">
+        <div>
+            <h2 style="margin-bottom: 6px;">图表分析</h2>
+            <p class="hint-text" style="margin-bottom: 0;">支持日 / 周 / 月 K 线切换，以及 BOLL 轨道图；鼠标悬停可查看详细数值。</p>
+        </div>
+        <div class="chart-tabs" role="tablist" aria-label="图表切换">
+            <button type="button" class="secondary active" data-chart-tab="daily-pane">日 K</button>
+            <button type="button" class="secondary" data-chart-tab="weekly-pane">周 K</button>
+            <button type="button" class="secondary" data-chart-tab="monthly-pane">月 K</button>
+            <button type="button" class="secondary" data-chart-tab="boll-pane">BOLL</button>
+        </div>
+    </div>
+
+    <div id="daily-pane" class="chart-pane active">
+        <h3>日 K 图</h3>
+        <canvas id="dailyKChart" width="1100" height="420" class="chart-canvas"></canvas>
+        <div id="dailyKHover" class="chart-hover-card">将鼠标移动到蜡烛图上，可查看完整 OHLC 数值。</div>
+        <p class="hint-text">横轴为完整交易日期，纵轴为价格（元）。</p>
+    </div>
+    <div id="weekly-pane" class="chart-pane">
+        <h3>周 K 图</h3>
+        <canvas id="weeklyKChart" width="1100" height="420" class="chart-canvas"></canvas>
+        <div id="weeklyKHover" class="chart-hover-card">将鼠标移动到蜡烛图上，可查看完整 OHLC 数值。</div>
+        <p class="hint-text">横轴为完整周线日期，纵轴为价格（元）。</p>
+    </div>
+    <div id="monthly-pane" class="chart-pane">
+        <h3>月 K 图</h3>
+        <canvas id="monthlyKChart" width="1100" height="420" class="chart-canvas"></canvas>
+        <div id="monthlyKHover" class="chart-hover-card">将鼠标移动到蜡烛图上，可查看完整 OHLC 数值。</div>
+        <p class="hint-text">横轴为完整月份，纵轴为价格（元）。</p>
+    </div>
+    <div id="boll-pane" class="chart-pane">
+        <h3>BOLL 轨道图</h3>
+        <canvas id="bollChart" width="1100" height="420" class="chart-canvas"></canvas>
+        <div id="bollHover" class="chart-hover-card">将鼠标移动到折线图上，可查看收盘价与 BOLL 轨道数值。</div>
+        <p class="hint-text">蓝线为收盘价，绿线为 250 日线，紫线为 BOLL 上轨，橙线为 BOLL 中轨，红线为 BOLL 下轨。</p>
+    </div>
+</section>
+
+<script>
+    const payload = {{ chart_payload | tojson }};
+
+    function drawAxes(context, width, height, padding, minValue, maxValue, labels, labelFormatter) {
+        context.strokeStyle = '#cbd5e1';
+        context.lineWidth = 1;
+        context.strokeRect(padding.left, padding.top, width - padding.left - padding.right, height - padding.top - padding.bottom);
+
+        context.fillStyle = '#64748b';
+        context.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+        context.textAlign = 'right';
+        context.textBaseline = 'middle';
+
+        const tickCount = 5;
+        for (let index = 0; index <= tickCount; index += 1) {
+            const ratio = index / tickCount;
+            const value = maxValue - (maxValue - minValue) * ratio;
+            const y = padding.top + (height - padding.top - padding.bottom) * ratio;
+            context.beginPath();
+            context.moveTo(padding.left, y);
+            context.lineTo(width - padding.right, y);
+            context.strokeStyle = '#e2e8f0';
+            context.stroke();
+            context.fillText(`${value.toFixed(2)} 元`, padding.left - 8, y);
+        }
+
+        const xTickCount = Math.min(6, Math.max(labels.length - 1, 1));
+        context.textAlign = 'center';
+        context.textBaseline = 'top';
+        for (let index = 0; index <= xTickCount; index += 1) {
+            const labelIndex = Math.round((labels.length - 1) * (index / xTickCount));
+            const x = padding.left + (width - padding.left - padding.right) * (labelIndex / Math.max(labels.length - 1, 1));
+            context.fillText(labelFormatter(labels[labelIndex]), x, height - padding.bottom + 10);
+        }
+    }
+
+    function createScale(values) {
+        const filtered = values.filter((value) => value !== null && value !== undefined);
+        const minValue = Math.min(...filtered);
+        const maxValue = Math.max(...filtered);
+        const span = Math.max(maxValue - minValue, 1);
+        return {
+            min: minValue - span * 0.08,
+            max: maxValue + span * 0.08,
+        };
+    }
+
+    function bindChartTabs() {
+        const buttons = document.querySelectorAll('[data-chart-tab]');
+        const panes = document.querySelectorAll('.chart-pane');
+        buttons.forEach((button) => {
+            button.addEventListener('click', () => {
+                const target = button.dataset.chartTab;
+                buttons.forEach((item) => item.classList.toggle('active', item === button));
+                panes.forEach((pane) => pane.classList.toggle('active', pane.id === target));
+            });
+        });
+    }
+
+    function drawCandlestickChart(canvasId, dataset, hoverId) {
+        const canvas = document.getElementById(canvasId);
+        const hoverCard = document.getElementById(hoverId);
         const context = canvas.getContext('2d');
-        const series = [payload.close, payload.ma250, payload.bollUpper, payload.bollMid, payload.bollLower].flat().filter((value) => value !== null);
-        const minValue = Math.min(...series);
-        const maxValue = Math.max(...series);
         const width = canvas.width;
         const height = canvas.height;
-        const padding = 32;
+        const padding = { top: 20, right: 16, bottom: 54, left: 72 };
+        const scale = createScale([...dataset.high, ...dataset.low]);
+        const chartWidth = width - padding.left - padding.right;
+        const chartHeight = height - padding.top - padding.bottom;
+        const candleWidth = Math.max(6, Math.min(16, chartWidth / Math.max(dataset.labels.length * 1.8, 1)));
 
-        function xAt(index) {
-            return padding + index * ((width - padding * 2) / Math.max(payload.labels.length - 1, 1));
+        const yAt = (value) => padding.top + (scale.max - value) / (scale.max - scale.min) * chartHeight;
+        const xAt = (index) => padding.left + chartWidth * ((index + 0.5) / Math.max(dataset.labels.length, 1));
+
+        function render() {
+            context.clearRect(0, 0, width, height);
+            drawAxes(context, width, height, padding, scale.min, scale.max, dataset.labels, (label) => label);
+            dataset.labels.forEach((_, index) => {
+                const open = dataset.open[index];
+                const high = dataset.high[index];
+                const low = dataset.low[index];
+                const close = dataset.close[index];
+                const x = xAt(index);
+                const bodyTop = yAt(Math.max(open, close));
+                const bodyBottom = yAt(Math.min(open, close));
+                const color = close >= open ? '#dc2626' : '#16a34a';
+                context.strokeStyle = color;
+                context.lineWidth = 1.2;
+                context.beginPath();
+                context.moveTo(x, yAt(high));
+                context.lineTo(x, yAt(low));
+                context.stroke();
+                context.fillStyle = color;
+                const bodyHeight = Math.max(bodyBottom - bodyTop, 2);
+                context.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+            });
         }
 
-        function yAt(value) {
-            if (maxValue === minValue) return height / 2;
-            return height - padding - ((value - minValue) / (maxValue - minValue)) * (height - padding * 2);
-        }
+        render();
+        canvas.addEventListener('mousemove', (event) => {
+            const rect = canvas.getBoundingClientRect();
+            const relativeX = (event.clientX - rect.left) * (canvas.width / rect.width);
+            const index = Math.max(0, Math.min(dataset.labels.length - 1, Math.round(((relativeX - padding.left) / chartWidth) * dataset.labels.length - 0.5)));
+            hoverCard.textContent = `${dataset.labels[index]} ｜ 开 ${dataset.open[index].toFixed(2)} 元 ｜ 高 ${dataset.high[index].toFixed(2)} 元 ｜ 低 ${dataset.low[index].toFixed(2)} 元 ｜ 收 ${dataset.close[index].toFixed(2)} 元`;
+        });
+        canvas.addEventListener('mouseleave', () => {
+            hoverCard.textContent = '将鼠标移动到蜡烛图上，可查看完整 OHLC 数值。';
+        });
+    }
+
+    function drawLineChart(canvasId, dataset, hoverId) {
+        const canvas = document.getElementById(canvasId);
+        const hoverCard = document.getElementById(hoverId);
+        const context = canvas.getContext('2d');
+        const width = canvas.width;
+        const height = canvas.height;
+        const padding = { top: 20, right: 16, bottom: 54, left: 72 };
+        const scale = createScale([...(dataset.close || []), ...(dataset.ma250 || []), ...(dataset.bollUpper || []), ...(dataset.bollMid || []), ...(dataset.bollLower || [])]);
+        const chartWidth = width - padding.left - padding.right;
+        const chartHeight = height - padding.top - padding.bottom;
+        const xAt = (index) => padding.left + chartWidth * (index / Math.max(dataset.labels.length - 1, 1));
+        const yAt = (value) => padding.top + (scale.max - value) / (scale.max - scale.min) * chartHeight;
 
         function drawLine(values, color) {
             context.beginPath();
             context.strokeStyle = color;
             context.lineWidth = 2;
+            let started = false;
             values.forEach((value, index) => {
-                if (value === null) return;
+                if (value === null || value === undefined) {
+                    started = false;
+                    return;
+                }
                 const x = xAt(index);
                 const y = yAt(value);
-                if (index === 0 || values[index - 1] === null) {
+                if (!started) {
                     context.moveTo(x, y);
+                    started = true;
                 } else {
                     context.lineTo(x, y);
                 }
@@ -59,13 +203,32 @@
         }
 
         context.clearRect(0, 0, width, height);
-        context.strokeStyle = '#cbd5e1';
-        context.strokeRect(padding, padding / 2, width - padding * 2, height - padding * 1.5);
-        drawLine(payload.close, '#2563eb');
-        drawLine(payload.ma250, '#059669');
-        drawLine(payload.bollUpper, '#7c3aed');
-        drawLine(payload.bollMid, '#ea580c');
-        drawLine(payload.bollLower, '#dc2626');
-    </script>
-</section>
+        drawAxes(context, width, height, padding, scale.min, scale.max, dataset.labels, (label) => label);
+        drawLine(dataset.close, '#2563eb');
+        drawLine(dataset.ma250, '#059669');
+        drawLine(dataset.bollUpper, '#7c3aed');
+        drawLine(dataset.bollMid, '#ea580c');
+        drawLine(dataset.bollLower, '#dc2626');
+
+        canvas.addEventListener('mousemove', (event) => {
+            const rect = canvas.getBoundingClientRect();
+            const relativeX = (event.clientX - rect.left) * (canvas.width / rect.width);
+            const index = Math.max(0, Math.min(dataset.labels.length - 1, Math.round(((relativeX - padding.left) / chartWidth) * (dataset.labels.length - 1))));
+            const ma250 = dataset.ma250[index] == null ? '-' : `${dataset.ma250[index].toFixed(2)} 元`;
+            const upper = dataset.bollUpper[index] == null ? '-' : `${dataset.bollUpper[index].toFixed(2)} 元`;
+            const mid = dataset.bollMid[index] == null ? '-' : `${dataset.bollMid[index].toFixed(2)} 元`;
+            const lower = dataset.bollLower[index] == null ? '-' : `${dataset.bollLower[index].toFixed(2)} 元`;
+            hoverCard.textContent = `${dataset.labels[index]} ｜ 收 ${dataset.close[index].toFixed(2)} 元 ｜ MA250 ${ma250} ｜ 上轨 ${upper} ｜ 中轨 ${mid} ｜ 下轨 ${lower}`;
+        });
+        canvas.addEventListener('mouseleave', () => {
+            hoverCard.textContent = '将鼠标移动到折线图上，可查看收盘价与 BOLL 轨道数值。';
+        });
+    }
+
+    bindChartTabs();
+    drawCandlestickChart('dailyKChart', payload.daily_k, 'dailyKHover');
+    drawCandlestickChart('weeklyKChart', payload.weekly_k, 'weeklyKHover');
+    drawCandlestickChart('monthlyKChart', payload.monthly_k, 'monthlyKHover');
+    drawLineChart('bollChart', payload.boll, 'bollHover');
+</script>
 {% endblock %}

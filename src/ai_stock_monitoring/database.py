@@ -63,6 +63,12 @@ def initialize_database(settings: AppSettings) -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS user_portfolio_settings (
+                owner_username TEXT PRIMARY KEY,
+                total_investment_amount REAL NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS user_monitored_stock (
                 owner_username TEXT NOT NULL,
                 symbol TEXT NOT NULL,
@@ -371,6 +377,15 @@ def _column_exists(connection: sqlite3.Connection, table_name: str, column_name:
 
 
 def _ensure_schema_migrations(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_portfolio_settings (
+            owner_username TEXT PRIMARY KEY,
+            total_investment_amount REAL NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     if _table_exists(connection, "user_quant_settings") and not _column_exists(connection, "user_quant_settings", "strategy_params"):
         connection.execute(
             "ALTER TABLE user_quant_settings ADD COLUMN strategy_params TEXT NOT NULL DEFAULT '{}'"
@@ -411,6 +426,14 @@ def _ensure_user_config_rows(connection: sqlite3.Connection, username: str, now:
             json.dumps(DEFAULT_QUANT_STRATEGY_PARAMS, ensure_ascii=False),
             now,
         ),
+    )
+    connection.execute(
+        """
+        INSERT INTO user_portfolio_settings (owner_username, total_investment_amount, updated_at)
+        VALUES (?, 0, ?)
+        ON CONFLICT(owner_username) DO NOTHING
+        """,
+        (username, now),
     )
 
 
@@ -540,6 +563,30 @@ def update_user_password(db_path: str, username: str, password_hash: str) -> Non
 def update_admin_password(db_path: str, password_hash: str) -> None:
     admin = get_admin_user(db_path)
     update_user_password(db_path, admin["username"], password_hash)
+
+
+def get_portfolio_settings(db_path: str, owner_username: str) -> sqlite3.Row:
+    with get_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT owner_username, total_investment_amount, updated_at FROM user_portfolio_settings WHERE owner_username = ?",
+            (owner_username,),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("Portfolio settings not initialized")
+    return row
+
+
+def save_portfolio_settings(db_path: str, owner_username: str, total_investment_amount: float) -> None:
+    updated_at = datetime.now(UTC).isoformat()
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE user_portfolio_settings
+            SET total_investment_amount = ?, updated_at = ?
+            WHERE owner_username = ?
+            """,
+            (max(0.0, float(total_investment_amount)), updated_at, owner_username),
+        )
 
 
 def get_email_settings(db_path: str, owner_username: str) -> sqlite3.Row:
@@ -1066,7 +1113,7 @@ def add_trade_record(
 ) -> None:
     created_at = datetime.now(UTC).isoformat()
     normalized_price = round(float(price), 5)
-    normalized_traded_at = traded_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    normalized_traded_at = traded_at or datetime.now(UTC).isoformat()
     with get_connection(db_path) as connection:
         connection.execute(
             """
@@ -1075,6 +1122,17 @@ def add_trade_record(
             """,
             (owner_username, symbol, side, normalized_price, quantity, normalized_traded_at, note, created_at),
         )
+
+
+def count_trade_records(db_path: str, owner_username: str, symbol: str | None = None) -> int:
+    query = "SELECT COUNT(1) AS total FROM user_trade_record WHERE owner_username = ?"
+    parameters: list[str] = [owner_username]
+    if symbol:
+        query += " AND symbol = ?"
+        parameters.append(symbol)
+    with get_connection(db_path) as connection:
+        row = connection.execute(query, parameters).fetchone()
+    return int(row["total"] if row else 0)
 
 
 def list_trade_records(db_path: str, owner_username: str, symbol: str | None = None) -> list[sqlite3.Row]:
@@ -1087,9 +1145,35 @@ def list_trade_records(db_path: str, owner_username: str, symbol: str | None = N
     if symbol:
         query += " AND symbol = ?"
         parameters.append(symbol)
-    query += " ORDER BY traded_at DESC, id DESC"
+    query += " ORDER BY datetime(traded_at) DESC, id DESC"
     with get_connection(db_path) as connection:
         return list(connection.execute(query, parameters).fetchall())
+
+
+def list_trade_records_paginated(
+    db_path: str,
+    owner_username: str,
+    symbol: str | None = None,
+    page: int = 1,
+    page_size: int = 10,
+) -> tuple[list[sqlite3.Row], int]:
+    normalized_page = max(1, int(page))
+    normalized_page_size = max(1, min(100, int(page_size)))
+    total = count_trade_records(db_path, owner_username, symbol)
+    query = """
+        SELECT id, owner_username, symbol, side, price, quantity, traded_at, note, created_at
+        FROM user_trade_record
+        WHERE owner_username = ?
+    """
+    parameters: list[Any] = [owner_username]
+    if symbol:
+        query += " AND symbol = ?"
+        parameters.append(symbol)
+    query += " ORDER BY datetime(traded_at) DESC, id DESC LIMIT ? OFFSET ?"
+    parameters.extend([normalized_page_size, (normalized_page - 1) * normalized_page_size])
+    with get_connection(db_path) as connection:
+        rows = list(connection.execute(query, parameters).fetchall())
+    return rows, total
 
 
 def list_trade_records_for_symbol(db_path: str, owner_username: str, symbol: str) -> list[sqlite3.Row]:
@@ -1100,10 +1184,30 @@ def list_trade_records_for_symbol(db_path: str, owner_username: str, symbol: str
                 SELECT id, owner_username, symbol, side, price, quantity, traded_at, note, created_at
                 FROM user_trade_record
                 WHERE owner_username = ? AND symbol = ?
-                ORDER BY traded_at ASC, id ASC
+                ORDER BY datetime(traded_at) ASC, id ASC
                 """,
                 (owner_username, symbol),
             ).fetchall()
+        )
+
+
+def delete_trade_record(db_path: str, owner_username: str, trade_id: int) -> None:
+    with get_connection(db_path) as connection:
+        connection.execute(
+            "DELETE FROM user_trade_record WHERE owner_username = ? AND id = ?",
+            (owner_username, trade_id),
+        )
+
+
+def delete_trade_records_for_symbol(db_path: str, owner_username: str, symbol: str) -> None:
+    with get_connection(db_path) as connection:
+        connection.execute(
+            "DELETE FROM user_trade_record WHERE owner_username = ? AND symbol = ?",
+            (owner_username, symbol),
+        )
+        connection.execute(
+            "DELETE FROM user_trade_analysis WHERE owner_username = ? AND symbol = ?",
+            (owner_username, symbol),
         )
 
 

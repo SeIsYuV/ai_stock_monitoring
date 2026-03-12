@@ -554,11 +554,11 @@ def _build_portfolio_adjustment_advice(
 
     for item in reduce_candidates[:3]:
         priority_reduce.append(
-            f"优先考虑减仓 {item['symbol']}（占比 {item['weight_pct']:.2f}%），参考减仓价 {item['suggested_reduce_price']:.2f}，原因：{item['action_reason']}"
+            f"优先考虑减仓 {item.get('display_name') or item['symbol']}（占比 {item['weight_pct']:.2f}%），参考减仓价 {item['suggested_reduce_price']:.2f}，原因：{item['action_reason']}"
         )
     for item in add_candidates[:3]:
         priority_add.append(
-            f"若市场继续转强，可优先关注加仓 {item['symbol']}（当前占比 {item['weight_pct']:.2f}%），参考加仓价 {item['suggested_add_price']:.2f}。"
+            f"若市场继续转强，可优先关注加仓 {item.get('display_name') or item['symbol']}（当前占比 {item['weight_pct']:.2f}%），参考加仓价 {item['suggested_add_price']:.2f}。"
         )
 
     if overall_action == "偏卖出" and not priority_reduce:
@@ -574,6 +574,30 @@ def _build_portfolio_adjustment_advice(
     }
 
 
+def _build_portfolio_professional_advice(
+    holding_items: Sequence[Mapping[str, Any]],
+    overall_action: str,
+    risk_level: str,
+    weighted_quant_probability: float,
+    recommended_holding_ratio: str,
+) -> list[str]:
+    strongest = [item for item in holding_items if item.get("action") == "偏买入"]
+    weakest = [item for item in holding_items if item.get("action") == "偏卖出" or item.get("risk_level") == "高"]
+    strongest_names = "、".join(str(item.get("display_name") or item.get("symbol") or "-") for item in strongest[:3]) or "暂无明显强势仓位"
+    weakest_names = "、".join(str(item.get("display_name") or item.get("symbol") or "-") for item in weakest[:3]) or "暂无明显弱势仓位"
+    if weighted_quant_probability >= 75:
+        quant_view = "组合量化评分整体偏强"
+    elif weighted_quant_probability <= 45:
+        quant_view = "组合量化评分整体偏弱"
+    else:
+        quant_view = "组合量化评分处于中性区间"
+    return [
+        f"专业观点：当前组合判断为{overall_action}，风险等级为{risk_level}，建议总仓位参考 {recommended_holding_ratio}。",
+        f"量化视角：{quant_view}，可优先跟踪强势持仓 {strongest_names}。",
+        f"调仓重点：当前更需要关注 {weakest_names} 的仓位和节奏，避免弱势仓位拖累整体表现。",
+    ]
+
+
 def _recommended_holding_ratio_range(overall_action: str, risk_level: str, weighted_quant_probability: float) -> str:
     if overall_action == "偏卖出" or risk_level == "高":
         return "20% - 40%"
@@ -587,6 +611,7 @@ def _recommended_holding_ratio_range(overall_action: str, risk_level: str, weigh
 def build_portfolio_profile(
     trade_records: Sequence[Mapping[str, Any]],
     snapshots: Sequence[Mapping[str, Any]],
+    total_investment_amount: float | None = None,
 ) -> dict[str, Any]:
     """Build an account-level holdings profile from recorded trades and latest snapshots.
 
@@ -650,6 +675,7 @@ def build_portfolio_profile(
         return {
             "has_positions": False,
             "holding_ratio": 0.0,
+            "total_investment_amount": round(float(total_investment_amount or 0.0), 2),
             "recommended_holding_ratio": "0% - 20%",
             "holding_style": "空仓观察型",
             "risk_level": "低",
@@ -668,8 +694,9 @@ def build_portfolio_profile(
             "overall_adjustment_suggestions": ["当前空仓，建议先从小仓位试探，不必急于满仓。"],
             "priority_reduce_positions": [],
             "priority_add_positions": [],
+            "professional_advice": ["当前账户没有持仓，可先设置股市总投入金额并等待更明确的买入信号。"],
             "risk_reasons": ["当前账户没有在途仓位，整体回撤压力较低。"],
-            "analysis_note": "持仓比例按已记录交易资金估算。",
+            "analysis_note": "若已填写股市总投入金额，持仓比例会按当前持仓市值 / 总投入金额计算。",
         }
 
     for item in holding_items:
@@ -714,8 +741,10 @@ def build_portfolio_profile(
     )
     total_unrealized_pnl = round(total_market_value - total_cost_basis, 2)
     total_unrealized_pnl_pct = round((total_unrealized_pnl / total_cost_basis) * 100, 2) if total_cost_basis > 0 else 0.0
+    normalized_total_investment_amount = round(max(float(total_investment_amount or 0.0), 0.0), 2)
     estimated_portfolio_base = total_market_value + max(total_sell_amount, 0.0)
-    holding_ratio = round((total_market_value / estimated_portfolio_base) * 100, 2) if estimated_portfolio_base > 0 else 0.0
+    base_amount = normalized_total_investment_amount if normalized_total_investment_amount > 0 else estimated_portfolio_base
+    holding_ratio = round((total_market_value / base_amount) * 100, 2) if base_amount > 0 else 0.0
 
     portfolio_buy_score = round(sum(item["market_value"] * build_market_action_summary(item["snapshot"])["buy_score"] for item in holding_items) / max(total_market_value, 1), 2)
     portfolio_sell_score = round(sum(item["market_value"] * build_market_action_summary(item["snapshot"])["sell_score"] for item in holding_items) / max(total_market_value, 1), 2)
@@ -798,10 +827,18 @@ def build_portfolio_profile(
         recommended_holding_ratio,
         overall_action,
     )
+    professional_advice = _build_portfolio_professional_advice(
+        holding_items,
+        overall_action,
+        risk_level,
+        weighted_quant_probability,
+        recommended_holding_ratio,
+    )
 
     return {
         "has_positions": True,
         "holding_ratio": holding_ratio,
+        "total_investment_amount": normalized_total_investment_amount,
         "recommended_holding_ratio": recommended_holding_ratio,
         "holding_style": holding_style,
         "risk_level": risk_level,
@@ -820,8 +857,12 @@ def build_portfolio_profile(
         "overall_adjustment_suggestions": adjustment_advice["overall_suggestions"],
         "priority_reduce_positions": adjustment_advice["priority_reduce"],
         "priority_add_positions": adjustment_advice["priority_add"],
+        "professional_advice": professional_advice,
         "risk_reasons": portfolio_risk_reasons or ["组合结构暂时平衡，没有明显超额风险信号。"],
-        "analysis_note": "持仓比例按已记录交易资金估算：当前持仓市值 /（当前持仓市值 + 历史卖出回笼资金）。",
+        "analysis_note": (
+            "持仓比例按当前持仓市值 / 股市总投入金额计算。" if normalized_total_investment_amount > 0
+            else "尚未填写股市总投入金额，当前持仓比例先按已记录交易资金估算：当前持仓市值 /（当前持仓市值 + 历史卖出回笼资金）。"
+        ),
     }
 
 

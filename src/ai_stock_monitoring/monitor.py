@@ -250,11 +250,59 @@ class StockMonitor:
             now=now,
         )
 
-    def build_chart_payload(self, symbol: str) -> dict[str, list[float | str | None]]:
-        daily_bars = self.provider.get_daily_bars(symbol, limit=max(self.settings.detail_chart_days, 20))
+    def _aggregate_monthly_bars(self, daily_bars: list[PriceBar]) -> list[PriceBar]:
+        monthly_bars: list[PriceBar] = []
+        current_bucket: list[PriceBar] = []
+        current_key: tuple[int, int] | None = None
+
+        for bar in daily_bars:
+            bucket_key = (bar.traded_on.year, bar.traded_on.month)
+            if current_key is None or bucket_key == current_key:
+                current_bucket.append(bar)
+                current_key = bucket_key
+                continue
+            monthly_bars.append(
+                PriceBar(
+                    traded_on=current_bucket[-1].traded_on,
+                    open_price=current_bucket[0].open_price,
+                    high_price=max(item.high_price for item in current_bucket),
+                    low_price=min(item.low_price for item in current_bucket),
+                    close_price=current_bucket[-1].close_price,
+                )
+            )
+            current_bucket = [bar]
+            current_key = bucket_key
+
+        if current_bucket:
+            monthly_bars.append(
+                PriceBar(
+                    traded_on=current_bucket[-1].traded_on,
+                    open_price=current_bucket[0].open_price,
+                    high_price=max(item.high_price for item in current_bucket),
+                    low_price=min(item.low_price for item in current_bucket),
+                    close_price=current_bucket[-1].close_price,
+                )
+            )
+        return monthly_bars
+
+    def _build_candlestick_payload(self, bars: list[PriceBar], limit: int, label_format: str) -> dict[str, list[float | str]]:
+        visible_bars = bars[-limit:]
+        return {
+            "labels": [item.traded_on.strftime(label_format) for item in visible_bars],
+            "open": [round(float(item.open_price), 2) for item in visible_bars],
+            "high": [round(float(item.high_price), 2) for item in visible_bars],
+            "low": [round(float(item.low_price), 2) for item in visible_bars],
+            "close": [round(float(item.close_price), 2) for item in visible_bars],
+        }
+
+    def build_chart_payload(self, symbol: str) -> dict[str, Any]:
+        daily_bars = self.provider.get_daily_bars(symbol, limit=max(self.settings.detail_chart_days * 6, 320))
+        weekly_bars = self.provider.get_weekly_bars(symbol, limit=120)
+        monthly_bars = self._aggregate_monthly_bars(daily_bars)
         closes = [float(item.close_price) for item in daily_bars]
-        labels = [item.traded_on.isoformat() for item in daily_bars[-self.settings.detail_chart_days :]]
-        close_series = closes[-self.settings.detail_chart_days :]
+        boll_limit = max(self.settings.detail_chart_days, 20)
+        labels = [item.traded_on.strftime("%Y-%m-%d") for item in daily_bars[-boll_limit:]]
+        close_series = closes[-boll_limit:]
         ma_250_series: list[float | None] = []
         boll_mid_series: list[float | None] = []
         boll_lower_series: list[float | None] = []
@@ -273,12 +321,17 @@ class StockMonitor:
                 calculate_bollinger_upper_band(closes[: index + 1], 20) if index >= 19 else None
             )
         return {
-            "labels": labels,
-            "close": close_series,
-            "ma250": ma_250_series[-self.settings.detail_chart_days :],
-            "bollMid": boll_mid_series[-self.settings.detail_chart_days :],
-            "bollLower": boll_lower_series[-self.settings.detail_chart_days :],
-            "bollUpper": boll_upper_series[-self.settings.detail_chart_days :],
+            "daily_k": self._build_candlestick_payload(daily_bars, max(self.settings.detail_chart_days, 60), "%Y-%m-%d"),
+            "weekly_k": self._build_candlestick_payload(weekly_bars, 52, "%Y-%m-%d"),
+            "monthly_k": self._build_candlestick_payload(monthly_bars, 36, "%Y-%m"),
+            "boll": {
+                "labels": labels,
+                "close": [round(float(value), 2) for value in close_series],
+                "ma250": ma_250_series[-boll_limit:],
+                "bollMid": boll_mid_series[-boll_limit:],
+                "bollLower": boll_lower_series[-boll_limit:],
+                "bollUpper": boll_upper_series[-boll_limit:],
+            },
         }
 
     def build_snapshot(
