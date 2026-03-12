@@ -24,7 +24,7 @@
 ## 本地启动
 
 1. 创建并激活虚拟环境
-2. 安装依赖：`pip install -r requirements.txt`
+2. 安装依赖：`pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt`
 3. 如需大模型分析，可先执行：`cp .env.example .env` 并填写 `OPENAI_API_KEY`
 4. 启动服务：`./start.sh` 或 `python main.py`
 5. 打开：`http://127.0.0.1:1217`
@@ -38,9 +38,15 @@
 
 1. 复制模板：`cp .env.example .env`
 2. 按需修改 `.env`（尤其是 `OPENAI_API_KEY`）
-3. 构建并启动：`docker compose up -d --build`
+3. 构建并启动：`docker compose up -d --build`（Dockerfile 已默认优先使用清华 PyPI 镜像）
 4. 打开：`http://127.0.0.1:1217`
 5. 数据文件会落在宿主机 `./data/`
+
+## 下载镜像源
+
+- Docker 构建安装 Python 依赖时，默认优先使用清华 PyPI 镜像
+- 本地安装依赖时，README 中也默认使用清华 PyPI 镜像命令
+- 如果你后续想换成别的国内镜像，可以在 Docker 构建时覆盖 `PIP_INDEX_URL` 和 `PIP_TRUSTED_HOST`
 
 ## 环境模板
 
