@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     ASM_HOST=0.0.0.0 \
-    ASM_PORT=1217 \
+    ASM_PORT=11223 \
     ASM_DB_PATH=/app/data/stock_monitor.db
 
 WORKDIR /app
@@ -22,6 +22,6 @@ RUN pip install --no-cache-dir \
 COPY . ./
 RUN chmod +x start.sh && mkdir -p /app/data
 
-EXPOSE 1217
+EXPOSE 11223
 
 CMD ["./start.sh"]

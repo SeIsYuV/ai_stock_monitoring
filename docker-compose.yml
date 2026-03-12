@@ -7,10 +7,10 @@ services:
     build: .
     container_name: ai-stock-monitoring
     ports:
-      - "${ASM_PORT:-1217}:${ASM_PORT:-1217}"
+      - "${ASM_PORT:-11223}:${ASM_PORT:-11223}"
     environment:
       ASM_HOST: ${ASM_HOST:-0.0.0.0}
-      ASM_PORT: ${ASM_PORT:-1217}
+      ASM_PORT: ${ASM_PORT:-11223}
       ASM_DB_PATH: ${ASM_DB_PATH:-/app/data/stock_monitor.db}
       ASM_PROVIDER: ${ASM_PROVIDER:-akshare}
       ASM_LLM_PROVIDER: ${ASM_LLM_PROVIDER:-openai}

@@ -10,7 +10,7 @@ class AppSettings:
 
     app_name: str = "AI Stock Monitoring"
     host: str = "127.0.0.1"
-    port: int = 1217
+    port: int = 11223
     db_path: str = "stock_monitor.db"
     refresh_interval_seconds: int = 30
     admin_username: str = "admin"
@@ -36,7 +36,7 @@ def load_settings() -> AppSettings:
 
     return AppSettings(
         host=os.getenv("ASM_HOST", "127.0.0.1"),
-        port=int(os.getenv("ASM_PORT", "1217")),
+        port=int(os.getenv("ASM_PORT", "11223")),
         db_path=os.getenv("ASM_DB_PATH", "stock_monitor.db"),
         refresh_interval_seconds=int(os.getenv("ASM_REFRESH_INTERVAL", "30")),
         admin_username=os.getenv("ASM_ADMIN_USERNAME", "admin"),
