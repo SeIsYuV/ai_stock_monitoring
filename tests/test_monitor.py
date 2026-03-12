@@ -222,7 +222,13 @@ class MonitorTests(unittest.TestCase):
         )
         self.assertIn("买点：", advice["comprehensive_advice"])
         self.assertIn("卖点：", advice["comprehensive_advice"])
+        self.assertIn("买入等级", advice["comprehensive_advice"])
+        self.assertIn("卖出等级", advice["comprehensive_advice"])
         self.assertIn("四模型综合", advice["comprehensive_advice"])
+        self.assertGreaterEqual(advice["buy_recommendation_level"], 1)
+        self.assertLessEqual(advice["buy_recommendation_level"], 10)
+        self.assertGreaterEqual(advice["sell_recommendation_level"], 1)
+        self.assertLessEqual(advice["sell_recommendation_level"], 10)
         self.assertIsNone(advice["dcf_intrinsic_value"])
         self.assertIn("DCF", advice["dcf_reason"])
 
@@ -311,6 +317,8 @@ class MonitorTests(unittest.TestCase):
                 self.assertIn("DCF代理内在价值", trades_page.text)
                 self.assertIn("推荐买入价", trades_page.text)
                 self.assertIn("观望关注价", trades_page.text)
+                self.assertIn("买入等级", trades_page.text)
+                self.assertIn("卖出等级", trades_page.text)
 
     def test_trade_export_route_returns_excel(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
@@ -802,16 +810,16 @@ class MonitorTests(unittest.TestCase):
                 self.assertEqual(events[0]["client_host"], "1.2.3.4")
                 self.assertEqual(events[0]["user_agent"], "pytest-agent/1.0")
 
-                dashboard_response = client.get("/dashboard")
-                self.assertEqual(dashboard_response.status_code, 200)
-                self.assertIn("最近登录记录", dashboard_response.text)
-                self.assertIn("最近一次登录", dashboard_response.text)
-                self.assertIn("账号列表", dashboard_response.text)
-                self.assertIn("最近登录", dashboard_response.text)
-                self.assertIn("1.2.3.4", dashboard_response.text)
-                self.assertIn("20 日最大波动率阈值", dashboard_response.text)
-                self.assertIn("BOLL 中轨最大偏离", dashboard_response.text)
-                self.assertIn("table-scroll", dashboard_response.text)
+                settings_response = client.get("/settings")
+                self.assertEqual(settings_response.status_code, 200)
+                self.assertIn("最近登录记录", settings_response.text)
+                self.assertIn("最近一次登录", settings_response.text)
+                self.assertIn("账号列表", settings_response.text)
+                self.assertIn("最近登录", settings_response.text)
+                self.assertIn("1.2.3.4", settings_response.text)
+                self.assertIn("20 日最大波动率阈值", settings_response.text)
+                self.assertIn("BOLL 中轨最大偏离", settings_response.text)
+                self.assertIn("table-scroll", settings_response.text)
 
     def test_market_action_summary_prefers_sell_when_sell_signals_dominate(self) -> None:
         summary = build_market_action_summary(

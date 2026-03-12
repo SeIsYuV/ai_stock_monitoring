@@ -36,7 +36,10 @@
         .message-info::before { content: "i"; }
         .status-danger, .danger-text { color: #dc2626; }
         .status-ok { color: #059669; }
+        .pnl-profit { color: #dc2626; }
+        .pnl-loss { color: #059669; }
         .top-nav a { color: #fff; margin-left: 12px; text-decoration: none; }
+        .top-nav a.active { font-weight: 700; text-decoration: underline; text-underline-offset: 4px; }
         .modal { position: fixed; top: 24px; right: 24px; width: min(420px, calc(100vw - 48px)); background: #fff; border: 2px solid #dc2626; border-radius: 12px; padding: 16px; box-shadow: 0 20px 30px rgba(15, 23, 42, 0.16); z-index: 10; }
         .pill { display: inline-block; background: #fee2e2; color: #991b1b; border-radius: 999px; padding: 4px 10px; font-size: 12px; }
         .footer-status { display: flex; gap: 16px; flex-wrap: wrap; font-size: 14px; color: #475569; }
@@ -118,11 +121,29 @@
         .advice-card > div:nth-child(3) strong { color: #ea580c; }
         .advice-card > div:nth-child(4) { background: #faf5ff; }
         .advice-card > div:nth-child(4) strong { color: #7c3aed; }
+        .advice-thermometer { margin-top: 8px; display: grid; gap: 6px; }
+        .advice-thermometer-row { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+        .advice-thermometer-label { font-size: 12px; font-weight: 700; color: #475569; }
+        .advice-thermometer-track { position: relative; height: 8px; border-radius: 999px; background: linear-gradient(90deg, #dcfce7 0%, #fef3c7 50%, #fee2e2 100%); overflow: hidden; }
+        .advice-thermometer-track::after { content: ""; position: absolute; inset: 0; background: repeating-linear-gradient(90deg, transparent 0, transparent calc(10% - 1px), rgba(255,255,255,0.75) calc(10% - 1px), rgba(255,255,255,0.75) 10%); }
+        .advice-thermometer-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 999px; }
+        .advice-thermometer-fill.buy { background: linear-gradient(90deg, #fca5a5 0%, #ef4444 100%); }
+        .advice-thermometer-fill.sell { background: linear-gradient(90deg, #86efac 0%, #16a34a 100%); }
+        .advice-thermometer-value { font-size: 12px; font-weight: 700; white-space: nowrap; }
+        .advice-thermometer-value.buy { color: #b91c1c; }
+        .advice-thermometer-value.sell { color: #15803d; }
         .compact-advice { min-width: 240px; }
         .stock-cell .stock-name { max-width: none; }
         .signal-cell { min-width: 0; }
         .advice-cell { min-width: 0; }
+        .summary-layout { display: grid; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); gap: 16px; align-items: start; }
+        .pie-panel { display: flex; flex-direction: column; align-items: center; }
+        .position-pie-canvas { width: min(280px, 100%); height: auto; }
+        .pie-legend { display: grid; gap: 10px; }
+        .pie-legend-item { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 10px; align-items: center; font-size: 14px; }
+        .pie-dot { width: 12px; height: 12px; border-radius: 999px; display: inline-block; }
         @media (max-width: 900px) {
+            .summary-layout { grid-template-columns: 1fr; }
             header { flex-direction: column; align-items: flex-start; }
             .top-nav a { margin-left: 0; margin-right: 12px; }
             main { padding: 16px; }
@@ -138,9 +159,10 @@
         {% endif %}
     </div>
     <nav class="top-nav">
-        <a href="/dashboard">监控面板</a>
-        <a href="/trades">交易复盘</a>
-        <a href="/history">历史提醒</a>
+        <a href="/dashboard"{% if request.url.path == '/dashboard' or request.url.path.startswith('/stocks/') %} class="active"{% endif %}>监控面板</a>
+        <a href="/trades"{% if request.url.path.startswith('/trades') %} class="active"{% endif %}>交易复盘</a>
+        <a href="/settings"{% if request.url.path == '/settings' %} class="active"{% endif %}>设置</a>
+        <a href="/history"{% if request.url.path.startswith('/history') %} class="active"{% endif %}>历史提醒</a>
         <a href="/logout">退出</a>
     </nav>
 </header>

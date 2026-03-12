@@ -320,18 +320,25 @@ class StockMonitor:
             boll_upper_series.append(
                 calculate_bollinger_upper_band(closes[: index + 1], 20) if index >= 19 else None
             )
+        boll_payload = {
+            "labels": labels,
+            "close": [round(float(value), 2) for value in close_series],
+            "ma250": ma_250_series[-boll_limit:],
+            "bollMid": boll_mid_series[-boll_limit:],
+            "bollLower": boll_lower_series[-boll_limit:],
+            "bollUpper": boll_upper_series[-boll_limit:],
+        }
         return {
             "daily_k": self._build_candlestick_payload(daily_bars, max(self.settings.detail_chart_days, 60), "%Y-%m-%d"),
             "weekly_k": self._build_candlestick_payload(weekly_bars, 52, "%Y-%m-%d"),
             "monthly_k": self._build_candlestick_payload(monthly_bars, 36, "%Y-%m"),
-            "boll": {
-                "labels": labels,
-                "close": [round(float(value), 2) for value in close_series],
-                "ma250": ma_250_series[-boll_limit:],
-                "bollMid": boll_mid_series[-boll_limit:],
-                "bollLower": boll_lower_series[-boll_limit:],
-                "bollUpper": boll_upper_series[-boll_limit:],
-            },
+            "boll": boll_payload,
+            "labels": boll_payload["labels"],
+            "close": boll_payload["close"],
+            "ma250": boll_payload["ma250"],
+            "bollMid": boll_payload["bollMid"],
+            "bollLower": boll_payload["bollLower"],
+            "bollUpper": boll_payload["bollUpper"],
         }
 
     def build_snapshot(

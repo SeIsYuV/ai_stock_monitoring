@@ -43,7 +43,7 @@
         <h3>当前持仓摘要</h3>
         <p>持仓数量：{{ position_summary['position_quantity'] }}</p>
         <p>持仓均价：{{ '%.2f'|format(position_summary['average_cost']) }}</p>
-        <p>累计已实现盈亏：{{ '%.2f'|format(position_summary['realized_pnl']) }}</p>
+        <p>累计已实现盈亏：<span class="{% if position_summary['realized_pnl'] > 0 %}pnl-profit{% elif position_summary['realized_pnl'] < 0 %}pnl-loss{% else %}muted{% endif %}">{{ '%.2f'|format(position_summary['realized_pnl']) }}</span></p>
         <p>异常卖出数量：{{ position_summary['invalid_sell_quantity'] }}</p>
         {% endif %}
     </div>
@@ -88,7 +88,7 @@
         </div>
         <div class="metric-card">
             <strong>未实现盈亏</strong>
-            <span class="muted {% if portfolio_profile['total_unrealized_pnl'] >= 0 %}status-ok{% else %}status-danger{% endif %}">
+            <span class="{% if portfolio_profile['total_unrealized_pnl'] > 0 %}pnl-profit{% elif portfolio_profile['total_unrealized_pnl'] < 0 %}pnl-loss{% else %}muted{% endif %}">
                 {{ '%.2f'|format(portfolio_profile['total_unrealized_pnl']) }}
                 （{{ '%.2f%%'|format(portfolio_profile['total_unrealized_pnl_pct']) }}）
             </span>
@@ -152,7 +152,7 @@
                 <td>{{ '%.2f'|format(item['average_cost']) }}</td>
                 <td>{{ '%.2f'|format(item['latest_price']) }}</td>
                 <td>{{ '%.2f'|format(item['market_value']) }}</td>
-                <td class="{% if item['unrealized_pnl'] >= 0 %}status-ok{% else %}status-danger{% endif %}">
+                <td class="{% if item['unrealized_pnl'] > 0 %}pnl-profit{% elif item['unrealized_pnl'] < 0 %}pnl-loss{% else %}muted{% endif %}">
                     {{ '%.2f'|format(item['unrealized_pnl']) }}
                     <div class="muted">{{ '%.2f%%'|format(item['unrealized_pnl_pct']) }}</div>
                 </td>
@@ -227,8 +227,36 @@
     <p><strong>综合建议：</strong></p>
     <div class="advice-card">
         <div><strong>结论</strong><span>{{ latest_analysis['analysis'].get('comprehensive_advice_card', {}).get('conclusion', latest_analysis['analysis'].get('comprehensive_advice_text', latest_analysis['analysis']['position_advice'])) }}</span></div>
-        <div><strong>买点</strong><span>{{ latest_analysis['analysis'].get('comprehensive_advice_card', {}).get('buy', latest_analysis['analysis'].get('recommended_buy_price_range', '-')) }}</span></div>
-        <div><strong>卖点</strong><span>{{ latest_analysis['analysis'].get('comprehensive_advice_card', {}).get('sell', latest_analysis['analysis'].get('recommended_sell_price_range', '-')) }}</span></div>
+        <div>
+            <strong>买点</strong>
+            <span>
+                {{ latest_analysis['analysis'].get('comprehensive_advice_card', {}).get('buy', latest_analysis['analysis'].get('recommended_buy_price_range', '-')) }}
+                <div class="advice-thermometer">
+                    <div class="advice-thermometer-row">
+                        <span class="advice-thermometer-label">买入级别</span>
+                        <div class="advice-thermometer-track">
+                            <div class="advice-thermometer-fill buy" style="width: {{ latest_analysis['analysis'].get('buy_recommendation_level', 0) * 10 }}%;"></div>
+                        </div>
+                        <span class="advice-thermometer-value buy">{{ latest_analysis['analysis'].get('buy_recommendation_level', '-') }}/10</span>
+                    </div>
+                </div>
+            </span>
+        </div>
+        <div>
+            <strong>卖点</strong>
+            <span>
+                {{ latest_analysis['analysis'].get('comprehensive_advice_card', {}).get('sell', latest_analysis['analysis'].get('recommended_sell_price_range', '-')) }}
+                <div class="advice-thermometer">
+                    <div class="advice-thermometer-row">
+                        <span class="advice-thermometer-label">卖出级别</span>
+                        <div class="advice-thermometer-track">
+                            <div class="advice-thermometer-fill sell" style="width: {{ latest_analysis['analysis'].get('sell_recommendation_level', 0) * 10 }}%;"></div>
+                        </div>
+                        <span class="advice-thermometer-value sell">{{ latest_analysis['analysis'].get('sell_recommendation_level', '-') }}/10</span>
+                    </div>
+                </div>
+            </span>
+        </div>
         <div><strong>DCF</strong><span>{{ latest_analysis['analysis'].get('comprehensive_advice_card', {}).get('dcf', latest_analysis['market_snapshot'].get('dcf_reason', '-')) }}</span></div>
     </div>
     <p><strong>DCF代理内在价值：</strong>{{ '%.2f'|format(latest_analysis['market_snapshot']['dcf_intrinsic_value']) if latest_analysis['market_snapshot']['dcf_intrinsic_value'] is not none else '暂无估值' }}{% if latest_analysis['market_snapshot']['dcf_valuation_gap_pct'] is not none %} ｜ 估值偏差 {{ '%.2f%%'|format(latest_analysis['market_snapshot']['dcf_valuation_gap_pct']) }}{% elif latest_analysis['market_snapshot']['dcf_reason'] %} ｜ {{ latest_analysis['market_snapshot']['dcf_reason'] }}{% endif %}</p>

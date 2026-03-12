@@ -718,7 +718,6 @@ def save_login_unlock_code(
     expires_at: str,
 ) -> None:
     created_at = datetime.now(UTC).isoformat()
-    normalized_price = round(float(price), 5)
     with get_connection(db_path) as connection:
         connection.execute(
             """

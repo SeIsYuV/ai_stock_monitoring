@@ -519,7 +519,9 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             analysis_sheet.append(["合理性判断", analysis["judgment"]])
             analysis_sheet.append(["仓位建议", analysis["position_advice"]])
             analysis_sheet.append(["推荐买入价", analysis.get("recommended_buy_price_range", "")])
+            analysis_sheet.append(["推荐买入等级", f"{analysis.get('buy_recommendation_level', '')}/10 {analysis.get('buy_recommendation_level_label', '')}".strip()])
             analysis_sheet.append(["推荐卖出价", analysis.get("recommended_sell_price_range", "")])
+            analysis_sheet.append(["推荐卖出等级", f"{analysis.get('sell_recommendation_level', '')}/10 {analysis.get('sell_recommendation_level_label', '')}".strip()])
             analysis_sheet.append(["观望关注价", analysis.get("watch_price_range", "")])
             analysis_sheet.append(["DCF代理内在价值", market_snapshot.get("dcf_intrinsic_value") or ""])
             analysis_sheet.append(["DCF估值偏差(%)", market_snapshot.get("dcf_valuation_gap_pct") or ""])
@@ -591,13 +593,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             float(portfolio_settings["total_investment_amount"] or 0.0),
         )
         email_settings = get_email_settings(resolved_settings.db_path, owner_username)
-        quant_settings = get_quant_settings(resolved_settings.db_path, owner_username)
-        quant_strategy_params = normalize_strategy_params(json.loads(quant_settings["strategy_params"] or "{}"))
         unread_alerts = get_unread_alerts(resolved_settings.db_path, owner_username) if status.is_market_open else []
-        selected_models = normalize_selected_models(json.loads(quant_settings["selected_models"] or "[]"))
-        recent_login_events = list_recent_login_events(resolved_settings.db_path, owner_username)
-        latest_login_event = recent_login_events[0] if recent_login_events else None
-        previous_login_event = recent_login_events[1] if len(recent_login_events) > 1 else None
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -607,23 +603,51 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 message=message,
                 message_type=message_type,
                 page_title="监控面板",
-                admin_username=get_admin_user(resolved_settings.db_path)["username"],
-                email_settings=email_settings,
-                quant_settings=quant_settings,
-                quant_model_options=available_quant_models(),
-                quant_selected_models=selected_models,
-                quant_strategy_params=quant_strategy_params,
                 portfolio_profile=portfolio_profile,
-                is_admin=bool(current_user["is_admin"]),
-                recent_login_events=recent_login_events,
-                latest_login_event=latest_login_event,
-                previous_login_event=previous_login_event,
                 monitor=monitor,
                 price_column_label="最新价" if status.is_market_open else "最近收盘/最新可用价",
                 snapshots=snapshots,
                 status=status,
                 system_status=_build_system_status(monitor, email_settings),
                 unread_alerts=unread_alerts,
+            ),
+        )
+
+    @app.get("/settings", response_class=HTMLResponse)
+    async def settings_page(
+        request: Request,
+        message: str | None = None,
+        message_type: str = "info",
+    ) -> Response:
+        current_user = _require_login(request, resolved_settings)
+        if isinstance(current_user, RedirectResponse):
+            return current_user
+
+        owner_username = current_user["username"]
+        email_settings = get_email_settings(resolved_settings.db_path, owner_username)
+        quant_settings = get_quant_settings(resolved_settings.db_path, owner_username)
+        quant_strategy_params = normalize_strategy_params(json.loads(quant_settings["strategy_params"] or "{}"))
+        selected_models = normalize_selected_models(json.loads(quant_settings["selected_models"] or "[]"))
+        recent_login_events = list_recent_login_events(resolved_settings.db_path, owner_username)
+        latest_login_event = recent_login_events[0] if recent_login_events else None
+        previous_login_event = recent_login_events[1] if len(recent_login_events) > 1 else None
+        return templates.TemplateResponse(
+            request,
+            "settings.html",
+            _base_template_context(
+                request,
+                current_user,
+                message=message,
+                message_type=message_type,
+                page_title="设置",
+                email_settings=email_settings,
+                quant_settings=quant_settings,
+                quant_model_options=available_quant_models(),
+                quant_selected_models=selected_models,
+                quant_strategy_params=quant_strategy_params,
+                recent_login_events=recent_login_events,
+                latest_login_event=latest_login_event,
+                previous_login_event=previous_login_event,
                 users=list_users(resolved_settings.db_path) if current_user["is_admin"] else [],
             ),
         )
@@ -660,7 +684,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         owner_username = current_user["username"]
         valid_symbols, invalid_symbols = parse_stock_symbols(symbols_text)
         if not valid_symbols:
-            return _redirect_with_message("/dashboard", "请输入6位有效A股代码")
+            return _redirect_with_message("/settings", "请输入6位有效A股代码")
         refresh_failed_symbols: list[str] = []
         for symbol in valid_symbols:
             add_monitored_stock(resolved_settings.db_path, owner_username, symbol)
@@ -670,15 +694,15 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 refresh_failed_symbols.append(symbol)
         if invalid_symbols:
             return _redirect_with_message(
-                "/dashboard",
+                "/settings",
                 f"已加入 {len(valid_symbols)} 只股票；以下代码无效：{', '.join(invalid_symbols)}",
             )
         if refresh_failed_symbols:
             return _redirect_with_message(
-                "/dashboard",
+                "/settings",
                 f"已加入 {len(valid_symbols)} 只股票；以下股票暂未拉到最新数据：{', '.join(refresh_failed_symbols)}",
             )
-        return _redirect_with_message("/dashboard", f"已加入 {len(valid_symbols)} 只股票")
+        return _redirect_with_message("/settings", f"已加入 {len(valid_symbols)} 只股票")
 
     @app.post("/stocks/{symbol}/delete")
     async def delete_stock(request: Request, symbol: str) -> RedirectResponse:
@@ -784,6 +808,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 "boll_upper": snapshot.boll_upper,
                 "dividend_yield": snapshot.dividend_yield,
                 "quant_probability": snapshot.quant_probability,
+                "quant_model_breakdown": snapshot.quant_model_breakdown,
                 "trigger_state": snapshot.trigger_state,
                 "trigger_detail": snapshot.trigger_detail,
                 "updated_at": snapshot.updated_at.isoformat(),
@@ -867,7 +892,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             sender_email=sender_email.strip(),
             sender_password=sender_password.strip(),
         )
-        return _redirect_with_message("/dashboard", "邮箱配置已保存")
+        return _redirect_with_message("/settings", "邮箱配置已保存")
 
     @app.post("/settings/quant")
     async def update_quant_settings(
@@ -920,7 +945,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 await asyncio.to_thread(app.state.monitor.refresh_symbol_snapshot, current_user["username"], item["symbol"])
             except Exception:
                 continue
-        return _redirect_with_message("/dashboard", "量化提醒设置已保存")
+        return _redirect_with_message("/settings", "量化提醒设置已保存")
 
     @app.post("/settings/admin-password")
     async def update_account_password_route(
@@ -934,17 +959,17 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             return current_user
 
         if not verify_password(current_password, current_user["password_hash"]):
-            return _redirect_with_message("/dashboard", "当前密码不正确")
+            return _redirect_with_message("/settings", "当前密码不正确")
         if len(new_password) < 8:
-            return _redirect_with_message("/dashboard", "新密码至少需要 8 位")
+            return _redirect_with_message("/settings", "新密码至少需要 8 位")
         if new_password != confirm_password:
-            return _redirect_with_message("/dashboard", "两次输入的新密码不一致")
+            return _redirect_with_message("/settings", "两次输入的新密码不一致")
         if new_password == current_password:
-            return _redirect_with_message("/dashboard", "新密码不能和当前密码相同")
+            return _redirect_with_message("/settings", "新密码不能和当前密码相同")
 
         update_user_password(resolved_settings.db_path, current_user["username"], hash_password(new_password))
         refreshed_user = get_user(resolved_settings.db_path, current_user["username"])
-        response = _redirect_with_message("/dashboard", "当前账号密码已更新，请牢记新密码")
+        response = _redirect_with_message("/settings", "当前账号密码已更新，请牢记新密码")
         if refreshed_user is not None:
             response.set_cookie(
                 resolved_settings.session_cookie_name,
@@ -966,19 +991,19 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         if isinstance(current_user, RedirectResponse):
             return current_user
         if not current_user["is_admin"]:
-            return _redirect_with_message("/dashboard", "只有管理员可以新增账号")
+            return _redirect_with_message("/settings", "只有管理员可以新增账号")
 
         normalized_username = username.strip()
         if len(normalized_username) < 3 or len(normalized_username) > 32:
-            return _redirect_with_message("/dashboard", "账号长度需在 3 到 32 位之间")
+            return _redirect_with_message("/settings", "账号长度需在 3 到 32 位之间")
         if not all(char.isalnum() or char in {"_", "-", "."} for char in normalized_username):
-            return _redirect_with_message("/dashboard", "账号仅支持字母、数字、下划线、中划线和点")
+            return _redirect_with_message("/settings", "账号仅支持字母、数字、下划线、中划线和点")
         if len(password) < 8:
-            return _redirect_with_message("/dashboard", "新账号密码至少需要 8 位")
+            return _redirect_with_message("/settings", "新账号密码至少需要 8 位")
         if password != confirm_password:
-            return _redirect_with_message("/dashboard", "两次输入的账号密码不一致")
+            return _redirect_with_message("/settings", "两次输入的账号密码不一致")
         if get_user(resolved_settings.db_path, normalized_username) is not None:
-            return _redirect_with_message("/dashboard", "该账号已存在")
+            return _redirect_with_message("/settings", "该账号已存在")
         try:
             create_user(
                 resolved_settings.db_path,
@@ -987,8 +1012,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 is_admin=is_admin is not None,
             )
         except sqlite3.IntegrityError:
-            return _redirect_with_message("/dashboard", "该账号已存在")
-        return _redirect_with_message("/dashboard", f"账号 {normalized_username} 已创建")
+            return _redirect_with_message("/settings", "该账号已存在")
+        return _redirect_with_message("/settings", f"账号 {normalized_username} 已创建")
 
     @app.post("/settings/email/test")
     async def test_email(request: Request) -> RedirectResponse:
@@ -1005,7 +1030,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             notice = f"测试邮件发送成功，请检查收件箱：{email_settings['recipient_email']}"
         else:
             notice = f"测试邮件发送失败：{result.error}"
-        return _redirect_with_message("/dashboard", notice)
+        return _redirect_with_message("/settings", notice)
 
     @app.post("/alerts/{alert_id}/read")
     async def confirm_alert(request: Request, alert_id: int) -> RedirectResponse:
@@ -1171,6 +1196,11 @@ def _get_authenticated_user(request: Request, settings: AppSettings) -> object |
 def _serialize_latest_analysis_row(latest_analysis_row: object) -> dict[str, object]:
     market_snapshot = _decorate_snapshot_for_display(json.loads(latest_analysis_row["market_snapshot"]))
     analysis = json.loads(latest_analysis_row["analysis_json"])
+    analysis.setdefault("buy_recommendation_level", market_snapshot.get("buy_recommendation_level", 5))
+    analysis.setdefault("sell_recommendation_level", market_snapshot.get("sell_recommendation_level", 5))
+    analysis.setdefault("buy_recommendation_level_label", market_snapshot.get("buy_recommendation_level_label", "中性"))
+    analysis.setdefault("sell_recommendation_level_label", market_snapshot.get("sell_recommendation_level_label", "中性"))
+    analysis.setdefault("recommendation_level_method", market_snapshot.get("recommendation_level_method", "基于多模型综合评分"))
     model_consensus = str(market_snapshot.get("model_consensus") or "多模型综合结论")
     watch_price_range = analysis.get('watch_price_range', '-')
     recommended_buy_price_range = analysis.get('recommended_buy_price_range', '-')
@@ -1185,12 +1215,21 @@ def _serialize_latest_analysis_row(latest_analysis_row: object) -> dict[str, obj
         f"{model_consensus}；{analysis['position_advice']}；"
         f"推荐买入价 {recommended_buy_price_range}；"
         f"推荐卖出价 {recommended_sell_price_range}；"
+        f"买入等级 {analysis['buy_recommendation_level']}/10；"
+        f"卖出等级 {analysis['sell_recommendation_level']}/10；"
         f"观望关注价 {watch_price_range}。"
     )
     analysis["comprehensive_advice_card"] = {
         "conclusion": f"{model_consensus}；{analysis['position_advice']}",
-        "buy": f"买点：{recommended_buy_price_range}；关注位 {watch_price_range}",
-        "sell": f"卖点：{recommended_sell_price_range}",
+        "buy": (
+            f"买点：{recommended_buy_price_range}；"
+            f"买入等级 {analysis['buy_recommendation_level']}/10（{analysis['buy_recommendation_level_label']}）；"
+            f"关注位 {watch_price_range}"
+        ),
+        "sell": (
+            f"卖点：{recommended_sell_price_range}；"
+            f"卖出等级 {analysis['sell_recommendation_level']}/10（{analysis['sell_recommendation_level_label']}）"
+        ),
         "dcf": dcf_line,
     }
     return {

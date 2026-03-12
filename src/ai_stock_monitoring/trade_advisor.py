@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 import json
+import math
 from typing import Any, Mapping, Sequence
 
 import requests
@@ -153,6 +154,117 @@ def build_market_action_summary(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "dominant_model_score": round(dominant_model_score, 2),
         "buy_score": buy_score,
         "sell_score": sell_score,
+    }
+
+
+
+def _clamp_level(raw_score: float) -> int:
+    bounded = max(1.0, min(10.0, raw_score))
+    return int(math.floor(bounded + 0.5))
+
+
+
+def _level_label(level: int) -> str:
+    if level >= 9:
+        return "极强"
+    if level >= 7:
+        return "较强"
+    if level >= 5:
+        return "中性"
+    if level >= 3:
+        return "较弱"
+    return "极弱"
+
+
+
+def _build_recommendation_levels(
+    snapshot: Mapping[str, Any],
+    action_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    quant_probability = float(snapshot.get("quant_probability") or 0.0)
+    latest_price = float(snapshot.get("latest_price") or 0.0)
+    ma_250 = float(snapshot.get("ma_250") or 0.0)
+    boll_mid = float(snapshot.get("boll_mid") or 0.0)
+    boll_lower = float(snapshot.get("boll_lower") or 0.0)
+    boll_upper = float(snapshot.get("boll_upper") or 0.0)
+    dcf_gap = snapshot.get("dcf_valuation_gap_pct")
+    try:
+        dcf_gap_pct = float(dcf_gap) if dcf_gap is not None else None
+    except (TypeError, ValueError):
+        dcf_gap_pct = None
+
+    ranked_models = sorted(
+        _load_quant_models(snapshot),
+        key=lambda item: float(item.get("score") or 0.0),
+        reverse=True,
+    )[:4]
+    top_scores = [float(item.get("score") or 0.0) for item in ranked_models]
+    top_average = sum(top_scores) / len(top_scores) if top_scores else quant_probability
+    bullish_models = sum(1 for score in top_scores if score >= 60)
+    bearish_models = sum(1 for score in top_scores if score <= 40)
+    dispersion = 0.0
+    if top_scores:
+        dispersion = math.sqrt(sum((score - top_average) ** 2 for score in top_scores) / len(top_scores))
+    consensus_bonus = max(0.0, 1.6 - min(dispersion, 16.0) / 10.0)
+
+    buy_level_raw = 1.0
+    sell_level_raw = 1.0
+
+    buy_level_raw += min(3.2, quant_probability / 30.0)
+    sell_level_raw += min(3.2, max(0.0, 100.0 - quant_probability) / 30.0)
+
+    buy_level_raw += min(1.8, top_average / 55.0)
+    sell_level_raw += min(1.8, max(0.0, 100.0 - top_average) / 55.0)
+
+    if ranked_models:
+        buy_level_raw += min(1.0, bullish_models / len(ranked_models))
+        sell_level_raw += min(1.0, bearish_models / len(ranked_models))
+        buy_level_raw += consensus_bonus
+        sell_level_raw += consensus_bonus
+
+    buy_level_raw += min(2.0, float(action_summary.get("buy_score") or 0.0) / 4.0)
+    sell_level_raw += min(2.0, float(action_summary.get("sell_score") or 0.0) / 4.0)
+
+    if latest_price > 0 and ma_250 > 0:
+        trend_gap_pct = (latest_price - ma_250) / ma_250 * 100
+        if trend_gap_pct >= 0:
+            buy_level_raw += min(0.9, 0.3 + trend_gap_pct / 12.0)
+        else:
+            sell_level_raw += min(0.9, 0.3 + abs(trend_gap_pct) / 12.0)
+
+    if latest_price > 0 and boll_lower > 0 and latest_price <= boll_mid and latest_price >= boll_lower:
+        buy_level_raw += 0.6
+    if latest_price > 0 and boll_upper > 0 and latest_price >= boll_mid and latest_price >= boll_upper * 0.97:
+        sell_level_raw += 0.6
+
+    if dcf_gap_pct is not None:
+        if dcf_gap_pct >= 0:
+            buy_level_raw += min(1.0, dcf_gap_pct / 18.0)
+            sell_level_raw -= min(0.6, dcf_gap_pct / 30.0)
+        else:
+            sell_level_raw += min(1.0, abs(dcf_gap_pct) / 18.0)
+            buy_level_raw -= min(0.6, abs(dcf_gap_pct) / 30.0)
+
+    action = str(action_summary.get("action") or "观望")
+    if action == "偏买入":
+        buy_level_raw += 0.8
+        sell_level_raw -= 0.4
+    elif action == "偏卖出":
+        sell_level_raw += 0.8
+        buy_level_raw -= 0.4
+
+    buy_level = _clamp_level(buy_level_raw)
+    sell_level = _clamp_level(sell_level_raw)
+    return {
+        "buy_recommendation_level": buy_level,
+        "sell_recommendation_level": sell_level,
+        "buy_recommendation_level_label": _level_label(buy_level),
+        "sell_recommendation_level_label": _level_label(sell_level),
+        "recommendation_level_method": (
+            "参考多模型量化项目常见框架，综合四模型均分、一致性、显式买卖信号、趋势位置与 DCF 安全边际后得到 10 级评分。"
+        ),
+        "top_model_average_score": round(top_average, 2),
+        "top_model_dispersion": round(dispersion, 2),
     }
 
 
@@ -373,6 +485,7 @@ def build_stock_comprehensive_advice(
     action_summary = build_market_action_summary(resolved_snapshot)
     price_plan = build_recommended_price_plan(resolved_snapshot, action_summary, resolved_position_summary)
     model_consensus_title, model_consensus_text = _build_quant_model_consensus(resolved_snapshot)
+    recommendation_levels = _build_recommendation_levels(resolved_snapshot, action_summary)
 
     dcf_intrinsic_value = resolved_snapshot.get("dcf_intrinsic_value")
     dcf_valuation_gap_pct = resolved_snapshot.get("dcf_valuation_gap_pct")
@@ -393,13 +506,21 @@ def build_stock_comprehensive_advice(
         decision_summary = "当前买卖信号仍在拉锯，建议先等确认位给出方向"
 
     conclusion_line = f"{action}｜{model_consensus_text}；{decision_summary}。"
-    buy_line = f"买点：{price_plan['recommended_buy_price_range']}"
+    buy_line = (
+        f"买点：{price_plan['recommended_buy_price_range']}｜"
+        f"买入等级 {recommendation_levels['buy_recommendation_level']}/10"
+        f"（{recommendation_levels['buy_recommendation_level_label']}）"
+    )
     if price_plan["suggested_add_price"] > 0:
         buy_line += f"（参考加仓价 {price_plan['suggested_add_price']:.2f}）"
     if price_plan["watch_price_range"] != "暂无明确价位":
         buy_line += f"；关注位 {price_plan['watch_price_range']}"
 
-    sell_line = f"卖点：{price_plan['recommended_sell_price_range']}"
+    sell_line = (
+        f"卖点：{price_plan['recommended_sell_price_range']}｜"
+        f"卖出等级 {recommendation_levels['sell_recommendation_level']}/10"
+        f"（{recommendation_levels['sell_recommendation_level_label']}）"
+    )
     if price_plan["suggested_reduce_price"] > 0:
         sell_line += f"（参考减仓价 {price_plan['suggested_reduce_price']:.2f}）"
     if price_plan["suggested_stop_loss_price"] > 0:
@@ -440,6 +561,13 @@ def build_stock_comprehensive_advice(
         "advice_sell_line": sell_line,
         "advice_dcf_line": dcf_line,
         "model_consensus": model_consensus_text,
+        "buy_recommendation_level": recommendation_levels["buy_recommendation_level"],
+        "sell_recommendation_level": recommendation_levels["sell_recommendation_level"],
+        "buy_recommendation_level_label": recommendation_levels["buy_recommendation_level_label"],
+        "sell_recommendation_level_label": recommendation_levels["sell_recommendation_level_label"],
+        "recommendation_level_method": recommendation_levels["recommendation_level_method"],
+        "top_model_average_score": recommendation_levels["top_model_average_score"],
+        "top_model_dispersion": recommendation_levels["top_model_dispersion"],
         "dcf_intrinsic_value": resolved_snapshot.get("dcf_intrinsic_value"),
         "dcf_valuation_gap_pct": resolved_snapshot.get("dcf_valuation_gap_pct"),
         "dcf_label": resolved_snapshot.get("dcf_label"),
@@ -973,6 +1101,7 @@ class TradeAdvisor:
                 )
             except Exception as exc:  # pragma: no cover - network side effect
                 fallback = self._rule_based_analysis(market_snapshot, position_summary)
+                fallback.update(build_stock_comprehensive_advice(market_snapshot, position_summary))
                 return TradeAnalysisResult(
                     provider="rule-based",
                     model_name="local-fallback",
@@ -981,11 +1110,13 @@ class TradeAdvisor:
                     error_message=str(exc),
                 )
 
+        fallback_analysis = self._rule_based_analysis(market_snapshot, position_summary)
+        fallback_analysis.update(build_stock_comprehensive_advice(market_snapshot, position_summary))
         return TradeAnalysisResult(
             provider="rule-based",
             model_name="local-fallback",
             status="fallback",
-            analysis=self._rule_based_analysis(market_snapshot, position_summary),
+            analysis=fallback_analysis,
             error_message="未配置 OPENAI_API_KEY，已回退到规则分析",
         )
 
@@ -1108,6 +1239,7 @@ class TradeAdvisor:
         payload = response.json()
         raw_text = self._extract_output_text(payload)
         analysis = json.loads(raw_text)
+        analysis.update(build_stock_comprehensive_advice(market_snapshot, position_summary))
         return TradeAnalysisResult(
             provider="openai",
             model_name=self.settings.llm_model_name,
