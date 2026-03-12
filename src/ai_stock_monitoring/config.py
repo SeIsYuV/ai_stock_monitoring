@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Centralized application settings.
+
+这里的字段几乎都会映射到环境变量，
+因此部署、Docker、本地运行看到的配置都应该先来这里找。
+"""
+
 from dataclasses import dataclass
 import os
 

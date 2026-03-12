@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-"""FastAPI web layer for monitoring, journaling and trade analysis."""
+"""FastAPI web layer for monitoring, journaling and trade analysis.
+
+新人接手建议先从本文件读起：
+1. `create_app` 负责组装整个 Web 应用
+2. `lifespan` 负责启动时初始化数据库和后台轮询
+3. `/dashboard`、`/trades`、`/history` 分别对应三个核心页面
+4. 页面真正依赖的监控逻辑在 `monitor.py`，交易分析在 `trade_advisor.py`
+"""
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -45,10 +52,26 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
 def create_app(settings: AppSettings | None = None) -> FastAPI:
+    """Create and configure the FastAPI application.
+
+    这里集中完成三件事：
+    - 加载配置
+    - 注册生命周期钩子
+    - 定义页面和表单路由
+
+    这样新人只需要看这一处，就能理解系统从启动到响应请求的大体流程。
+    """
+
     resolved_settings = settings or load_settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        """Manage app startup and shutdown.
+
+        - 启动时：创建数据库表、启动后台监控循环
+        - 关闭时：优雅停止后台任务，避免留下悬挂协程
+        """
+
         initialize_database(resolved_settings)
         app.state.monitor_task = asyncio.create_task(_monitor_loop(app))
         try:
@@ -63,6 +86,9 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                     pass
 
     app = FastAPI(title=resolved_settings.app_name, lifespan=lifespan)
+
+    # `app.state` 是 FastAPI 提供的全局挂载点。
+    # 我们把配置、监控器、交易分析器都挂在这里，后面的路由就能直接复用。
     app.state.settings = resolved_settings
     app.state.monitor = StockMonitor(resolved_settings)
     app.state.trade_advisor = TradeAdvisor(resolved_settings)
@@ -132,6 +158,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         if guard is not None:
             return guard
 
+        # `/trades` 既可以看全部交易，也可以通过 `?symbol=600519` 聚焦单只股票。
         selected_symbol = (symbol or "").strip()
         trade_records = list_trade_records(resolved_settings.db_path, selected_symbol or None)
         latest_analysis_row = get_latest_trade_analysis(
@@ -170,6 +197,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             return guard
 
         selected_symbol = (symbol or "").strip() or None
+        # 导出功能只依赖内存中的 `BytesIO`，不会在服务器磁盘上额外生成临时文件。
         workbook = Workbook()
         worksheet = workbook.active
         worksheet.title = "交易流水"
@@ -304,6 +332,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         if guard is not None:
             return guard
 
+        # 交易流水是后续持仓重建的基础，所以这里先把输入校验做严一点。
         if side not in {"buy", "sell"}:
             return _redirect_with_message("/trades", "交易方向只能是买入或卖出")
         if not symbol.isdigit() or len(symbol) != 6:
@@ -341,6 +370,9 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
         monitor: StockMonitor = app.state.monitor
         trade_advisor: TradeAdvisor = app.state.trade_advisor
+
+        # 分析依赖“最新行情 + 历史交易流水”。
+        # 如果实时行情暂时拉取失败，会退回使用数据库里的最近一次快照。
         try:
             snapshot = await asyncio.to_thread(monitor.build_snapshot, symbol)
             snapshot_payload = {
@@ -494,6 +526,12 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
 
 async def _monitor_loop(app: FastAPI) -> None:
+    """Background loop that keeps monitoring data fresh.
+
+    这里不是按请求触发，而是应用启动后一直循环运行：
+    - 交易时段内刷新行情和告警
+    - 非交易时段也会周期性检查时间窗口，确保 9:25 / 9:30 / 15:00 的逻辑能生效
+    """
     settings: AppSettings = app.state.settings
     monitor: StockMonitor = app.state.monitor
     while True:
@@ -516,6 +554,7 @@ def _build_system_status(monitor: StockMonitor, email_settings: object) -> dict[
 
 
 def _is_authenticated(request: Request, settings: AppSettings) -> bool:
+    """Check whether the current browser already holds the login cookie."""
     return request.cookies.get(settings.session_cookie_name) == "1"
 
 
@@ -553,12 +592,14 @@ def _send_trade_analysis_email_if_configured(db_path: str, symbol: str) -> str |
 
 
 def _require_login(request: Request, settings: AppSettings) -> RedirectResponse | None:
+    """Redirect anonymous users to the login page."""
     if _is_authenticated(request, settings):
         return None
     return RedirectResponse(url="/login", status_code=303)
 
 
 def _redirect_with_message(path: str, message: str) -> RedirectResponse:
+    """Redirect while carrying a short flash message in query string form."""
     return RedirectResponse(url=f"{path}?message={quote(message)}", status_code=303)
 
 

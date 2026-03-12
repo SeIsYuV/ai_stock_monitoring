@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-"""Trade journal analysis helpers and LLM integration."""
+"""Trade journal analysis helpers and LLM integration.
+
+这个模块回答两个问题：
+1. 用户现在到底持有多少仓位、成本是多少
+2. 当前买卖操作放到趋势和均线里看，是否算合理
+
+如果配置了 `OPENAI_API_KEY`，会优先调用大模型；
+否则退回到本地规则分析，保证功能始终可用。
+"""
 
 from dataclasses import dataclass
 import json
@@ -71,6 +79,10 @@ def build_position_summary(trades: Sequence[Mapping[str, Any]]) -> dict[str, Any
 
 
 class TradeAdvisor:
+    """Generate trade rationality analysis and next-step suggestions.
+
+    这里故意把“分析”从路由层拆开，避免 `app.py` 里混入太多提示词和规则细节。
+    """
     """Generate trade rationality analysis and next-step suggestions."""
 
     def __init__(self, settings: AppSettings) -> None:
@@ -134,6 +146,8 @@ class TradeAdvisor:
     ) -> TradeAnalysisResult:
         """Call the OpenAI Responses API and request a structured JSON answer."""
 
+        # 这里组装的是给大模型看的完整上下文：
+        # 持仓摘要 + 当前快照 + 逐笔交易流水。
         prompt = {
             "symbol": symbol,
             "market_snapshot": market_snapshot,
@@ -182,6 +196,7 @@ class TradeAdvisor:
             },
             "strict": True,
         }
+        # 当前接的是 OpenAI Responses API，并要求模型严格输出 JSON。
         response = requests.post(
             self.settings.llm_base_url,
             headers={
@@ -274,6 +289,7 @@ class TradeAdvisor:
         next_sell_points: list[str] = []
         risk_controls: list[str] = []
 
+        # 规则分析的目标不是代替投顾，而是在没有 LLM 时给出基础复盘建议。
         if position_quantity == 0:
             reasoning.append("当前没有持仓，更适合把重点放在分批建仓和风险预算上。")
         else:

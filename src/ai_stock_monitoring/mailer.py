@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""SMTP mail helpers shared by alerts and trade analysis emails."""
+
 from dataclasses import dataclass
 from email.message import EmailMessage
 import smtplib
@@ -14,6 +16,7 @@ class EmailDeliveryResult:
 
 
 def send_message(email_settings: Any, subject: str, body: str) -> EmailDeliveryResult:
+    """Send one SMTP email using the credentials configured in the Web UI."""
     if not email_settings["recipient_email"]:
         return EmailDeliveryResult(False, "未配置", "未填写收件人邮箱")
     if not email_settings["smtp_server"]:

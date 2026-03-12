@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Trading calendar and market-hour helpers.
+
+这个模块只负责“时间判断”，不关心行情、邮件或数据库。
+把时间逻辑单独抽出来后，测试会简单很多。
+"""
+
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
@@ -17,6 +23,11 @@ class MarketStatus:
 
 
 class TradeCalendar:
+    """Small wrapper around a list of trade dates.
+
+    如果实时交易日历加载失败，会退回到“工作日”模式，
+    这样应用至少还能启动和演示。
+    """
     def __init__(self, trade_dates: list[date] | None = None) -> None:
         self.trade_dates = sorted(trade_dates or [])
         self.trade_date_set = set(self.trade_dates)
@@ -45,6 +56,8 @@ def get_market_status(
     timezone_name: str = "Asia/Shanghai",
     now: datetime | None = None,
 ) -> MarketStatus:
+    """Translate the current time into the app-specific market status."""
+
     current_time = now.astimezone(ZoneInfo(timezone_name)) if now else datetime.now(
         ZoneInfo(timezone_name)
     )

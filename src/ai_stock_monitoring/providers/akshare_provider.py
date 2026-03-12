@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+"""AKShare-based market data provider.
+
+职责边界：
+- 只负责向外部数据源取数
+- 不负责提醒逻辑
+- 不负责数据库写入
+
+这样后面如果想替换成别的数据源，只需要保持这里的接口一致。
+"""
+
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Callable
 
@@ -16,12 +26,15 @@ def _to_float(value: Any) -> float:
 
 
 class AkshareMarketDataProvider(MarketDataProvider):
+    """Fetch quotes, history bars, dividends and trade dates through AKShare."""
     provider_name = "akshare"
 
     def __init__(self) -> None:
+        # 轻量内存缓存：减少同一轮页面刷新里反复打外部接口。
         self._cache: dict[tuple[str, str], tuple[datetime, Any]] = {}
 
     def get_quote(self, symbol: str) -> Quote:
+        """Load the latest quote and display name for one symbol."""
         info = self._cached(
             key=("quote", symbol),
             ttl_seconds=20,
@@ -41,6 +54,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         )
 
     def get_daily_bars(self, symbol: str, limit: int = 320) -> list[PriceBar]:
+        """Load daily forward-adjusted bars, enough for 250-day calculations."""
         start_date = (datetime.now(UTC).date() - timedelta(days=800)).strftime("%Y%m%d")
         frame = self._cached(
             key=("daily", symbol),
@@ -56,6 +70,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         return self._to_bars(frame.tail(limit))
 
     def get_weekly_bars(self, symbol: str, limit: int = 80) -> list[PriceBar]:
+        """Load weekly forward-adjusted bars for 30/60-week MA calculations."""
         start_date = (datetime.now(UTC).date() - timedelta(days=900)).strftime("%Y%m%d")
         frame = self._cached(
             key=("weekly", symbol),
@@ -71,6 +86,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         return self._to_bars(frame.tail(limit))
 
     def get_trailing_dividend_yield(self, symbol: str, latest_price: float) -> float:
+        """Approximate trailing 12-month dividend yield from historical dividend records."""
         if latest_price <= 0:
             return 0.0
         detail = self._cached(
@@ -110,6 +126,8 @@ class AkshareMarketDataProvider(MarketDataProvider):
         ttl_seconds: int,
         builder: Callable[[], Any],
     ) -> Any:
+        """Return cached provider data when TTL has not expired yet."""
+
         now = datetime.now(UTC)
         cached_item = self._cache.get(key)
         if cached_item and cached_item[0] > now:

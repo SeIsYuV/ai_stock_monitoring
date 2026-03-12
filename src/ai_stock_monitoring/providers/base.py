@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Abstract data-provider contracts used by the monitoring engine."""
+
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -22,6 +24,7 @@ class PriceBar:
 
 
 class MarketDataProvider:
+    """Provider interface so the rest of the app is not tied to one vendor."""
     provider_name = "base"
 
     def get_quote(self, symbol: str) -> Quote:

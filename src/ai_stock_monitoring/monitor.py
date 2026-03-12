@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-"""Monitoring engine for market checks, alerts and chart data."""
+"""Monitoring engine for market checks, alerts and chart data.
+
+这是业务核心模块。
+如果你只想理解“系统到底怎么判断要不要提醒”，优先看：
+- `run_cycle`：整轮监控的调度入口
+- `_refresh_open_session`：盘中 30 秒刷新逻辑
+- `_prepare_dividend_alerts`：开盘前股息率提醒
+- `_prepare_weekly_cross_alerts`：周线交叉次日提醒
+- `_process_intraday_signal`：连续 2 次触发才真正报警
+"""
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -47,10 +56,18 @@ class SnapshotComputation:
 
 
 def validate_stock_symbol(symbol: str) -> bool:
+    """Validate the simplified A-share symbol format used by this app."""
     return len(symbol) == 6 and symbol.isdigit()
 
 
 def parse_stock_symbols(raw_text: str) -> tuple[list[str], list[str]]:
+    """Split pasted text into valid and invalid stock codes.
+
+    页面支持用户一次粘贴多只股票，所以这里会同时处理：
+    - 换行
+    - 中英文逗号
+    - 空格和分号
+    """
     candidates = [item.strip() for item in re.split(r"[\s,，;；]+", raw_text) if item.strip()]
     valid_symbols: list[str] = []
     invalid_symbols: list[str] = []
@@ -64,6 +81,7 @@ def parse_stock_symbols(raw_text: str) -> tuple[list[str], list[str]]:
 
 
 def calculate_simple_moving_average(values: list[float], window: int) -> float:
+    """Return a simple moving average for the last `window` values."""
     if len(values) < window:
         return 0.0
     return round(sum(values[-window:]) / window, 2)
@@ -89,6 +107,11 @@ def compute_snapshot_metrics(
     weekly_bars: list[PriceBar],
     dividend_yield: float,
 ) -> SnapshotComputation:
+    """Build a one-symbol monitoring snapshot from quote and history data.
+
+    这里把不同来源的数据压缩成前端和告警都能直接消费的统一结构。
+    """
+
     daily_closes = [item.close_price for item in daily_bars]
     weekly_closes = [item.close_price for item in weekly_bars]
 
@@ -136,7 +159,9 @@ def compute_snapshot_metrics(
 
 
 class StockMonitor:
+    """Coordinate time rules, market data refresh, alerts and chart payloads."""
     def __init__(self, settings: AppSettings) -> None:
+        """Prepare provider, trade calendar and runtime state."""
         self.settings = settings
         self.provider = load_provider(settings.provider_name)
         try:
@@ -198,9 +223,17 @@ class StockMonitor:
         )
 
     def run_cycle(self, now: datetime | None = None) -> None:
+        """Execute one monitoring cycle.
+
+        一轮 cycle 会根据当前时间进入不同分支：
+        - 9:25~9:30：准备股息率提醒
+        - 9:30~15:00：刷新行情并检查盘中触发
+        - 收盘后且为周最后交易日：准备周线交叉提醒
+        """
         if not self._lock.acquire(blocking=False):
             return
         try:
+            # 先判定当前时间处于哪个业务窗口，再决定要做哪些事。
             status = self.get_market_status(now)
             trade_date = status.current_time.date()
             if status.is_pre_open_window:
@@ -216,10 +249,12 @@ class StockMonitor:
             self._lock.release()
 
     def _refresh_open_session(self, trade_date: date) -> None:
+        """Refresh snapshots and evaluate intraday alerts during market hours."""
         email_settings = get_email_settings(self.settings.db_path)
         for stock in get_monitored_stocks(self.settings.db_path):
             symbol = stock["symbol"]
             try:
+                # 先拿到统一快照，再分别喂给快照表、告警逻辑、前端页面。
                 snapshot = self.build_snapshot(symbol)
                 upsert_snapshot(
                     db_path=self.settings.db_path,
@@ -280,6 +315,12 @@ class StockMonitor:
         indicator_values: dict[str, float | str],
         email_settings: Any,
     ) -> None:
+        """Apply the “two consecutive hits” rule for intraday alerts.
+
+        需求里要求 250 日线和 BOLL 中轨要连续两次刷新都满足，才算真正触发。
+        因此这里会把每只股票、每种信号的连续命中次数持久化到数据库。
+        """
+
         state = get_signal_state(self.settings.db_path, symbol, trigger_type)
         hits = 1 if condition_met and state is None else 0
         if condition_met and state is not None:
@@ -315,6 +356,7 @@ class StockMonitor:
         )
 
     def _prepare_dividend_alerts(self, trade_date: date) -> None:
+        """Prepare dividend-yield alerts before the market opens."""
         marker = trade_date.isoformat()
         job_state = get_job_state(self.settings.db_path, "dividend_prep")
         if job_state and job_state["last_run_marker"] == marker:
@@ -350,6 +392,7 @@ class StockMonitor:
         set_job_state(self.settings.db_path, "dividend_prep", marker)
 
     def _prepare_weekly_cross_alerts(self, trade_date: date) -> None:
+        """Prepare weekly MA cross alerts for delivery on next trading day."""
         marker = trade_date.isoformat()
         job_state = get_job_state(self.settings.db_path, "weekly_cross_prep")
         if job_state and job_state["last_run_marker"] == marker:
@@ -388,6 +431,7 @@ class StockMonitor:
         set_job_state(self.settings.db_path, "weekly_cross_prep", marker)
 
     def _deliver_pending_alerts(self, trade_date: date) -> None:
+        """Deliver alerts that were prepared earlier but should fire today."""
         email_settings = get_email_settings(self.settings.db_path)
         for state in list_pending_signal_states(self.settings.db_path, trade_date.isoformat()):
             payload = json.loads(state["pending_payload"] or "{}")
@@ -427,6 +471,8 @@ class StockMonitor:
         email_settings: Any,
         triggered_at: str,
     ) -> None:
+        """Persist one alert event and try to send its email notification."""
+
         payload = {
             "symbol": symbol,
             "display_name": display_name,

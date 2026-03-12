@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""SQLite persistence layer.
+
+设计原则：
+- 不引入额外 ORM，降低部署复杂度
+- 每个函数只做一件很具体的数据库操作
+- 路由层和业务层通过这些小函数读写数据，减少 SQL 分散到各处
+"""
+
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 import json
@@ -12,6 +20,7 @@ from .security import hash_password
 
 @contextmanager
 def get_connection(db_path: str) -> Iterator[sqlite3.Connection]:
+    """Open a short-lived SQLite connection with row access by column name."""
     connection = sqlite3.connect(db_path)
     connection.row_factory = sqlite3.Row
     try:
@@ -25,6 +34,8 @@ def initialize_database(settings: AppSettings) -> None:
     """Create or migrate the lightweight SQLite schema."""
 
     with get_connection(settings.db_path) as connection:
+        # 这里集中定义所有表结构。
+        # 新人排查数据问题时，优先从这段 schema 看有哪些持久化对象。
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS admin_user (
@@ -34,12 +45,14 @@ def initialize_database(settings: AppSettings) -> None:
                 updated_at TEXT NOT NULL
             );
 
+            -- 观察池：当前需要监控的股票代码列表
             CREATE TABLE IF NOT EXISTS monitored_stock (
                 symbol TEXT PRIMARY KEY,
                 display_name TEXT,
                 created_at TEXT NOT NULL
             );
 
+            -- 邮箱配置：通过 Web 页面手动填写的 SMTP 信息
             CREATE TABLE IF NOT EXISTS email_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 recipient_email TEXT,
@@ -49,6 +62,7 @@ def initialize_database(settings: AppSettings) -> None:
                 updated_at TEXT NOT NULL
             );
 
+            -- 最新快照：前端监控列表主要读这里
             CREATE TABLE IF NOT EXISTS stock_snapshot (
                 symbol TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL,
@@ -63,6 +77,7 @@ def initialize_database(settings: AppSettings) -> None:
                 updated_at TEXT NOT NULL
             );
 
+            -- 历史提醒：所有已触发事件的持久化留痕
             CREATE TABLE IF NOT EXISTS alert_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
@@ -76,6 +91,7 @@ def initialize_database(settings: AppSettings) -> None:
                 read_at TEXT
             );
 
+            -- 信号状态：用于记录连续命中次数和待发送提醒
             CREATE TABLE IF NOT EXISTS signal_state (
                 symbol TEXT NOT NULL,
                 trigger_type TEXT NOT NULL,
@@ -89,12 +105,14 @@ def initialize_database(settings: AppSettings) -> None:
                 PRIMARY KEY (symbol, trigger_type)
             );
 
+            -- 作业状态：避免 9:25 或周线任务在同一天重复执行
             CREATE TABLE IF NOT EXISTS job_state (
                 job_name TEXT PRIMARY KEY,
                 last_run_marker TEXT,
                 updated_at TEXT NOT NULL
             );
 
+            -- 交易流水：用户手动录入的买卖记录
             CREATE TABLE IF NOT EXISTS trade_record (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
@@ -106,6 +124,7 @@ def initialize_database(settings: AppSettings) -> None:
                 created_at TEXT NOT NULL
             );
 
+            -- 交易分析：保存每次规则分析 / 大模型分析的结果
             CREATE TABLE IF NOT EXISTS trade_analysis (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
