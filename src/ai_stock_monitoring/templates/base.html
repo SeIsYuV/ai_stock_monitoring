@@ -69,6 +69,11 @@
         .action-buy { color: #b91c1c; font-weight: 700; }
         .action-sell { color: #15803d; font-weight: 700; }
         .action-neutral { color: #475569; font-weight: 700; }
+        .advice-card { display: grid; gap: 6px; margin-top: 4px; }
+        .advice-card > div { display: grid; grid-template-columns: 44px 1fr; gap: 8px; align-items: start; }
+        .advice-card strong { color: #0f172a; font-size: 12px; }
+        .advice-card span { color: #64748b; font-size: 12px; line-height: 1.45; }
+        .compact-advice { min-width: 220px; }
         @media (max-width: 900px) {
             header { flex-direction: column; align-items: flex-start; }
             .top-nav a { margin-left: 0; margin-right: 12px; }

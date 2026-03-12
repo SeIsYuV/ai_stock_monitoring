@@ -99,7 +99,7 @@ def extract_dcf_metrics(quant_model_breakdown: str | None) -> dict[str, float | 
         "dcf_intrinsic_value": None,
         "dcf_valuation_gap_pct": None,
         "dcf_label": MODEL_LABELS["dcf_proxy"],
-        "dcf_reason": "",
+        "dcf_reason": "未启用 DCF 模型或当前估值数据不足",
     }
 
 

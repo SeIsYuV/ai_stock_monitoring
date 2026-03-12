@@ -72,18 +72,27 @@ def build_trade_analysis_email_body(payload: dict[str, Any]) -> str:
     analysis = payload["analysis"]
     market_snapshot = payload.get("market_snapshot", {})
     portfolio_profile = payload.get("portfolio_profile", {})
+    dcf_intrinsic_value = market_snapshot.get("dcf_intrinsic_value")
+    dcf_valuation_gap_pct = market_snapshot.get("dcf_valuation_gap_pct")
+    dcf_reason = market_snapshot.get("dcf_reason") or "未启用 DCF 模型或当前估值数据不足"
+    advice_card = analysis.get("comprehensive_advice_card", {})
+    dcf_line = (
+        f"内在价值 {dcf_intrinsic_value:.2f}，估值偏差 {dcf_valuation_gap_pct:.2f}%"
+        if dcf_intrinsic_value is not None and dcf_valuation_gap_pct is not None
+        else dcf_reason
+    )
     lines = [
         f"股票：{payload['symbol']}",
         f"分析来源：{payload['provider']} / {payload['model_name']}",
         f"生成时间：{payload['created_at']}",
         f"结论：{analysis['summary']}",
         f"合理性判断：{analysis['judgment']}",
-        f"仓位建议：{analysis['position_advice']}",
-        f"推荐买入价：{analysis.get('recommended_buy_price_range', '暂无明确价位')}",
-        f"推荐卖出价：{analysis.get('recommended_sell_price_range', '暂无明确价位')}",
+        "综合建议：",
+        f"- 结论：{advice_card.get('conclusion', analysis['position_advice'])}",
+        f"- 买点：{advice_card.get('buy', analysis.get('recommended_buy_price_range', '暂无明确价位'))}",
+        f"- 卖点：{advice_card.get('sell', analysis.get('recommended_sell_price_range', '暂无明确价位'))}",
+        f"- DCF：{advice_card.get('dcf', dcf_line)}",
         f"观望关注价：{analysis.get('watch_price_range', '暂无明确价位')}",
-        f"DCF代理内在价值：{market_snapshot.get('dcf_intrinsic_value', '暂无')}",
-        f"DCF估值偏差：{market_snapshot.get('dcf_valuation_gap_pct', '暂无')}%" if market_snapshot.get('dcf_valuation_gap_pct') is not None else "DCF估值偏差：暂无",
         "",
         "判断依据：",
     ]

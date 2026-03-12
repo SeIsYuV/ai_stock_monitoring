@@ -101,9 +101,12 @@
                 <td>{{ '%.2f'|format(item['suggested_reduce_price']) if item['suggested_reduce_price'] else '-' }}</td>
                 <td>{{ '%.2f'|format(item['suggested_stop_loss_price']) if item['suggested_stop_loss_price'] else '-' }}</td>
                 <td>
-                    {% if item['dcf_intrinsic_value'] %}
+                    {% if item['dcf_intrinsic_value'] is not none %}
                     {{ '%.2f'|format(item['dcf_intrinsic_value']) }}
                     <div class="muted">{{ '%.2f%%'|format(item['dcf_valuation_gap_pct']) if item['dcf_valuation_gap_pct'] is not none else '-' }}</div>
+                    {% elif item['dcf_reason'] %}
+                    <div>暂无估值</div>
+                    <div class="muted">{{ item['dcf_reason'] }}</div>
                     {% else %}
                     -
                     {% endif %}
@@ -111,7 +114,12 @@
                 <td>{{ item['risk_level'] }}</td>
                 <td>
                     <div class="action-{{ item['action_color'] }}">{{ item['action'] }}</div>
-                    <div class="muted">{{ item['action_reason'] }}</div>
+                    <div class="advice-card compact-advice">
+                        <div><strong>结论</strong><span>{{ item['advice_conclusion_line'] }}</span></div>
+                        <div><strong>买点</strong><span>{{ item['advice_buy_line'] }}</span></div>
+                        <div><strong>卖点</strong><span>{{ item['advice_sell_line'] }}</span></div>
+                        <div><strong>DCF</strong><span>{{ item['advice_dcf_line'] }}</span></div>
+                    </div>
                 </td>
             </tr>
             {% endfor %}
@@ -389,9 +397,12 @@
                     {% endif %}
                 </td>
                 <td>
-                    {% if item['dcf_intrinsic_value'] %}
+                    {% if item['dcf_intrinsic_value'] is not none %}
                     {{ '%.2f'|format(item['dcf_intrinsic_value']) }}
                     <div class="muted">{{ '%.2f%%'|format(item['dcf_valuation_gap_pct']) if item['dcf_valuation_gap_pct'] is not none else '-' }}</div>
+                    {% elif item['dcf_reason'] %}
+                    <div>暂无估值</div>
+                    <div class="muted">{{ item['dcf_reason'] }}</div>
                     {% else %}
                     -
                     {% endif %}
@@ -415,7 +426,12 @@
                 </td>
                 <td>
                     <div class="action-{{ item['action_color'] }}">{{ item['action'] }}</div>
-                    <div style="font-size: 12px; color: #64748b; margin-top: 4px; min-width: 220px;">{{ item['action_reason'] }}</div>
+                    <div class="advice-card compact-advice">
+                        <div><strong>结论</strong><span>{{ item['advice_conclusion_line'] }}</span></div>
+                        <div><strong>买点</strong><span>{{ item['advice_buy_line'] }}</span></div>
+                        <div><strong>卖点</strong><span>{{ item['advice_sell_line'] }}</span></div>
+                        <div><strong>DCF</strong><span>{{ item['advice_dcf_line'] }}</span></div>
+                    </div>
                 </td>
                 <td class="nowrap">
                     {% if item['updated_at'] %}

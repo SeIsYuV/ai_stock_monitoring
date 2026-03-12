@@ -14,7 +14,8 @@
                 <option value="sell">卖出</option>
             </select>
             <label>成交价格</label>
-            <input type="number" name="price" step="0.01" min="0.01" required>
+            <input type="number" name="price" step="0.00001" min="0.00001" required>
+            <p class="hint-text">成交价格按每股均价录入，支持并保留 5 位小数。</p>
             <label>成交数量</label>
             <input type="number" name="quantity" step="1" min="1" required>
             <label>成交时间</label>
@@ -152,9 +153,12 @@
                     <div class="muted">跌破后重新评估</div>
                 </td>
                 <td>
-                    {% if item['dcf_intrinsic_value'] %}
+                    {% if item['dcf_intrinsic_value'] is not none %}
                     {{ '%.2f'|format(item['dcf_intrinsic_value']) }}
                     <div class="muted">{{ '%.2f%%'|format(item['dcf_valuation_gap_pct']) if item['dcf_valuation_gap_pct'] is not none else '-' }}</div>
+                    {% elif item['dcf_reason'] %}
+                    <div>暂无估值</div>
+                    <div class="muted">{{ item['dcf_reason'] }}</div>
                     {% else %}
                     -
                     {% endif %}
@@ -167,7 +171,12 @@
                 </td>
                 <td>
                     <div class="action-{{ item['action_color'] }}">{{ item['action'] }}</div>
-                    <div class="muted">{{ item['action_reason'] }}</div>
+                    <div class="advice-card compact-advice">
+                        <div><strong>结论</strong><span>{{ item['advice_conclusion_line'] }}</span></div>
+                        <div><strong>买点</strong><span>{{ item['advice_buy_line'] }}</span></div>
+                        <div><strong>卖点</strong><span>{{ item['advice_sell_line'] }}</span></div>
+                        <div><strong>DCF</strong><span>{{ item['advice_dcf_line'] }}</span></div>
+                    </div>
                 </td>
             </tr>
             {% endfor %}
@@ -193,8 +202,14 @@
     {% endif %}
     <p><strong>结论：</strong>{{ latest_analysis['analysis']['summary'] }}</p>
     <p><strong>合理性判断：</strong>{{ latest_analysis['analysis']['judgment'] }}</p>
-    <p><strong>综合建议：</strong>{{ latest_analysis['analysis'].get('comprehensive_advice_text', latest_analysis['analysis']['position_advice']) }}</p>
-    <p><strong>DCF代理内在价值：</strong>{{ '%.2f'|format(latest_analysis['market_snapshot']['dcf_intrinsic_value']) if latest_analysis['market_snapshot']['dcf_intrinsic_value'] is not none else '-' }}{% if latest_analysis['market_snapshot']['dcf_valuation_gap_pct'] is not none %} ｜ 估值偏差 {{ '%.2f%%'|format(latest_analysis['market_snapshot']['dcf_valuation_gap_pct']) }}{% endif %}</p>
+    <p><strong>综合建议：</strong></p>
+    <div class="advice-card">
+        <div><strong>结论</strong><span>{{ latest_analysis['analysis'].get('comprehensive_advice_card', {}).get('conclusion', latest_analysis['analysis'].get('comprehensive_advice_text', latest_analysis['analysis']['position_advice'])) }}</span></div>
+        <div><strong>买点</strong><span>{{ latest_analysis['analysis'].get('comprehensive_advice_card', {}).get('buy', latest_analysis['analysis'].get('recommended_buy_price_range', '-')) }}</span></div>
+        <div><strong>卖点</strong><span>{{ latest_analysis['analysis'].get('comprehensive_advice_card', {}).get('sell', latest_analysis['analysis'].get('recommended_sell_price_range', '-')) }}</span></div>
+        <div><strong>DCF</strong><span>{{ latest_analysis['analysis'].get('comprehensive_advice_card', {}).get('dcf', latest_analysis['market_snapshot'].get('dcf_reason', '-')) }}</span></div>
+    </div>
+    <p><strong>DCF代理内在价值：</strong>{{ '%.2f'|format(latest_analysis['market_snapshot']['dcf_intrinsic_value']) if latest_analysis['market_snapshot']['dcf_intrinsic_value'] is not none else '暂无估值' }}{% if latest_analysis['market_snapshot']['dcf_valuation_gap_pct'] is not none %} ｜ 估值偏差 {{ '%.2f%%'|format(latest_analysis['market_snapshot']['dcf_valuation_gap_pct']) }}{% elif latest_analysis['market_snapshot']['dcf_reason'] %} ｜ {{ latest_analysis['market_snapshot']['dcf_reason'] }}{% endif %}</p>
     <p><strong>推荐买入价：</strong>{{ latest_analysis['analysis'].get('recommended_buy_price_range', '-') }}</p>
     <p><strong>推荐卖出价：</strong>{{ latest_analysis['analysis'].get('recommended_sell_price_range', '-') }}</p>
     <p><strong>观望关注价：</strong>{{ latest_analysis['analysis'].get('watch_price_range', '-') }}</p>
@@ -252,7 +267,7 @@
             <td>{{ trade['traded_at'] }}</td>
             <td><a class="inline-link" href="/trades?symbol={{ trade['symbol'] }}">{{ trade['symbol'] }}</a></td>
             <td>{{ '买入' if trade['side'] == 'buy' else '卖出' }}</td>
-            <td>{{ '%.2f'|format(trade['price']) }}</td>
+            <td>{{ '%.5f'|format(trade['price']) }}</td>
             <td>{{ trade['quantity'] }}</td>
             <td>{{ trade['note'] or '-' }}</td>
         </tr>

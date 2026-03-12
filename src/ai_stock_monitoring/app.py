@@ -63,9 +63,9 @@ from .database import (
 )
 from .mailer import build_login_unlock_email_body, build_test_email_body, build_trade_analysis_email_body, send_message
 from .monitor import StockMonitor, parse_stock_symbols
-from .quant import available_quant_models, extract_dcf_metrics, normalize_selected_models, normalize_strategy_params
+from .quant import available_quant_models, normalize_selected_models, normalize_strategy_params
 from .security import hash_password, password_hash_needs_rehash, verify_password
-from .trade_advisor import TradeAdvisor, build_market_action_summary, build_portfolio_profile, build_position_summary
+from .trade_advisor import TradeAdvisor, build_portfolio_profile, build_position_summary, build_stock_comprehensive_advice
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -127,9 +127,7 @@ templates.env.globals["format_stock_display_name"] = _format_stock_display_name
 
 def _decorate_snapshot_for_display(snapshot: object) -> dict[str, object]:
     payload = dict(snapshot)
-    action_summary = build_market_action_summary(payload)
-    payload.update(action_summary)
-    payload.update(extract_dcf_metrics(payload.get("quant_model_breakdown")))
+    payload.update(build_stock_comprehensive_advice(payload))
     return payload
 
 
@@ -675,6 +673,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             return _redirect_with_message("/trades", "交易方向只能是买入或卖出")
         if not symbol.isdigit() or len(symbol) != 6:
             return _redirect_with_message("/trades", "请输入 6 位股票代码")
+        price = round(float(price), 5)
         if price <= 0 or quantity <= 0:
             return _redirect_with_message("/trades", "价格和数量必须大于 0")
 
@@ -1112,11 +1111,28 @@ def _get_authenticated_user(request: Request, settings: AppSettings) -> object |
 def _serialize_latest_analysis_row(latest_analysis_row: object) -> dict[str, object]:
     market_snapshot = _decorate_snapshot_for_display(json.loads(latest_analysis_row["market_snapshot"]))
     analysis = json.loads(latest_analysis_row["analysis_json"])
+    model_consensus = str(market_snapshot.get("model_consensus") or "多模型综合结论")
+    watch_price_range = analysis.get('watch_price_range', '-')
+    recommended_buy_price_range = analysis.get('recommended_buy_price_range', '-')
+    recommended_sell_price_range = analysis.get('recommended_sell_price_range', '-')
+    dcf_intrinsic_value = market_snapshot.get('dcf_intrinsic_value')
+    dcf_valuation_gap_pct = market_snapshot.get('dcf_valuation_gap_pct')
+    if dcf_intrinsic_value is not None:
+        dcf_line = f"DCF：内在价值 {float(dcf_intrinsic_value):.2f}，偏差 {float(dcf_valuation_gap_pct or 0.0):.2f}%"
+    else:
+        dcf_line = f"DCF：{market_snapshot.get('dcf_reason') or '未启用 DCF 模型或当前估值数据不足'}"
     analysis["comprehensive_advice_text"] = (
-        f"{analysis['position_advice']} 推荐买入价 {analysis.get('recommended_buy_price_range', '-')}；"
-        f"推荐卖出价 {analysis.get('recommended_sell_price_range', '-')}；"
-        f"观望关注价 {analysis.get('watch_price_range', '-')}。"
+        f"{model_consensus}；{analysis['position_advice']}；"
+        f"推荐买入价 {recommended_buy_price_range}；"
+        f"推荐卖出价 {recommended_sell_price_range}；"
+        f"观望关注价 {watch_price_range}。"
     )
+    analysis["comprehensive_advice_card"] = {
+        "conclusion": f"{model_consensus}；{analysis['position_advice']}",
+        "buy": f"买点：{recommended_buy_price_range}；关注位 {watch_price_range}",
+        "sell": f"卖点：{recommended_sell_price_range}",
+        "dcf": dcf_line,
+    }
     return {
         "symbol": latest_analysis_row["symbol"],
         "provider": latest_analysis_row["analysis_provider"],

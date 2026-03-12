@@ -671,6 +671,7 @@ def save_login_unlock_code(
     expires_at: str,
 ) -> None:
     created_at = datetime.now(UTC).isoformat()
+    normalized_price = round(float(price), 5)
     with get_connection(db_path) as connection:
         connection.execute(
             """
@@ -1070,7 +1071,7 @@ def add_trade_record(
             INSERT INTO user_trade_record (owner_username, symbol, side, price, quantity, traded_at, note, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (owner_username, symbol, side, price, quantity, traded_at, note, created_at),
+            (owner_username, symbol, side, normalized_price, quantity, traded_at, note, created_at),
         )
 
 

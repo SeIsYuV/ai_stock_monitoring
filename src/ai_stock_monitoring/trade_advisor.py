@@ -254,7 +254,7 @@ def _neutral_snapshot_from_position(symbol: str, position_summary: Mapping[str, 
     return payload
 
 
-def _extract_dcf_proxy_metrics(snapshot: Mapping[str, Any]) -> dict[str, float | None]:
+def _extract_dcf_proxy_metrics(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     try:
         breakdown = json.loads(str(snapshot.get("quant_model_breakdown") or "[]"))
     except json.JSONDecodeError:
@@ -266,8 +266,138 @@ def _extract_dcf_proxy_metrics(snapshot: Mapping[str, Any]) -> dict[str, float |
             return {
                 "dcf_intrinsic_value": round(float(intrinsic_value), 2) if intrinsic_value is not None else None,
                 "dcf_valuation_gap_pct": round(float(valuation_gap_pct), 2) if valuation_gap_pct is not None else None,
+                "dcf_label": str(item.get("label") or "DCF估值"),
+                "dcf_reason": str(item.get("reason") or "DCF 估值数据暂不充分"),
             }
-    return {"dcf_intrinsic_value": None, "dcf_valuation_gap_pct": None}
+    return {
+        "dcf_intrinsic_value": None,
+        "dcf_valuation_gap_pct": None,
+        "dcf_label": "DCF估值",
+        "dcf_reason": "未启用 DCF 模型或当前估值数据不足",
+    }
+
+
+def _load_quant_models(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+    try:
+        breakdown = json.loads(str(snapshot.get("quant_model_breakdown") or "[]"))
+    except json.JSONDecodeError:
+        breakdown = []
+    return [item for item in breakdown if isinstance(item, dict)]
+
+
+def _build_quant_model_consensus(snapshot: Mapping[str, Any], limit: int = 4) -> tuple[str, str]:
+    ranked_models = sorted(
+        _load_quant_models(snapshot),
+        key=lambda item: float(item.get("score") or 0.0),
+        reverse=True,
+    )
+    top_models = ranked_models[:limit]
+    if not top_models:
+        return "多模型综合", "当前量化模型数据不足"
+
+    average_score = sum(float(item.get("score") or 0.0) for item in top_models) / len(top_models)
+    if average_score >= 80:
+        consensus = "偏强"
+    elif average_score >= 65:
+        consensus = "中性偏强"
+    elif average_score <= 45:
+        consensus = "偏弱"
+    else:
+        consensus = "分歧较大"
+
+    title = "四模型综合" if len(top_models) >= 4 else f"{len(top_models)}模型综合"
+    details = "、".join(
+        f"{str(item.get('label') or '模型')}{float(item.get('score') or 0.0):.0f}分"
+        for item in top_models
+    )
+    return title, f"{title}{consensus}（{details}）"
+
+
+def build_stock_comprehensive_advice(
+    snapshot: Mapping[str, Any],
+    position_summary: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    symbol = str(snapshot.get("symbol") or "")
+    resolved_position_summary = position_summary or {
+        "average_cost": 0.0,
+        "position_quantity": 0,
+        "invalid_sell_quantity": 0,
+    }
+    resolved_snapshot = _neutral_snapshot_from_position(symbol, resolved_position_summary, snapshot)
+    resolved_snapshot.update(_extract_dcf_proxy_metrics(resolved_snapshot))
+
+    action_summary = build_market_action_summary(resolved_snapshot)
+    price_plan = build_recommended_price_plan(resolved_snapshot, action_summary, resolved_position_summary)
+    model_consensus_title, model_consensus_text = _build_quant_model_consensus(resolved_snapshot)
+
+    dcf_intrinsic_value = resolved_snapshot.get("dcf_intrinsic_value")
+    dcf_valuation_gap_pct = resolved_snapshot.get("dcf_valuation_gap_pct")
+    if dcf_intrinsic_value is not None:
+        dcf_summary = (
+            f"DCF 内在价值 {float(dcf_intrinsic_value):.2f}，"
+            f"偏差 {float(dcf_valuation_gap_pct or 0.0):.2f}%"
+        )
+    else:
+        dcf_summary = str(resolved_snapshot.get("dcf_reason") or "DCF 估值数据暂不充分")
+
+    action = str(action_summary.get("action") or "观望")
+    if action == "偏买入":
+        decision_summary = "当前结论偏买入，适合等回踩支撑后分批介入"
+    elif action == "偏卖出":
+        decision_summary = "当前结论偏卖出，反弹至压力带更适合分批减仓"
+    else:
+        decision_summary = "当前买卖信号仍在拉锯，建议先等确认位给出方向"
+
+    conclusion_line = f"{action}｜{model_consensus_text}；{decision_summary}。"
+    buy_line = f"买点：{price_plan['recommended_buy_price_range']}"
+    if price_plan["suggested_add_price"] > 0:
+        buy_line += f"（参考加仓价 {price_plan['suggested_add_price']:.2f}）"
+    if price_plan["watch_price_range"] != "暂无明确价位":
+        buy_line += f"；关注位 {price_plan['watch_price_range']}"
+
+    sell_line = f"卖点：{price_plan['recommended_sell_price_range']}"
+    if price_plan["suggested_reduce_price"] > 0:
+        sell_line += f"（参考减仓价 {price_plan['suggested_reduce_price']:.2f}）"
+    if price_plan["suggested_stop_loss_price"] > 0:
+        sell_line += f"；止损参考 {price_plan['suggested_stop_loss_price']:.2f}"
+
+    dcf_line = f"DCF：{dcf_summary}"
+    comprehensive_advice = "\n".join((
+        f"结论：{conclusion_line}",
+        buy_line,
+        sell_line,
+        dcf_line,
+    ))
+
+    return {
+        "action": action_summary["action"],
+        "action_color": action_summary["action_color"],
+        "action_reason": action_summary["action_reason"],
+        "buy_score": action_summary["buy_score"],
+        "sell_score": action_summary["sell_score"],
+        "dominant_model_label": action_summary["dominant_model_label"],
+        "dominant_model_score": action_summary["dominant_model_score"],
+        "recommended_buy_price_range": price_plan["recommended_buy_price_range"],
+        "recommended_sell_price_range": price_plan["recommended_sell_price_range"],
+        "watch_price_range": price_plan["watch_price_range"],
+        "suggested_add_price": price_plan["suggested_add_price"],
+        "suggested_reduce_price": price_plan["suggested_reduce_price"],
+        "suggested_stop_loss_price": price_plan["suggested_stop_loss_price"],
+        "buy_price_plan": price_plan["buy_price_plan"],
+        "sell_price_plan": price_plan["sell_price_plan"],
+        "watch_price_plan": price_plan["watch_price_plan"],
+        "comprehensive_advice_title": model_consensus_title,
+        "comprehensive_advice": comprehensive_advice,
+        "advice_conclusion_line": conclusion_line,
+        "advice_buy_line": buy_line,
+        "advice_sell_line": sell_line,
+        "advice_dcf_line": dcf_line,
+        "model_consensus": model_consensus_text,
+        "dcf_intrinsic_value": resolved_snapshot.get("dcf_intrinsic_value"),
+        "dcf_valuation_gap_pct": resolved_snapshot.get("dcf_valuation_gap_pct"),
+        "dcf_label": resolved_snapshot.get("dcf_label"),
+        "dcf_reason": resolved_snapshot.get("dcf_reason"),
+    }
 
 
 def _infer_position_style(snapshot: Mapping[str, Any], action_summary: Mapping[str, Any], weight_pct: float) -> str:
@@ -498,22 +628,31 @@ def build_portfolio_profile(
     for item in holding_items:
         weight_pct = round(item["market_value"] / total_market_value * 100, 2) if total_market_value > 0 else 0.0
         snapshot = item["snapshot"]
-        action_summary = build_market_action_summary(snapshot)
+        display_advice = build_stock_comprehensive_advice(snapshot, item["position_summary"])
+        action_summary = {
+            "action": display_advice["action"],
+            "action_color": display_advice["action_color"],
+            "action_reason": display_advice["action_reason"],
+        }
         risk_info = _evaluate_symbol_risk(snapshot, action_summary, weight_pct)
-        price_plan = build_recommended_price_plan(snapshot, action_summary, item["position_summary"])
         item["weight_pct"] = weight_pct
         item["action"] = action_summary["action"]
         item["action_color"] = action_summary["action_color"]
         item["action_reason"] = action_summary["action_reason"]
         item["position_style"] = _infer_position_style(snapshot, action_summary, weight_pct)
-        item["dcf_intrinsic_value"] = snapshot.get("dcf_intrinsic_value")
-        item["dcf_valuation_gap_pct"] = snapshot.get("dcf_valuation_gap_pct")
-        item["add_price_range"] = price_plan["recommended_buy_price_range"]
-        item["reduce_price_range"] = price_plan["recommended_sell_price_range"]
-        item["watch_price_range"] = price_plan["watch_price_range"]
-        item["suggested_add_price"] = price_plan["suggested_add_price"]
-        item["suggested_reduce_price"] = price_plan["suggested_reduce_price"]
-        item["suggested_stop_loss_price"] = price_plan["suggested_stop_loss_price"]
+        item["dcf_intrinsic_value"] = display_advice["dcf_intrinsic_value"]
+        item["dcf_valuation_gap_pct"] = display_advice["dcf_valuation_gap_pct"]
+        item["dcf_label"] = display_advice["dcf_label"]
+        item["dcf_reason"] = display_advice["dcf_reason"]
+        item["add_price_range"] = display_advice["recommended_buy_price_range"]
+        item["reduce_price_range"] = display_advice["recommended_sell_price_range"]
+        item["watch_price_range"] = display_advice["watch_price_range"]
+        item["suggested_add_price"] = display_advice["suggested_add_price"]
+        item["suggested_reduce_price"] = display_advice["suggested_reduce_price"]
+        item["suggested_stop_loss_price"] = display_advice["suggested_stop_loss_price"]
+        item["comprehensive_advice"] = display_advice["comprehensive_advice"]
+        item["comprehensive_advice_title"] = display_advice["comprehensive_advice_title"]
+        item["model_consensus"] = display_advice["model_consensus"]
         item.update(risk_info)
 
     holding_items.sort(key=lambda entry: (-entry["weight_pct"], entry["symbol"]))

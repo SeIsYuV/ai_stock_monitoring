@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from src.ai_stock_monitoring.app import _format_snapshot_timestamp, create_app
 from src.ai_stock_monitoring.config import AppSettings
-from src.ai_stock_monitoring.database import get_alert_history, get_login_unlock_code, get_snapshot, get_user, initialize_database, list_recent_login_events, upsert_snapshot
+from src.ai_stock_monitoring.database import add_trade_record, get_alert_history, get_login_unlock_code, get_snapshot, get_user, initialize_database, list_recent_login_events, list_trade_records, upsert_snapshot
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
 from src.ai_stock_monitoring.monitor import (
     StockMonitor,
@@ -22,7 +22,7 @@ from src.ai_stock_monitoring.monitor import (
 )
 from src.ai_stock_monitoring.quant import build_quant_signal
 from src.ai_stock_monitoring.security import verify_password
-from src.ai_stock_monitoring.trade_advisor import build_market_action_summary, build_portfolio_profile, build_position_summary, build_recommended_price_plan
+from src.ai_stock_monitoring.trade_advisor import build_market_action_summary, build_portfolio_profile, build_position_summary, build_recommended_price_plan, build_stock_comprehensive_advice
 
 
 class MonitorTests(unittest.TestCase):
@@ -74,6 +74,8 @@ class MonitorTests(unittest.TestCase):
                 self.assertIn("DCF内在价值/偏差", dashboard_response.text)
                 self.assertIn("综合建议", dashboard_response.text)
                 self.assertTrue("买入｜" in dashboard_response.text or "卖出｜" in dashboard_response.text)
+                self.assertIn("买点", dashboard_response.text)
+                self.assertIn("卖点", dashboard_response.text)
                 self.assertIn("dashboard-current-time", dashboard_response.text)
                 self.assertIn("dashboard-refresh-countdown", dashboard_response.text)
 
@@ -86,6 +88,24 @@ class MonitorTests(unittest.TestCase):
                 self.assertNotIn("admin123", response.text)
                 self.assertNotIn("默认账号", response.text)
                 self.assertIn("发送解封验证码", response.text)
+
+    def test_add_trade_record_rounds_price_to_five_decimals(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            initialize_database(AppSettings(db_path=database_file.name, provider_name="mock"))
+            add_trade_record(
+                database_file.name,
+                owner_username="admin",
+                symbol="600519",
+                side="buy",
+                price=12.3456789,
+                quantity=100,
+                traded_at="2026-03-12T10:00",
+                note="test",
+            )
+            records = list_trade_records(database_file.name, "admin", "600519")
+            self.assertEqual(len(records), 1)
+            self.assertAlmostEqual(float(records[0]["price"]), 12.34568, places=5)
+
 
     def test_build_position_summary(self) -> None:
         summary = build_position_summary(
@@ -175,6 +195,36 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(profile["overall_adjustment_suggestions"])
         self.assertIn(profile["risk_level"], {"低", "中", "高"})
         self.assertTrue(profile["comprehensive_advice"])
+        self.assertTrue(profile["active_positions"][0]["comprehensive_advice"])
+
+    def test_build_stock_comprehensive_advice_includes_prices_and_dcf_reason(self) -> None:
+        advice = build_stock_comprehensive_advice(
+            {
+                "symbol": "600000",
+                "latest_price": 10.5,
+                "ma_250": 10.1,
+                "boll_mid": 10.3,
+                "boll_lower": 9.9,
+                "boll_upper": 11.1,
+                "quant_probability": 76.0,
+                "quant_model_breakdown": json.dumps(
+                    [
+                        {"key": "trend_following", "label": "趋势跟随", "score": 88},
+                        {"key": "weekly_resonance", "label": "周线共振", "score": 83},
+                        {"key": "support_strength", "label": "支撑强度", "score": 79},
+                        {"key": "risk_reward", "label": "盈亏比", "score": 75},
+                        {"key": "dcf_proxy", "label": "DCF估值", "score": 35, "reason": "缺少稳定现金流代理数据，DCF 估值置信度较低"},
+                    ],
+                    ensure_ascii=False,
+                ),
+                "trigger_state": "250日线、量化盈利概率",
+            }
+        )
+        self.assertIn("买点：", advice["comprehensive_advice"])
+        self.assertIn("卖点：", advice["comprehensive_advice"])
+        self.assertIn("四模型综合", advice["comprehensive_advice"])
+        self.assertIsNone(advice["dcf_intrinsic_value"])
+        self.assertIn("DCF", advice["dcf_reason"])
 
     def test_enhanced_quant_models_are_in_snapshot_breakdown(self) -> None:
         monitor = StockMonitor(AppSettings(provider_name="mock"))
