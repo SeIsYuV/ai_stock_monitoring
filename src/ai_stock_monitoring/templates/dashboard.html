@@ -412,27 +412,17 @@
                 </td>
                 <td class="signal-cell">
                     <div class="signal-groups">
-                        {% if item['buy_signals'] %}
-                        <div class="signal-group buy-group">
-                            <strong class="signal-group-title">买入信号</strong>
+                        {% for group in item['signal_groups'] %}
+                        <div class="signal-group {{ group['key'] }}-group">
+                            <strong class="signal-group-title">{{ group['title'] }}</strong>
                             <div class="signal-list">
-                                {% for signal in item['buy_signals'] %}
-                                <span class="signal-badge signal-buy">{{ signal }}</span>
+                                {% for signal in group['items'] %}
+                                <span class="signal-badge signal-{{ signal['side'] }}">{{ signal['label'] }}</span>
                                 {% endfor %}
                             </div>
                         </div>
-                        {% endif %}
-                        {% if item['sell_signals'] %}
-                        <div class="signal-group sell-group">
-                            <strong class="signal-group-title">卖出信号</strong>
-                            <div class="signal-list">
-                                {% for signal in item['sell_signals'] %}
-                                <span class="signal-badge signal-sell">{{ signal }}</span>
-                                {% endfor %}
-                            </div>
-                        </div>
-                        {% endif %}
-                        {% if not item['buy_signals'] and not item['sell_signals'] %}
+                        {% endfor %}
+                        {% if not item['signal_groups'] %}
                         <div class="signal-group neutral-group">
                             <strong class="signal-group-title">触发状态</strong>
                             <span class="signal-badge signal-neutral">暂无信号</span>

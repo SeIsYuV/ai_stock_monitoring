@@ -38,11 +38,44 @@ SELL_SIGNAL_WEIGHTS: dict[str, int] = {
 BUY_SIGNAL_SET = set(BUY_SIGNAL_WEIGHTS)
 SELL_SIGNAL_SET = set(SELL_SIGNAL_WEIGHTS)
 
+SIGNAL_CATEGORY_LABELS: dict[str, str] = {
+    "technical": "技术面",
+    "dividend": "红利面",
+    "quant": "量化面",
+}
+
+SIGNAL_CATEGORY_MAPPING: dict[str, str] = {
+    "250日线": "technical",
+    "BOLL中轨": "technical",
+    "BOLL下轨": "technical",
+    "BOLL上轨卖出": "technical",
+    "30周/60周均线": "technical",
+    "股息率": "dividend",
+    "低股息率卖出": "dividend",
+    "量化盈利概率": "quant",
+    "量化走弱卖出": "quant",
+}
+
 
 def split_trigger_signals(trigger_state: str | None) -> list[str]:
     if not trigger_state or trigger_state == "正常":
         return []
     return [item for item in str(trigger_state).split("、") if item]
+
+
+def _build_signal_groups(buy_signals: Sequence[str], sell_signals: Sequence[str]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, str]]] = {key: [] for key in SIGNAL_CATEGORY_LABELS}
+    for signal in buy_signals:
+        category = SIGNAL_CATEGORY_MAPPING.get(signal, "technical")
+        grouped.setdefault(category, []).append({"side": "buy", "label": signal})
+    for signal in sell_signals:
+        category = SIGNAL_CATEGORY_MAPPING.get(signal, "technical")
+        grouped.setdefault(category, []).append({"side": "sell", "label": signal})
+    return [
+        {"key": key, "title": SIGNAL_CATEGORY_LABELS[key], "items": grouped[key]}
+        for key in ("technical", "dividend", "quant")
+        if grouped.get(key)
+    ]
 
 
 def build_market_action_summary(snapshot: Mapping[str, Any]) -> dict[str, Any]:
@@ -55,15 +88,25 @@ def build_market_action_summary(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     buy_score = sum(BUY_SIGNAL_WEIGHTS.get(item, 0) for item in buy_signals)
     sell_score = sum(SELL_SIGNAL_WEIGHTS.get(item, 0) for item in sell_signals)
 
+    display_buy_signals = list(buy_signals)
+    display_sell_signals = list(sell_signals)
     quant_probability = float(snapshot.get("quant_probability") or 0.0)
     if quant_probability >= 85:
         buy_score += 3
+        if "量化盈利概率" not in display_buy_signals:
+            display_buy_signals.append("量化盈利概率")
     elif quant_probability >= 70:
         buy_score += 1
+        if "量化盈利概率" not in display_buy_signals:
+            display_buy_signals.append("量化盈利概率")
     elif quant_probability <= 35:
         sell_score += 4
+        if "量化走弱卖出" not in display_sell_signals:
+            display_sell_signals.append("量化走弱卖出")
     elif quant_probability <= 45:
         sell_score += 2
+        if "量化走弱卖出" not in display_sell_signals:
+            display_sell_signals.append("量化走弱卖出")
 
     dominant_model_label = "量化模型"
     dominant_model_score = 0.0
@@ -100,8 +143,9 @@ def build_market_action_summary(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         )
 
     return {
-        "buy_signals": buy_signals,
-        "sell_signals": sell_signals,
+        "buy_signals": display_buy_signals,
+        "sell_signals": display_sell_signals,
+        "signal_groups": _build_signal_groups(display_buy_signals, display_sell_signals),
         "action": action,
         "action_color": action_color,
         "action_reason": action_reason,
