@@ -137,6 +137,14 @@
         </form>
         <div class="soft-panel">
             <h3 style="margin-bottom: 8px;">最近登录记录</h3>
+            {% if latest_login_event %}
+            <p><strong>最近一次登录：</strong>{{ format_full_timestamp(latest_login_event['login_at']) }} ｜ {{ latest_login_event['client_host'] }}</p>
+            {% if previous_login_event %}
+            <p><strong>上一次登录：</strong>{{ format_full_timestamp(previous_login_event['login_at']) }} ｜ {{ previous_login_event['client_host'] }}</p>
+            {% else %}
+            <p class="muted">当前账号暂时还没有更早的登录记录。</p>
+            {% endif %}
+            {% endif %}
             {% if recent_login_events %}
             <div class="table-scroll">
                 <table class="compact-table wide-table">
@@ -150,7 +158,7 @@
                     <tbody>
                     {% for item in recent_login_events %}
                     <tr>
-                        <td class="nowrap">{{ item['login_at'][:19].replace('T', ' ') }}</td>
+                        <td class="nowrap">{{ format_full_timestamp(item['login_at']) }}</td>
                         <td class="nowrap">{{ item['client_host'] }}</td>
                         <td>{{ item['user_agent'] }}</td>
                     </tr>

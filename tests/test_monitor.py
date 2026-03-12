@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from src.ai_stock_monitoring.app import create_app
+from src.ai_stock_monitoring.app import _format_snapshot_timestamp, create_app
 from src.ai_stock_monitoring.config import AppSettings
 from src.ai_stock_monitoring.database import get_alert_history, get_login_unlock_code, get_snapshot, get_user, initialize_database, list_recent_login_events, upsert_snapshot
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
@@ -620,10 +620,14 @@ class MonitorTests(unittest.TestCase):
                 dashboard_response = client.get("/dashboard")
                 self.assertEqual(dashboard_response.status_code, 200)
                 self.assertIn("最近登录记录", dashboard_response.text)
+                self.assertIn("最近一次登录", dashboard_response.text)
                 self.assertIn("1.2.3.4", dashboard_response.text)
                 self.assertIn("20 日最大波动率阈值", dashboard_response.text)
                 self.assertIn("BOLL 中轨最大偏离", dashboard_response.text)
                 self.assertIn("table-scroll", dashboard_response.text)
+
+    def test_snapshot_timestamp_is_converted_to_shanghai_time(self) -> None:
+        self.assertEqual(_format_snapshot_timestamp("2026-03-12T10:42:00+00:00"), "18:42")
 
     def test_quant_sell_signal_requires_probability_and_multiple_confirmations(self) -> None:
         monitor = StockMonitor(AppSettings(provider_name="mock"))

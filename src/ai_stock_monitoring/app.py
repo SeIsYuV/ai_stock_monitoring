@@ -16,6 +16,7 @@ import html
 from io import BytesIO
 import json
 from pathlib import Path
+from zoneinfo import ZoneInfo
 import secrets
 import sqlite3
 from urllib.parse import quote
@@ -71,19 +72,36 @@ BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
-def _format_snapshot_timestamp(raw_value: str | None) -> str:
-    """Show a compact timestamp in the dashboard table."""
-
+def _to_local_datetime(raw_value: str | None, timezone_name: str = "Asia/Shanghai") -> datetime | None:
     if not raw_value:
-        return "-"
+        return None
     try:
         parsed = datetime.fromisoformat(raw_value)
     except ValueError:
-        return raw_value[:16].replace("T", " ")
-    now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+        return None
+    target_zone = ZoneInfo(timezone_name)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=target_zone)
+    return parsed.astimezone(target_zone)
+
+
+def _format_snapshot_timestamp(raw_value: str | None, timezone_name: str = "Asia/Shanghai") -> str:
+    """Show a compact timestamp in the dashboard table using local server timezone."""
+
+    parsed = _to_local_datetime(raw_value, timezone_name)
+    if parsed is None:
+        return raw_value[:16].replace("T", " ") if raw_value else "-"
+    now = datetime.now(ZoneInfo(timezone_name))
     if parsed.date() == now.date():
         return parsed.strftime("%H:%M")
     return parsed.strftime("%m-%d %H:%M")
+
+
+def _format_full_timestamp(raw_value: str | None, timezone_name: str = "Asia/Shanghai") -> str:
+    parsed = _to_local_datetime(raw_value, timezone_name)
+    if parsed is None:
+        return raw_value[:19].replace("T", " ") if raw_value else "-"
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _format_stock_display_name(name: str | None, chunk_size: int = 4) -> str:
@@ -100,6 +118,7 @@ def _format_stock_display_name(name: str | None, chunk_size: int = 4) -> str:
 
 
 templates.env.globals["format_snapshot_timestamp"] = _format_snapshot_timestamp
+templates.env.globals["format_full_timestamp"] = _format_full_timestamp
 templates.env.globals["format_stock_display_name"] = _format_stock_display_name
 
 
@@ -440,6 +459,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         unread_alerts = get_unread_alerts(resolved_settings.db_path, owner_username) if status.is_market_open else []
         selected_models = normalize_selected_models(json.loads(quant_settings["selected_models"] or "[]"))
         recent_login_events = list_recent_login_events(resolved_settings.db_path, owner_username)
+        latest_login_event = recent_login_events[0] if recent_login_events else None
+        previous_login_event = recent_login_events[1] if len(recent_login_events) > 1 else None
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -457,6 +478,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 quant_strategy_params=quant_strategy_params,
                 is_admin=bool(current_user["is_admin"]),
                 recent_login_events=recent_login_events,
+                latest_login_event=latest_login_event,
+                previous_login_event=previous_login_event,
                 monitor=monitor,
                 price_column_label="最新价" if status.is_market_open else "最近收盘/最新可用价",
                 snapshots=snapshots,
