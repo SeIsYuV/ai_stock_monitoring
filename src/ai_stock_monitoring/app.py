@@ -554,6 +554,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 "ma_60w": snapshot.ma_60w,
                 "boll_mid": snapshot.boll_mid,
                 "boll_lower": snapshot.boll_lower,
+                "boll_upper": snapshot.boll_upper,
                 "dividend_yield": snapshot.dividend_yield,
                 "quant_probability": snapshot.quant_probability,
                 "trigger_state": snapshot.trigger_state,

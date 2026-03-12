@@ -81,6 +81,7 @@ def initialize_database(settings: AppSettings) -> None:
                 ma_60w REAL NOT NULL,
                 boll_mid REAL NOT NULL,
                 boll_lower REAL NOT NULL DEFAULT 0,
+                boll_upper REAL NOT NULL DEFAULT 0,
                 dividend_yield REAL NOT NULL,
                 quant_probability REAL NOT NULL DEFAULT 0,
                 quant_model_breakdown TEXT NOT NULL DEFAULT '',
@@ -377,6 +378,10 @@ def _ensure_schema_migrations(connection: sqlite3.Connection) -> None:
     if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "boll_lower"):
         connection.execute(
             "ALTER TABLE user_stock_snapshot ADD COLUMN boll_lower REAL NOT NULL DEFAULT 0"
+        )
+    if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "boll_upper"):
+        connection.execute(
+            "ALTER TABLE user_stock_snapshot ADD COLUMN boll_upper REAL NOT NULL DEFAULT 0"
         )
     if _table_exists(connection, "user_quant_settings"):
         connection.execute(
@@ -763,6 +768,7 @@ def get_snapshots(db_path: str, owner_username: str) -> list[sqlite3.Row]:
                        ss.ma_60w,
                        ss.boll_mid,
                        ss.boll_lower,
+                       ss.boll_upper,
                        ss.dividend_yield,
                        ss.quant_probability,
                        ss.quant_model_breakdown,
@@ -799,6 +805,7 @@ def upsert_snapshot(
     ma_60w: float,
     boll_mid: float,
     boll_lower: float,
+    boll_upper: float,
     dividend_yield: float,
     quant_probability: float,
     quant_model_breakdown: str,
@@ -811,10 +818,10 @@ def upsert_snapshot(
             """
             INSERT INTO user_stock_snapshot (
                 owner_username, symbol, display_name, latest_price, ma_250, ma_30w, ma_60w,
-                boll_mid, boll_lower, dividend_yield, quant_probability, quant_model_breakdown,
+                boll_mid, boll_lower, boll_upper, dividend_yield, quant_probability, quant_model_breakdown,
                 trigger_state, trigger_detail, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(owner_username, symbol) DO UPDATE SET
                 display_name = excluded.display_name,
                 latest_price = excluded.latest_price,
@@ -823,6 +830,7 @@ def upsert_snapshot(
                 ma_60w = excluded.ma_60w,
                 boll_mid = excluded.boll_mid,
                 boll_lower = excluded.boll_lower,
+                boll_upper = excluded.boll_upper,
                 dividend_yield = excluded.dividend_yield,
                 quant_probability = excluded.quant_probability,
                 quant_model_breakdown = excluded.quant_model_breakdown,
@@ -840,6 +848,7 @@ def upsert_snapshot(
                 ma_60w,
                 boll_mid,
                 boll_lower,
+                boll_upper,
                 dividend_yield,
                 quant_probability,
                 quant_model_breakdown,

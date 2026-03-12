@@ -222,7 +222,7 @@
                 <th>{{ price_column_label }}</th>
                 <th>250日线</th>
                 <th>30周/60周</th>
-                <th>BOLL中轨/下轨</th>
+                <th>BOLL上/中/下轨</th>
                 <th>股息率</th>
                 <th>量化盈利概率</th>
                 <th>触发状态</th>
@@ -246,7 +246,7 @@
                 </td>
                 <td>
                     {% if item['boll_mid'] is not none %}
-                    {{ '%.2f'|format(item['boll_mid']) }} / {{ '%.2f'|format(item['boll_lower']) }}
+                    {{ '%.2f'|format(item['boll_upper']) }} / {{ '%.2f'|format(item['boll_mid']) }} / {{ '%.2f'|format(item['boll_lower']) }}
                     {% else %}
                     -
                     {% endif %}

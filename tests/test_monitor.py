@@ -11,7 +11,9 @@ from src.ai_stock_monitoring.database import get_alert_history, get_login_unlock
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
 from src.ai_stock_monitoring.monitor import (
     StockMonitor,
+    build_quant_sell_signal,
     calculate_bollinger_lower_band,
+    calculate_bollinger_upper_band,
     calculate_simple_moving_average,
     has_weekly_crossed,
     parse_stock_symbols,
@@ -234,6 +236,27 @@ class MonitorTests(unittest.TestCase):
                     self.assertEqual(send_response.status_code, 303)
                     mocked_send.assert_called_once()
 
+    def test_boll_upper_band_is_available_in_snapshot_and_dashboard(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                dashboard_response = client.get("/dashboard")
+                self.assertEqual(dashboard_response.status_code, 200)
+                self.assertIn("BOLL上/中/下轨", dashboard_response.text)
+
+                chart_payload = app.state.monitor.build_chart_payload("600519")
+                self.assertIn("bollUpper", chart_payload)
+                self.assertEqual(len(chart_payload["bollUpper"]), len(chart_payload["labels"]))
+
+                bars_daily = app.state.monitor.provider.get_daily_bars("600519")
+                upper_band = calculate_bollinger_upper_band([item.close_price for item in bars_daily], 20)
+                self.assertGreater(upper_band, 0)
+
     def test_boll_lower_band_is_available_in_snapshot_and_dashboard(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
             app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
@@ -245,7 +268,7 @@ class MonitorTests(unittest.TestCase):
                 )
                 dashboard_response = client.get("/dashboard")
                 self.assertEqual(dashboard_response.status_code, 200)
-                self.assertIn("BOLL中轨/下轨", dashboard_response.text)
+                self.assertIn("BOLL上/中/下轨", dashboard_response.text)
 
                 chart_payload = app.state.monitor.build_chart_payload("600519")
                 self.assertIn("bollLower", chart_payload)
@@ -544,6 +567,35 @@ class MonitorTests(unittest.TestCase):
                 self.assertIn("20 日最大波动率阈值", dashboard_response.text)
                 self.assertIn("BOLL 中轨最大偏离", dashboard_response.text)
                 self.assertIn("table-scroll", dashboard_response.text)
+
+    def test_quant_sell_signal_requires_probability_and_multiple_confirmations(self) -> None:
+        monitor = StockMonitor(AppSettings(provider_name="mock"))
+        snapshot = monitor.build_snapshot("600519")
+        weakened_snapshot = snapshot.__class__(
+            symbol=snapshot.symbol,
+            display_name=snapshot.display_name,
+            latest_price=min(snapshot.boll_mid, snapshot.ma_250) - 1 if snapshot.boll_mid and snapshot.ma_250 else snapshot.latest_price,
+            ma_250=snapshot.ma_250,
+            ma_30w=min(snapshot.ma_30w, snapshot.ma_60w - 0.5) if snapshot.ma_60w else snapshot.ma_30w,
+            ma_60w=snapshot.ma_60w,
+            prev_ma_30w=snapshot.prev_ma_30w,
+            prev_ma_60w=snapshot.prev_ma_60w,
+            boll_mid=snapshot.boll_mid,
+            boll_lower=snapshot.boll_lower,
+            boll_upper=snapshot.boll_upper,
+            dividend_yield=snapshot.dividend_yield,
+            quant_probability=20.0,
+            quant_model_breakdown=snapshot.quant_model_breakdown,
+            trigger_state=snapshot.trigger_state,
+            trigger_detail=snapshot.trigger_detail,
+            triggered_labels=snapshot.triggered_labels,
+            weekly_crossed=snapshot.weekly_crossed,
+            updated_at=snapshot.updated_at,
+        )
+        sell_signal = build_quant_sell_signal(weakened_snapshot)
+        self.assertTrue(sell_signal.should_alert)
+        self.assertGreaterEqual(sell_signal.confirmation_count, 2)
+        self.assertIn("量化综合盈利概率", "；".join(sell_signal.reasons))
 
     def test_quant_alert_is_deduplicated_within_same_day(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:

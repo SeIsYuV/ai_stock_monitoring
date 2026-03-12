@@ -20,6 +20,9 @@ import re
 import threading
 from typing import Any
 
+SELL_DIVIDEND_THRESHOLD = 3.5
+QUANT_SELL_PROBABILITY_THRESHOLD = 35.0
+
 from .config import AppSettings
 from .database import (
     add_alert_history,
@@ -41,6 +44,13 @@ from .quant import DEFAULT_QUANT_MODELS, build_quant_signal, normalize_selected_
 
 
 @dataclass(frozen=True)
+class QuantSellSignal:
+    should_alert: bool
+    confirmation_count: int
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class SnapshotComputation:
     symbol: str
     display_name: str
@@ -52,6 +62,7 @@ class SnapshotComputation:
     prev_ma_60w: float
     boll_mid: float
     boll_lower: float
+    boll_upper: float
     dividend_yield: float
     quant_probability: float
     quant_model_breakdown: str
@@ -97,6 +108,39 @@ def calculate_bollinger_lower_band(values: list[float], window: int = 20, std_mu
     return round(lower_band, 2)
 
 
+def calculate_bollinger_upper_band(values: list[float], window: int = 20, std_multiplier: float = 2.0) -> float:
+    """Compute a simple BOLL upper band from the latest closing prices."""
+
+    if len(values) < window:
+        return 0.0
+    sample = values[-window:]
+    middle = sum(sample) / window
+    variance = sum((item - middle) ** 2 for item in sample) / window
+    upper_band = middle + std_multiplier * math.sqrt(variance)
+    return round(upper_band, 2)
+
+
+def build_quant_sell_signal(snapshot: SnapshotComputation) -> QuantSellSignal:
+    """Use the current snapshot to decide whether a sell-side quant alert should fire."""
+
+    confirmation_reasons: list[str] = []
+    if snapshot.boll_mid and snapshot.latest_price < snapshot.boll_mid:
+        confirmation_reasons.append("价格跌回 BOLL 中轨下方")
+    if snapshot.ma_250 and snapshot.latest_price < snapshot.ma_250:
+        confirmation_reasons.append("价格跌回 250 日线下方")
+    if snapshot.ma_30w and snapshot.ma_60w and snapshot.ma_30w < snapshot.ma_60w:
+        confirmation_reasons.append("30 周均线弱于 60 周均线")
+
+    should_alert = snapshot.quant_probability <= QUANT_SELL_PROBABILITY_THRESHOLD and len(confirmation_reasons) >= 2
+    reasons: list[str] = [f"量化综合盈利概率降至 {snapshot.quant_probability:.2f}%"]
+    reasons.extend(confirmation_reasons)
+    return QuantSellSignal(
+        should_alert=should_alert,
+        confirmation_count=len(confirmation_reasons),
+        reasons=tuple(reasons),
+    )
+
+
 def has_weekly_crossed(
     prev_ma_30w: float,
     prev_ma_60w: float,
@@ -125,6 +169,7 @@ def compute_snapshot_metrics(
     ma_250 = calculate_simple_moving_average(daily_closes, 250)
     boll_mid = calculate_simple_moving_average(daily_closes, 20)
     boll_lower = calculate_bollinger_lower_band(daily_closes, 20)
+    boll_upper = calculate_bollinger_upper_band(daily_closes, 20)
     ma_30w = calculate_simple_moving_average(weekly_closes, 30)
     ma_60w = calculate_simple_moving_average(weekly_closes, 60)
     prev_ma_30w = calculate_simple_moving_average(weekly_closes[:-1], 30)
@@ -138,8 +183,12 @@ def compute_snapshot_metrics(
         triggered_labels.append("BOLL中轨")
     if boll_lower and quote.latest_price <= boll_lower:
         triggered_labels.append("BOLL下轨")
+    if boll_upper and quote.latest_price >= boll_upper:
+        triggered_labels.append("BOLL上轨卖出")
     if dividend_yield >= 4.5:
         triggered_labels.append("股息率")
+    if 0 < dividend_yield < SELL_DIVIDEND_THRESHOLD:
+        triggered_labels.append("低股息率卖出")
     if weekly_crossed:
         triggered_labels.append("30周/60周均线")
 
@@ -147,7 +196,7 @@ def compute_snapshot_metrics(
     trigger_detail = (
         f"现价 {quote.latest_price:.2f} | 250日线 {ma_250:.2f} | "
         f"30周/60周 {ma_30w:.2f}/{ma_60w:.2f} | "
-        f"BOLL中轨/下轨 {boll_mid:.2f}/{boll_lower:.2f} | 股息率 {dividend_yield:.2f}% | "
+        f"BOLL上/中/下轨 {boll_upper:.2f}/{boll_mid:.2f}/{boll_lower:.2f} | 股息率 {dividend_yield:.2f}% | "
         f"量化综合盈利概率 {quant_probability:.2f}%"
     )
     return SnapshotComputation(
@@ -161,6 +210,7 @@ def compute_snapshot_metrics(
         prev_ma_60w=prev_ma_60w,
         boll_mid=boll_mid,
         boll_lower=boll_lower,
+        boll_upper=boll_upper,
         dividend_yield=dividend_yield,
         quant_probability=quant_probability,
         quant_model_breakdown=quant_model_breakdown,
@@ -208,6 +258,7 @@ class StockMonitor:
         ma_250_series: list[float | None] = []
         boll_mid_series: list[float | None] = []
         boll_lower_series: list[float | None] = []
+        boll_upper_series: list[float | None] = []
         for index in range(len(daily_bars)):
             ma_250_series.append(
                 calculate_simple_moving_average(closes[: index + 1], 250) if index >= 249 else None
@@ -218,12 +269,16 @@ class StockMonitor:
             boll_lower_series.append(
                 calculate_bollinger_lower_band(closes[: index + 1], 20) if index >= 19 else None
             )
+            boll_upper_series.append(
+                calculate_bollinger_upper_band(closes[: index + 1], 20) if index >= 19 else None
+            )
         return {
             "labels": labels,
             "close": close_series,
             "ma250": ma_250_series[-self.settings.detail_chart_days :],
             "bollMid": boll_mid_series[-self.settings.detail_chart_days :],
             "bollLower": boll_lower_series[-self.settings.detail_chart_days :],
+            "bollUpper": boll_upper_series[-self.settings.detail_chart_days :],
         }
 
     def build_snapshot(
@@ -297,6 +352,7 @@ class StockMonitor:
             ma_60w=snapshot.ma_60w,
             boll_mid=snapshot.boll_mid,
             boll_lower=snapshot.boll_lower,
+            boll_upper=snapshot.boll_upper,
             dividend_yield=snapshot.dividend_yield,
             quant_probability=snapshot.quant_probability,
             quant_model_breakdown=snapshot.quant_model_breakdown,
@@ -359,6 +415,7 @@ class StockMonitor:
                     ma_60w=snapshot.ma_60w,
                     boll_mid=snapshot.boll_mid,
                     boll_lower=snapshot.boll_lower,
+                    boll_upper=snapshot.boll_upper,
                     dividend_yield=snapshot.dividend_yield,
                     quant_probability=snapshot.quant_probability,
                     quant_model_breakdown=snapshot.quant_model_breakdown,
@@ -414,6 +471,22 @@ class StockMonitor:
                     email_settings=email_settings,
                     required_hits=2,
                 )
+                self._process_intraday_signal(
+                    owner_username=owner_username,
+                    symbol=symbol,
+                    display_name=snapshot.display_name,
+                    trigger_type="BOLL上轨卖出",
+                    trade_marker=trade_date.isoformat(),
+                    condition_met=bool(snapshot.boll_upper and snapshot.latest_price >= snapshot.boll_upper),
+                    detail=f"{snapshot.trigger_detail} | 卖出参考：价格突破 BOLL 上轨，可结合仓位分批止盈。",
+                    current_price=snapshot.latest_price,
+                    indicator_values={
+                        "boll_upper": snapshot.boll_upper,
+                        "latest_price": snapshot.latest_price,
+                    },
+                    email_settings=email_settings,
+                    required_hits=2,
+                )
                 threshold = float(quant_settings["probability_threshold"])
                 if bool(quant_settings["enabled"]):
                     self._process_intraday_signal(
@@ -429,6 +502,25 @@ class StockMonitor:
                             "quant_probability": snapshot.quant_probability,
                             "probability_threshold": threshold,
                             "selected_models": ", ".join(selected_models),
+                        },
+                        email_settings=email_settings,
+                        required_hits=1,
+                    )
+                    quant_sell_signal = build_quant_sell_signal(snapshot)
+                    self._process_intraday_signal(
+                        owner_username=owner_username,
+                        symbol=symbol,
+                        display_name=snapshot.display_name,
+                        trigger_type="量化走弱卖出",
+                        trade_marker=trade_date.isoformat(),
+                        condition_met=quant_sell_signal.should_alert,
+                        detail=f"{snapshot.trigger_detail} | 卖出参考：{'；'.join(quant_sell_signal.reasons)}",
+                        current_price=snapshot.latest_price,
+                        indicator_values={
+                            "quant_probability": snapshot.quant_probability,
+                            "sell_probability_threshold": QUANT_SELL_PROBABILITY_THRESHOLD,
+                            "confirmation_count": quant_sell_signal.confirmation_count,
+                            "reasons": "；".join(quant_sell_signal.reasons),
                         },
                         email_settings=email_settings,
                         required_hits=1,
@@ -519,8 +611,8 @@ class StockMonitor:
                         strategy_params=quant_config["strategy_params"],
                     )
                     snapshot_cache[cache_key] = snapshot
-                state = get_signal_state(self.settings.db_path, owner_username, stock["symbol"], "股息率")
-                if snapshot.dividend_yield >= 4.5 and (state is None or state["last_event_marker"] != marker):
+                high_dividend_state = get_signal_state(self.settings.db_path, owner_username, stock["symbol"], "股息率")
+                if snapshot.dividend_yield >= 4.5 and (high_dividend_state is None or high_dividend_state["last_event_marker"] != marker):
                     payload = self._build_pending_payload(
                         owner_username=owner_username,
                         symbol=snapshot.symbol,
@@ -541,7 +633,35 @@ class StockMonitor:
                         trigger_type="股息率",
                         consecutive_hits=1,
                         last_condition_met=True,
-                        last_event_marker=state["last_event_marker"] if state else None,
+                        last_event_marker=high_dividend_state["last_event_marker"] if high_dividend_state else None,
+                        pending_delivery=True,
+                        deliver_on=marker,
+                        pending_payload=payload,
+                    )
+                low_dividend_state = get_signal_state(self.settings.db_path, owner_username, stock["symbol"], "低股息率卖出")
+                if 0 < snapshot.dividend_yield < SELL_DIVIDEND_THRESHOLD and (low_dividend_state is None or low_dividend_state["last_event_marker"] != marker):
+                    payload = self._build_pending_payload(
+                        owner_username=owner_username,
+                        symbol=snapshot.symbol,
+                        display_name=snapshot.display_name,
+                        trigger_type="低股息率卖出",
+                        current_price=snapshot.latest_price,
+                        detail=f"{snapshot.trigger_detail} | 卖出参考：股息率低于 {SELL_DIVIDEND_THRESHOLD:.2f}% 可视为防守属性减弱。",
+                        indicator_values={
+                            "dividend_yield": snapshot.dividend_yield,
+                            "sell_dividend_threshold": SELL_DIVIDEND_THRESHOLD,
+                            "latest_price": snapshot.latest_price,
+                        },
+                        event_marker=marker,
+                    )
+                    upsert_signal_state(
+                        db_path=self.settings.db_path,
+                        owner_username=owner_username,
+                        symbol=snapshot.symbol,
+                        trigger_type="低股息率卖出",
+                        consecutive_hits=1,
+                        last_condition_met=True,
+                        last_event_marker=low_dividend_state["last_event_marker"] if low_dividend_state else None,
                         pending_delivery=True,
                         deliver_on=marker,
                         pending_payload=payload,
