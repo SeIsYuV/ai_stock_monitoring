@@ -55,8 +55,9 @@
 ## 下载镜像源
 
 - Docker 基础镜像默认改为国内镜像：`swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.12-slim`
-- `Caddy` 代理镜像默认改为国内镜像：`swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/caddy:2`
+- `Caddy` 代理镜像默认改为国内代理镜像：`dockerproxy.com/library/caddy:2`
 - 如果你的服务器对某个镜像源访问不稳定，可以在 `.env` 中自行改 `BASE_IMAGE` 和 `CADDY_IMAGE`
+- 如果你已经给 Docker Daemon 配好了国内镜像加速器，也可以把 `CADDY_IMAGE` 改回 `caddy:2`
 - Docker 构建安装 Python 依赖时，默认优先使用清华 PyPI 镜像
 - 本地安装依赖时，README 中也默认使用清华 PyPI 镜像命令
 - 如果你后续想换成别的国内镜像，可以在 Docker 构建时覆盖 `PIP_INDEX_URL` 和 `PIP_TRUSTED_HOST`

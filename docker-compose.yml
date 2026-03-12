@@ -34,7 +34,7 @@ services:
       start_period: 20s
 
   caddy:
-    image: ${CADDY_IMAGE:-swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/caddy:2}
+    image: ${CADDY_IMAGE:-dockerproxy.com/library/caddy:2}
     container_name: ai-stock-monitoring-caddy
     depends_on:
       ai-stock-monitoring:
