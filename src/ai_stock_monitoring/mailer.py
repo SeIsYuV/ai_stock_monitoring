@@ -47,3 +47,28 @@ def build_alert_email_body(payload: dict[str, Any]) -> str:
         f"触发时间：{payload['triggered_at']}\n"
         "\n本系统仅为监控参考，不构成任何投资建议。"
     )
+
+
+def build_trade_analysis_email_body(payload: dict[str, Any]) -> str:
+    """Render the latest trade replay result into a readable email body."""
+
+    analysis = payload["analysis"]
+    lines = [
+        f"股票：{payload['symbol']}",
+        f"分析来源：{payload['provider']} / {payload['model_name']}",
+        f"生成时间：{payload['created_at']}",
+        f"结论：{analysis['summary']}",
+        f"合理性判断：{analysis['judgment']}",
+        f"仓位建议：{analysis['position_advice']}",
+        "",
+        "判断依据：",
+    ]
+    lines.extend(f"- {item}" for item in analysis["reasoning"])
+    lines.extend(["", "下一步买点："])
+    lines.extend(f"- {item}" for item in analysis["next_buy_points"])
+    lines.extend(["", "下一步卖点："])
+    lines.extend(f"- {item}" for item in analysis["next_sell_points"])
+    lines.extend(["", "风控建议："])
+    lines.extend(f"- {item}" for item in analysis["risk_controls"])
+    lines.extend(["", analysis["disclaimer"]])
+    return "\n".join(lines)

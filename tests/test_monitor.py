@@ -1,6 +1,7 @@
 from datetime import date, datetime
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -108,6 +109,81 @@ class MonitorTests(unittest.TestCase):
                 self.assertEqual(trades_page.status_code, 200)
                 self.assertIn("最新分析", trades_page.text)
                 self.assertIn("首次建仓", trades_page.text)
+
+    def test_trade_export_route_returns_excel(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                client.post(
+                    "/trades",
+                    data={
+                        "symbol": "600519",
+                        "side": "buy",
+                        "price": "1200.5",
+                        "quantity": "100",
+                        "traded_at": "2026-03-12T10:00",
+                        "note": "首次建仓",
+                    },
+                    follow_redirects=False,
+                )
+                export_response = client.get("/trades/export?symbol=600519")
+                self.assertEqual(export_response.status_code, 200)
+                self.assertEqual(
+                    export_response.headers["content-type"],
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
+    def test_trade_analysis_email_route_sends_mail(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                client.post(
+                    "/settings/email",
+                    data={
+                        "recipient_email": "to@example.com",
+                        "smtp_server": "smtp.qq.com",
+                        "sender_email": "from@example.com",
+                        "sender_password": "secret",
+                    },
+                    follow_redirects=False,
+                )
+                client.post(
+                    "/trades",
+                    data={
+                        "symbol": "600519",
+                        "side": "buy",
+                        "price": "1200.5",
+                        "quantity": "100",
+                        "traded_at": "2026-03-12T10:00",
+                        "note": "首次建仓",
+                    },
+                    follow_redirects=False,
+                )
+                client.post(
+                    "/trades/analyze",
+                    data={"symbol": "600519"},
+                    follow_redirects=False,
+                )
+                with patch("src.ai_stock_monitoring.app.send_message") as mocked_send:
+                    mocked_send.return_value.success = True
+                    mocked_send.return_value.error = None
+                    send_response = client.post(
+                        "/trades/email-analysis",
+                        data={"symbol": "600519"},
+                        follow_redirects=False,
+                    )
+                    self.assertEqual(send_response.status_code, 303)
+                    mocked_send.assert_called_once()
 
 
 if __name__ == "__main__":

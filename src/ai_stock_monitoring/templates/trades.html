@@ -32,6 +32,12 @@
             <button type="submit">用大模型分析当前操作</button>
         </form>
         <p>如果已配置 `OPENAI_API_KEY`，会优先调用大模型；否则自动回退到规则分析。</p>
+        <form method="post" action="/trades/email-analysis">
+            <label>发送复盘邮件</label>
+            <input type="text" name="symbol" maxlength="6" value="{{ selected_symbol }}" placeholder="例如 600519" required>
+            <button type="submit" class="secondary">发送最新复盘到邮箱</button>
+        </form>
+        <a class="inline-link" href="/trades/export{% if selected_symbol %}?symbol={{ selected_symbol }}{% endif %}">导出当前交易记录为 Excel</a>
         {% if position_summary %}
         <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 16px 0;">
         <h3>当前持仓摘要</h3>

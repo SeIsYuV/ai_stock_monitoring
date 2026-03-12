@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import date, datetime
+from io import BytesIO
 import json
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
+from openpyxl import Workbook
 import uvicorn
 
 from .config import AppSettings, load_settings
@@ -32,7 +34,7 @@ from .database import (
     remove_monitored_stock,
     save_email_settings,
 )
-from .mailer import send_message
+from .mailer import build_trade_analysis_email_body, send_message
 from .monitor import StockMonitor, parse_stock_symbols
 from .security import verify_password
 from .trade_advisor import TradeAdvisor, build_position_summary
@@ -139,15 +141,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         latest_analysis = None
         position_summary = None
         if latest_analysis_row is not None:
-            latest_analysis = {
-                "symbol": latest_analysis_row["symbol"],
-                "provider": latest_analysis_row["analysis_provider"],
-                "model_name": latest_analysis_row["model_name"],
-                "status": latest_analysis_row["status"],
-                "error_message": latest_analysis_row["error_message"],
-                "created_at": latest_analysis_row["created_at"],
-                "analysis": json.loads(latest_analysis_row["analysis_json"]),
-            }
+            latest_analysis = _serialize_latest_analysis_row(latest_analysis_row)
             position_summary = json.loads(latest_analysis_row["position_summary"])
         elif selected_symbol:
             position_summary = build_position_summary(
@@ -166,6 +160,59 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 "trade_records": trade_records,
                 "latest_analysis": latest_analysis,
                 "position_summary": position_summary,
+            },
+        )
+
+    @app.get("/trades/export")
+    async def export_trades(request: Request, symbol: str | None = None) -> Response:
+        guard = _require_login(request, resolved_settings)
+        if guard is not None:
+            return guard
+
+        selected_symbol = (symbol or "").strip() or None
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "交易流水"
+        worksheet.append(["成交时间", "股票代码", "方向", "价格", "数量", "备注", "录入时间"])
+        trade_records = list_trade_records(resolved_settings.db_path, selected_symbol)
+        for trade in trade_records:
+            worksheet.append(
+                [
+                    trade["traded_at"],
+                    trade["symbol"],
+                    "买入" if trade["side"] == "buy" else "卖出",
+                    float(trade["price"]),
+                    int(trade["quantity"]),
+                    trade["note"] or "",
+                    trade["created_at"],
+                ]
+            )
+
+        latest_analysis_row = get_latest_trade_analysis(resolved_settings.db_path, selected_symbol)
+        if latest_analysis_row is not None:
+            analysis_sheet = workbook.create_sheet(title="最新分析")
+            analysis = json.loads(latest_analysis_row["analysis_json"])
+            analysis_sheet.append(["股票代码", latest_analysis_row["symbol"]])
+            analysis_sheet.append(["分析来源", latest_analysis_row["analysis_provider"]])
+            analysis_sheet.append(["模型", latest_analysis_row["model_name"]])
+            analysis_sheet.append(["状态", latest_analysis_row["status"]])
+            analysis_sheet.append(["生成时间", latest_analysis_row["created_at"]])
+            analysis_sheet.append(["结论", analysis["summary"]])
+            analysis_sheet.append(["合理性判断", analysis["judgment"]])
+            analysis_sheet.append(["仓位建议", analysis["position_advice"]])
+            analysis_sheet.append(["置信度", analysis["confidence"]])
+
+        buffer = BytesIO()
+        workbook.save(buffer)
+        buffer.seek(0)
+        filename_symbol = selected_symbol or "all"
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="trade_records_{filename_symbol}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx"'
+                )
             },
         )
 
@@ -338,9 +385,35 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             error_message=result.error_message,
         )
         message = "交易复盘分析已更新"
+        email_result = _send_trade_analysis_email_if_configured(
+            db_path=resolved_settings.db_path,
+            symbol=symbol,
+        )
+        if email_result is not None:
+            message = f"{message}；{email_result}"
         if result.error_message:
             message = f"交易复盘分析已更新：{result.error_message}"
         return _redirect_with_message(f"/trades?symbol={symbol}", message)
+
+    @app.post("/trades/email-analysis")
+    async def email_trade_analysis(
+        request: Request,
+        symbol: str = Form(...),
+    ) -> RedirectResponse:
+        guard = _require_login(request, resolved_settings)
+        if guard is not None:
+            return guard
+
+        if not symbol.isdigit() or len(symbol) != 6:
+            return _redirect_with_message("/trades", "请输入 6 位股票代码后再发送")
+
+        result_message = _send_trade_analysis_email_if_configured(
+            db_path=resolved_settings.db_path,
+            symbol=symbol,
+        )
+        if result_message is None:
+            result_message = "当前没有可发送的复盘分析，请先生成分析"
+        return _redirect_with_message(f"/trades?symbol={symbol}", result_message)
 
     @app.post("/settings/email")
     async def update_email_settings(
@@ -429,6 +502,8 @@ async def _monitor_loop(app: FastAPI) -> None:
 
 
 def _build_system_status(monitor: StockMonitor, email_settings: object) -> dict[str, str]:
+    """Render a compact health summary for the dashboard footer."""
+
     mail_status = "已配置" if email_settings["smtp_server"] else "未配置"
     provider_status = "正常" if not monitor.last_error_message else f"异常：{monitor.last_error_message}"
     last_refresh = monitor.last_refresh_at.isoformat(sep=" ", timespec="seconds") if monitor.last_refresh_at else "尚未刷新"
@@ -442,6 +517,39 @@ def _build_system_status(monitor: StockMonitor, email_settings: object) -> dict[
 
 def _is_authenticated(request: Request, settings: AppSettings) -> bool:
     return request.cookies.get(settings.session_cookie_name) == "1"
+
+
+def _serialize_latest_analysis_row(latest_analysis_row: object) -> dict[str, object]:
+    """Convert the latest persisted analysis row into template-friendly data."""
+
+    return {
+        "symbol": latest_analysis_row["symbol"],
+        "provider": latest_analysis_row["analysis_provider"],
+        "model_name": latest_analysis_row["model_name"],
+        "status": latest_analysis_row["status"],
+        "error_message": latest_analysis_row["error_message"],
+        "created_at": latest_analysis_row["created_at"],
+        "analysis": json.loads(latest_analysis_row["analysis_json"]),
+    }
+
+
+def _send_trade_analysis_email_if_configured(db_path: str, symbol: str) -> str | None:
+    """Send the latest analysis by email when SMTP settings are available."""
+
+    latest_analysis_row = get_latest_trade_analysis(db_path, symbol)
+    if latest_analysis_row is None:
+        return None
+
+    latest_analysis = _serialize_latest_analysis_row(latest_analysis_row)
+    email_settings = get_email_settings(db_path)
+    result = send_message(
+        email_settings,
+        subject=f"[交易复盘] {symbol} {latest_analysis['analysis']['judgment']}",
+        body=build_trade_analysis_email_body(latest_analysis),
+    )
+    if result.success:
+        return "复盘结果邮件已发送"
+    return f"复盘结果邮件发送失败：{result.error}"
 
 
 def _require_login(request: Request, settings: AppSettings) -> RedirectResponse | None:
