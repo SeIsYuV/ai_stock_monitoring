@@ -99,12 +99,12 @@ class MonitorTests(unittest.TestCase):
                 side="buy",
                 price=12.3456789,
                 quantity=100,
-                traded_at="2026-03-12T10:00",
                 note="test",
             )
             records = list_trade_records(database_file.name, "admin", "600519")
             self.assertEqual(len(records), 1)
             self.assertAlmostEqual(float(records[0]["price"]), 12.34568, places=5)
+            self.assertTrue(str(records[0]["traded_at"]))
 
 
     def test_build_position_summary(self) -> None:

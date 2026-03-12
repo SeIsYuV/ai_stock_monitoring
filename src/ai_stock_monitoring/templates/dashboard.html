@@ -362,8 +362,7 @@
                 <th>DCF内在价值/偏差</th>
                 <th>触发状态</th>
                 <th>综合建议</th>
-                <th>更新时间</th>
-                <th>操作</th>
+                <th>更新时间 / 操作</th>
             </tr>
             </thead>
             <tbody>
@@ -433,7 +432,7 @@
                     <div class="muted signal-detail">原始状态：{{ item['trigger_state'] }}</div>
                     {% endif %}
                     {% if item['trigger_detail'] %}
-                    <div style="font-size: 12px; color: #64748b; margin-top: 6px; min-width: 260px;">{{ item['trigger_detail'] }}</div>
+                    <div class="signal-detail-block">{{ item['trigger_detail'] }}</div>
                     {% endif %}
                 </td>
                 <td class="advice-cell">
@@ -445,15 +444,15 @@
                         <div><strong>DCF</strong><span>{{ item['advice_dcf_line'] }}</span></div>
                     </div>
                 </td>
-                <td class="nowrap">
-                    {% if item['updated_at'] %}
-                    {{ format_snapshot_timestamp(item['updated_at']) }}
-                    {% else %}
-                    -
-                    {% endif %}
-                </td>
-                <td>
-                    <form method="post" action="/stocks/{{ item['symbol'] }}/delete">
+                <td class="meta-cell">
+                    <div class="meta-time nowrap">
+                        {% if item['updated_at'] %}
+                        {{ format_snapshot_timestamp(item['updated_at']) }}
+                        {% else %}
+                        -
+                        {% endif %}
+                    </div>
+                    <form method="post" action="/stocks/{{ item['symbol'] }}/delete" class="inline-form meta-action-form">
                         <button type="submit" class="danger">删除</button>
                     </form>
                 </td>

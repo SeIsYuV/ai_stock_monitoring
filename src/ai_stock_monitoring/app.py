@@ -661,7 +661,6 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         side: str = Form(...),
         price: float = Form(...),
         quantity: int = Form(...),
-        traded_at: str = Form(...),
         note: str = Form(""),
     ) -> RedirectResponse:
         current_user = _require_login(request, resolved_settings)
@@ -677,17 +676,19 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         if price <= 0 or quantity <= 0:
             return _redirect_with_message("/trades", "价格和数量必须大于 0")
 
-        add_monitored_stock(resolved_settings.db_path, owner_username, symbol)
-        add_trade_record(
-            resolved_settings.db_path,
-            owner_username=owner_username,
-            symbol=symbol,
-            side=side,
-            price=price,
-            quantity=quantity,
-            traded_at=traded_at,
-            note=note.strip(),
-        )
+        try:
+            add_monitored_stock(resolved_settings.db_path, owner_username, symbol)
+            add_trade_record(
+                resolved_settings.db_path,
+                owner_username=owner_username,
+                symbol=symbol,
+                side=side,
+                price=price,
+                quantity=quantity,
+                note=note.strip(),
+            )
+        except Exception:
+            return _redirect_with_message(f"/trades?symbol={symbol}", "保存交易记录失败，请重试")
         return _redirect_with_message(f"/trades?symbol={symbol}", "交易记录已保存")
 
     @app.post("/trades/analyze")

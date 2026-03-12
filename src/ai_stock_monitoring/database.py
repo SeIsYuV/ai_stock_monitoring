@@ -1061,17 +1061,19 @@ def add_trade_record(
     side: str,
     price: float,
     quantity: int,
-    traded_at: str,
-    note: str,
+    traded_at: str | None = None,
+    note: str = "",
 ) -> None:
     created_at = datetime.now(UTC).isoformat()
+    normalized_price = round(float(price), 5)
+    normalized_traded_at = traded_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_connection(db_path) as connection:
         connection.execute(
             """
             INSERT INTO user_trade_record (owner_username, symbol, side, price, quantity, traded_at, note, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (owner_username, symbol, side, normalized_price, quantity, traded_at, note, created_at),
+            (owner_username, symbol, side, normalized_price, quantity, normalized_traded_at, note, created_at),
         )
 
 
