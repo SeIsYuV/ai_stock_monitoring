@@ -10,6 +10,7 @@ from __future__ import annotations
 否则退回到本地规则分析，保证功能始终可用。
 """
 
+from collections import defaultdict
 from dataclasses import dataclass
 import json
 from typing import Any, Mapping, Sequence
@@ -219,6 +220,302 @@ def build_recommended_price_plan(
         "sell_price_plan": sell_price_plan,
         "watch_price_plan": watch_price_plan,
     }
+
+
+def _neutral_snapshot_from_position(symbol: str, position_summary: Mapping[str, Any], snapshot: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    payload = dict(snapshot or {})
+    payload.setdefault("symbol", symbol)
+    payload.setdefault("display_name", symbol)
+    payload.setdefault("latest_price", float(position_summary.get("average_cost") or 0.0))
+    payload.setdefault("ma_250", 0.0)
+    payload.setdefault("ma_30w", 0.0)
+    payload.setdefault("ma_60w", 0.0)
+    payload.setdefault("boll_mid", 0.0)
+    payload.setdefault("boll_lower", 0.0)
+    payload.setdefault("boll_upper", 0.0)
+    payload.setdefault("dividend_yield", 0.0)
+    payload.setdefault("quant_probability", 50.0)
+    payload.setdefault("quant_model_breakdown", "[]")
+    payload.setdefault("trigger_state", "正常")
+    payload.setdefault("trigger_detail", "")
+    payload.setdefault("updated_at", "")
+    return payload
+
+
+def _infer_position_style(snapshot: Mapping[str, Any], action_summary: Mapping[str, Any], weight_pct: float) -> str:
+    quant_probability = float(snapshot.get("quant_probability") or 0.0)
+    dividend_yield = float(snapshot.get("dividend_yield") or 0.0)
+    ma_250 = float(snapshot.get("ma_250") or 0.0)
+    latest_price = float(snapshot.get("latest_price") or 0.0)
+    action = str(action_summary.get("action") or "观望")
+
+    if weight_pct >= 40 and action == "偏买入":
+        return "集中进攻型"
+    if dividend_yield >= 4.5 and quant_probability >= 60:
+        return "红利稳健型"
+    if latest_price > 0 and ma_250 > 0 and latest_price >= ma_250 and quant_probability >= 75:
+        return "趋势进攻型"
+    if action == "偏卖出" or quant_probability <= 45:
+        return "防守观察型"
+    return "均衡配置型"
+
+
+def _evaluate_symbol_risk(snapshot: Mapping[str, Any], action_summary: Mapping[str, Any], weight_pct: float) -> dict[str, Any]:
+    latest_price = float(snapshot.get("latest_price") or 0.0)
+    ma_250 = float(snapshot.get("ma_250") or 0.0)
+    boll_mid = float(snapshot.get("boll_mid") or 0.0)
+    quant_probability = float(snapshot.get("quant_probability") or 0.0)
+
+    risk_score = 0
+    reasons: list[str] = []
+    if weight_pct >= 35:
+        risk_score += 2
+        reasons.append("单只仓位占比偏高")
+    if ma_250 > 0 and latest_price < ma_250:
+        risk_score += 1
+        reasons.append("价格位于 250 日线下方")
+    if boll_mid > 0 and latest_price < boll_mid:
+        risk_score += 1
+        reasons.append("价格位于 BOLL 中轨下方")
+    if quant_probability <= 45:
+        risk_score += 2
+        reasons.append("量化评分偏弱")
+    elif quant_probability <= 60:
+        risk_score += 1
+        reasons.append("量化评分一般")
+    if str(action_summary.get("action")) == "偏卖出":
+        risk_score += 2
+        reasons.append("卖出信号占优")
+
+    if risk_score >= 5:
+        risk_level = "高"
+    elif risk_score >= 3:
+        risk_level = "中"
+    else:
+        risk_level = "低"
+
+    return {
+        "risk_level": risk_level,
+        "risk_score": risk_score,
+        "risk_reasons": reasons or ["当前未见明显高风险信号"],
+    }
+
+
+def _recommended_holding_ratio_range(overall_action: str, risk_level: str, weighted_quant_probability: float) -> str:
+    if overall_action == "偏卖出" or risk_level == "高":
+        return "20% - 40%"
+    if overall_action == "观望":
+        return "40% - 60%"
+    if weighted_quant_probability >= 80 and risk_level == "低":
+        return "65% - 85%"
+    return "50% - 70%"
+
+
+def build_portfolio_profile(
+    trade_records: Sequence[Mapping[str, Any]],
+    snapshots: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Build an account-level holdings profile from recorded trades and latest snapshots.
+
+    这部分回答的是“我现在整体仓位怎么样”：
+    - 当前到底持有哪些股票、每只占多少
+    - 风格更偏进攻、均衡还是防守
+    - 组合整体风险高不高
+    - 模型视角下，更合适的仓位区间是多少
+    """
+
+    grouped_records: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for trade in trade_records:
+        grouped_records[str(trade["symbol"])] .append(trade)
+
+    snapshot_map = {str(item["symbol"]): dict(item) for item in snapshots}
+    holding_items: list[dict[str, Any]] = []
+    total_market_value = 0.0
+    total_cost_basis = 0.0
+    total_realized_pnl = 0.0
+    total_buy_amount = 0.0
+    total_sell_amount = 0.0
+
+    for symbol, rows in grouped_records.items():
+        position_summary = build_position_summary(rows)
+        total_realized_pnl += float(position_summary["realized_pnl"])
+        total_buy_amount += float(position_summary["total_buy_amount"])
+        total_sell_amount += float(position_summary["total_sell_amount"])
+        position_quantity = int(position_summary["position_quantity"])
+        if position_quantity <= 0:
+            continue
+
+        snapshot = _neutral_snapshot_from_position(symbol, position_summary, snapshot_map.get(symbol))
+        latest_price = float(snapshot.get("latest_price") or position_summary["average_cost"] or 0.0)
+        cost_basis = float(position_summary["cost_basis_total"])
+        market_value = round(latest_price * position_quantity, 2)
+        unrealized_pnl = round(market_value - cost_basis, 2)
+        unrealized_pnl_pct = round((unrealized_pnl / cost_basis) * 100, 2) if cost_basis > 0 else 0.0
+        total_market_value += market_value
+        total_cost_basis += cost_basis
+
+        holding_items.append(
+            {
+                "symbol": symbol,
+                "display_name": str(snapshot.get("display_name") or symbol),
+                "position_quantity": position_quantity,
+                "average_cost": float(position_summary["average_cost"]),
+                "cost_basis_total": cost_basis,
+                "latest_price": latest_price,
+                "market_value": market_value,
+                "unrealized_pnl": unrealized_pnl,
+                "unrealized_pnl_pct": unrealized_pnl_pct,
+                "quant_probability": float(snapshot.get("quant_probability") or 0.0),
+                "dividend_yield": float(snapshot.get("dividend_yield") or 0.0),
+                "snapshot": snapshot,
+                "position_summary": position_summary,
+            }
+        )
+
+    if not holding_items:
+        return {
+            "has_positions": False,
+            "holding_ratio": 0.0,
+            "recommended_holding_ratio": "0% - 20%",
+            "holding_style": "空仓观察型",
+            "risk_level": "低",
+            "risk_score": 0,
+            "weighted_quant_probability": 0.0,
+            "weighted_dividend_yield": 0.0,
+            "total_market_value": 0.0,
+            "total_cost_basis": 0.0,
+            "total_unrealized_pnl": 0.0,
+            "total_unrealized_pnl_pct": 0.0,
+            "total_realized_pnl": round(total_realized_pnl, 2),
+            "active_positions": [],
+            "comprehensive_advice": "当前没有持仓，建议先等待更明确的买入信号，再逐步建立试探仓位。",
+            "risk_reasons": ["当前账户没有在途仓位，整体回撤压力较低。"],
+            "analysis_note": "持仓比例按已记录交易资金估算。",
+        }
+
+    for item in holding_items:
+        weight_pct = round(item["market_value"] / total_market_value * 100, 2) if total_market_value > 0 else 0.0
+        snapshot = item["snapshot"]
+        action_summary = build_market_action_summary(snapshot)
+        risk_info = _evaluate_symbol_risk(snapshot, action_summary, weight_pct)
+        item["weight_pct"] = weight_pct
+        item["action"] = action_summary["action"]
+        item["action_color"] = action_summary["action_color"]
+        item["action_reason"] = action_summary["action_reason"]
+        item["position_style"] = _infer_position_style(snapshot, action_summary, weight_pct)
+        item.update(risk_info)
+
+    holding_items.sort(key=lambda entry: (-entry["weight_pct"], entry["symbol"]))
+
+    weighted_quant_probability = round(
+        sum(item["quant_probability"] * item["weight_pct"] for item in holding_items) / 100,
+        2,
+    )
+    weighted_dividend_yield = round(
+        sum(item["dividend_yield"] * item["weight_pct"] for item in holding_items) / 100,
+        2,
+    )
+    total_unrealized_pnl = round(total_market_value - total_cost_basis, 2)
+    total_unrealized_pnl_pct = round((total_unrealized_pnl / total_cost_basis) * 100, 2) if total_cost_basis > 0 else 0.0
+    estimated_portfolio_base = total_market_value + max(total_sell_amount, 0.0)
+    holding_ratio = round((total_market_value / estimated_portfolio_base) * 100, 2) if estimated_portfolio_base > 0 else 0.0
+
+    portfolio_buy_score = round(sum(item["market_value"] * build_market_action_summary(item["snapshot"])["buy_score"] for item in holding_items) / max(total_market_value, 1), 2)
+    portfolio_sell_score = round(sum(item["market_value"] * build_market_action_summary(item["snapshot"])["sell_score"] for item in holding_items) / max(total_market_value, 1), 2)
+
+    if portfolio_buy_score - portfolio_sell_score >= 2.5:
+        overall_action = "偏买入"
+    elif portfolio_sell_score - portfolio_buy_score >= 2.5:
+        overall_action = "偏卖出"
+    else:
+        overall_action = "观望"
+
+    top_weight = max(item["weight_pct"] for item in holding_items)
+    weak_position_weight = sum(item["weight_pct"] for item in holding_items if item["risk_level"] == "高" or item["action"] == "偏卖出")
+    portfolio_risk_score = 0
+    portfolio_risk_reasons: list[str] = []
+    if holding_ratio >= 80:
+        portfolio_risk_score += 2
+        portfolio_risk_reasons.append("整体持仓比例偏高")
+    elif holding_ratio >= 65:
+        portfolio_risk_score += 1
+        portfolio_risk_reasons.append("整体仓位不低，需要控制回撤")
+    if top_weight >= 45:
+        portfolio_risk_score += 2
+        portfolio_risk_reasons.append("单一股票仓位集中度偏高")
+    elif top_weight >= 30:
+        portfolio_risk_score += 1
+        portfolio_risk_reasons.append("前排重仓股占比不低")
+    if weak_position_weight >= 35:
+        portfolio_risk_score += 2
+        portfolio_risk_reasons.append("弱势或偏卖出仓位占比偏高")
+    elif weak_position_weight >= 20:
+        portfolio_risk_score += 1
+        portfolio_risk_reasons.append("组合中已有一定比例弱势仓位")
+    if weighted_quant_probability <= 50:
+        portfolio_risk_score += 2
+        portfolio_risk_reasons.append("组合加权量化评分偏弱")
+    elif weighted_quant_probability <= 65:
+        portfolio_risk_score += 1
+        portfolio_risk_reasons.append("组合加权量化评分一般")
+
+    if portfolio_risk_score >= 5:
+        risk_level = "高"
+    elif portfolio_risk_score >= 3:
+        risk_level = "中"
+    else:
+        risk_level = "低"
+
+    if weighted_dividend_yield >= 4.5 and holding_ratio <= 70:
+        holding_style = "红利稳健型"
+    elif top_weight >= 45 and holding_ratio >= 70:
+        holding_style = "集中进攻型"
+    elif overall_action == "偏买入" and weighted_quant_probability >= 75:
+        holding_style = "趋势进攻型"
+    elif holding_ratio <= 35:
+        holding_style = "防守观望型"
+    else:
+        holding_style = "均衡配置型"
+
+    recommended_holding_ratio = _recommended_holding_ratio_range(overall_action, risk_level, weighted_quant_probability)
+
+    if overall_action == "偏卖出":
+        comprehensive_advice = (
+            f"当前组合更偏防守，建议把总仓位逐步收缩到 {recommended_holding_ratio}，"
+            "优先处理弱势仓位和高集中度仓位。"
+        )
+    elif overall_action == "偏买入" and risk_level == "低":
+        comprehensive_advice = (
+            f"当前组合相对健康，可围绕强势仓位把总仓位维持在 {recommended_holding_ratio}，"
+            "但仍建议分批而不是一次性加满。"
+        )
+    else:
+        comprehensive_advice = (
+            f"当前组合多空信号并存，建议先把总仓位控制在 {recommended_holding_ratio}，"
+            "等待强弱分化更明确后再调整。"
+        )
+
+    return {
+        "has_positions": True,
+        "holding_ratio": holding_ratio,
+        "recommended_holding_ratio": recommended_holding_ratio,
+        "holding_style": holding_style,
+        "risk_level": risk_level,
+        "risk_score": portfolio_risk_score,
+        "overall_action": overall_action,
+        "weighted_quant_probability": weighted_quant_probability,
+        "weighted_dividend_yield": weighted_dividend_yield,
+        "total_market_value": round(total_market_value, 2),
+        "total_cost_basis": round(total_cost_basis, 2),
+        "total_unrealized_pnl": total_unrealized_pnl,
+        "total_unrealized_pnl_pct": total_unrealized_pnl_pct,
+        "total_realized_pnl": round(total_realized_pnl, 2),
+        "active_positions": holding_items,
+        "comprehensive_advice": comprehensive_advice,
+        "risk_reasons": portfolio_risk_reasons or ["组合结构暂时平衡，没有明显超额风险信号。"],
+        "analysis_note": "持仓比例按已记录交易资金估算：当前持仓市值 /（当前持仓市值 + 历史卖出回笼资金）。",
+    }
+
 
 
 @dataclass(frozen=True)

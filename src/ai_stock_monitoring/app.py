@@ -65,7 +65,7 @@ from .mailer import build_login_unlock_email_body, build_test_email_body, build_
 from .monitor import StockMonitor, parse_stock_symbols
 from .quant import available_quant_models, normalize_selected_models, normalize_strategy_params
 from .security import hash_password, password_hash_needs_rehash, verify_password
-from .trade_advisor import TradeAdvisor, build_market_action_summary, build_position_summary
+from .trade_advisor import TradeAdvisor, build_market_action_summary, build_portfolio_profile, build_position_summary
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -356,6 +356,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         selected_symbol = (symbol or "").strip()
         owner_username = current_user["username"]
         trade_records = list_trade_records(resolved_settings.db_path, owner_username, selected_symbol or None)
+        all_trade_records = list_trade_records(resolved_settings.db_path, owner_username, None)
+        snapshots = get_snapshots(resolved_settings.db_path, owner_username)
         latest_analysis_row = get_latest_trade_analysis(
             resolved_settings.db_path,
             owner_username,
@@ -371,6 +373,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 list_trade_records_for_symbol(resolved_settings.db_path, owner_username, selected_symbol)
             )
 
+        portfolio_profile = build_portfolio_profile(all_trade_records, snapshots)
+
         return templates.TemplateResponse(
             request,
             "trades.html",
@@ -381,10 +385,11 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 message_type=message_type,
                 page_title="交易复盘",
                 selected_symbol=selected_symbol,
-                snapshots=get_snapshots(resolved_settings.db_path, owner_username),
+                snapshots=snapshots,
                 trade_records=trade_records,
                 latest_analysis=latest_analysis,
                 position_summary=position_summary,
+                portfolio_profile=portfolio_profile,
             ),
         )
 

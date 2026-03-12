@@ -22,7 +22,7 @@ from src.ai_stock_monitoring.monitor import (
 )
 from src.ai_stock_monitoring.quant import build_quant_signal
 from src.ai_stock_monitoring.security import verify_password
-from src.ai_stock_monitoring.trade_advisor import build_market_action_summary, build_position_summary, build_recommended_price_plan
+from src.ai_stock_monitoring.trade_advisor import build_market_action_summary, build_portfolio_profile, build_position_summary, build_recommended_price_plan
 
 
 class MonitorTests(unittest.TestCase):
@@ -122,6 +122,51 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(plan["buy_price_plan"])
         self.assertTrue(plan["watch_price_plan"])
 
+
+    def test_build_portfolio_profile_summarizes_holdings(self) -> None:
+        profile = build_portfolio_profile(
+            [
+                {"symbol": "600519", "side": "buy", "price": 1000.0, "quantity": 100},
+                {"symbol": "600519", "side": "buy", "price": 1100.0, "quantity": 100},
+                {"symbol": "000001", "side": "buy", "price": 10.0, "quantity": 1000},
+                {"symbol": "000001", "side": "sell", "price": 12.0, "quantity": 400},
+            ],
+            [
+                {
+                    "symbol": "600519",
+                    "display_name": "贵州茅台",
+                    "latest_price": 1180.0,
+                    "ma_250": 1120.0,
+                    "boll_mid": 1160.0,
+                    "boll_lower": 1090.0,
+                    "boll_upper": 1250.0,
+                    "dividend_yield": 3.2,
+                    "quant_probability": 82.0,
+                    "quant_model_breakdown": '[{"label": "趋势跟随", "score": 88}]',
+                    "trigger_state": "250日线、量化盈利概率",
+                },
+                {
+                    "symbol": "000001",
+                    "display_name": "平安银行",
+                    "latest_price": 11.2,
+                    "ma_250": 10.8,
+                    "boll_mid": 11.0,
+                    "boll_lower": 10.5,
+                    "boll_upper": 11.8,
+                    "dividend_yield": 5.1,
+                    "quant_probability": 68.0,
+                    "quant_model_breakdown": '[{"label": "股息质量", "score": 79}]',
+                    "trigger_state": "股息率",
+                },
+            ],
+        )
+        self.assertTrue(profile["has_positions"])
+        self.assertGreater(profile["holding_ratio"], 0)
+        self.assertIn("%", profile["recommended_holding_ratio"])
+        self.assertEqual(len(profile["active_positions"]), 2)
+        self.assertIn(profile["risk_level"], {"低", "中", "高"})
+        self.assertTrue(profile["comprehensive_advice"])
+
     def test_enhanced_quant_models_are_in_snapshot_breakdown(self) -> None:
         monitor = StockMonitor(AppSettings(provider_name="mock"))
         snapshot = monitor.build_snapshot("600519")
@@ -161,6 +206,8 @@ class MonitorTests(unittest.TestCase):
 
                 trades_page = client.get("/trades?symbol=600519")
                 self.assertEqual(trades_page.status_code, 200)
+                self.assertIn("当前账户持仓画像", trades_page.text)
+                self.assertIn("模型建议仓位", trades_page.text)
                 self.assertIn("最新分析", trades_page.text)
                 self.assertIn("首次建仓", trades_page.text)
                 self.assertIn("推荐买入价", trades_page.text)
