@@ -254,6 +254,22 @@ def _neutral_snapshot_from_position(symbol: str, position_summary: Mapping[str, 
     return payload
 
 
+def _extract_dcf_proxy_metrics(snapshot: Mapping[str, Any]) -> dict[str, float | None]:
+    try:
+        breakdown = json.loads(str(snapshot.get("quant_model_breakdown") or "[]"))
+    except json.JSONDecodeError:
+        breakdown = []
+    for item in breakdown:
+        if str(item.get("key") or "") == "dcf_proxy":
+            intrinsic_value = item.get("intrinsic_value")
+            valuation_gap_pct = item.get("valuation_gap_pct")
+            return {
+                "dcf_intrinsic_value": round(float(intrinsic_value), 2) if intrinsic_value is not None else None,
+                "dcf_valuation_gap_pct": round(float(valuation_gap_pct), 2) if valuation_gap_pct is not None else None,
+            }
+    return {"dcf_intrinsic_value": None, "dcf_valuation_gap_pct": None}
+
+
 def _infer_position_style(snapshot: Mapping[str, Any], action_summary: Mapping[str, Any], weight_pct: float) -> str:
     quant_probability = float(snapshot.get("quant_probability") or 0.0)
     dividend_yield = float(snapshot.get("dividend_yield") or 0.0)
@@ -313,6 +329,74 @@ def _evaluate_symbol_risk(snapshot: Mapping[str, Any], action_summary: Mapping[s
     }
 
 
+def _parse_ratio_range(ratio_range: str) -> tuple[float, float]:
+    try:
+        left, right = ratio_range.replace('%', '').split('-')
+        return float(left.strip()), float(right.strip())
+    except (TypeError, ValueError):
+        return 0.0, 0.0
+
+
+def _build_portfolio_adjustment_advice(
+    holding_items: Sequence[Mapping[str, Any]],
+    current_holding_ratio: float,
+    target_ratio_range: str,
+    overall_action: str,
+) -> dict[str, Any]:
+    low_ratio, high_ratio = _parse_ratio_range(target_ratio_range)
+    target_mid = round((low_ratio + high_ratio) / 2, 2) if high_ratio > 0 else current_holding_ratio
+
+    overall_suggestions: list[str] = []
+    priority_reduce: list[str] = []
+    priority_add: list[str] = []
+
+    if current_holding_ratio > high_ratio > 0:
+        overall_suggestions.append(
+            f"当前总仓位约 {current_holding_ratio:.2f}% ，高于建议区间 {target_ratio_range}，更适合逐步降到约 {target_mid:.2f}% 附近。"
+        )
+    elif 0 < current_holding_ratio < low_ratio:
+        overall_suggestions.append(
+            f"当前总仓位约 {current_holding_ratio:.2f}% ，低于建议区间 {target_ratio_range}，若强势信号延续，可逐步提升到约 {target_mid:.2f}% 附近。"
+        )
+    else:
+        overall_suggestions.append(
+            f"当前总仓位约 {current_holding_ratio:.2f}% ，与建议区间 {target_ratio_range} 基本匹配，可先维持节奏。"
+        )
+
+    reduce_candidates = sorted(
+        [item for item in holding_items if item.get("action") == "偏卖出" or item.get("risk_level") == "高"],
+        key=lambda item: (-float(item.get("weight_pct") or 0.0), -float(item.get("risk_score") or 0.0), str(item.get("symbol") or "")),
+    )
+    add_candidates = sorted(
+        [
+            item for item in holding_items
+            if item.get("action") == "偏买入" and item.get("risk_level") != "高"
+        ],
+        key=lambda item: (-float(item.get("quant_probability") or 0.0), float(item.get("weight_pct") or 0.0), str(item.get("symbol") or "")),
+    )
+
+    for item in reduce_candidates[:3]:
+        priority_reduce.append(
+            f"优先考虑减仓 {item['symbol']}（占比 {item['weight_pct']:.2f}%），参考减仓价 {item['suggested_reduce_price']:.2f}，原因：{item['action_reason']}"
+        )
+    for item in add_candidates[:3]:
+        priority_add.append(
+            f"若市场继续转强，可优先关注加仓 {item['symbol']}（当前占比 {item['weight_pct']:.2f}%），参考加仓价 {item['suggested_add_price']:.2f}。"
+        )
+
+    if overall_action == "偏卖出" and not priority_reduce:
+        overall_suggestions.append("当前组合虽偏防守，但暂无特别突出的单一减仓对象，可先从高权重仓位小幅收缩。")
+    if overall_action == "偏买入" and not priority_add:
+        overall_suggestions.append("当前组合偏强，但没有特别明确的低风险加仓对象，建议继续等待回踩确认。")
+
+    return {
+        "target_holding_ratio_mid": target_mid,
+        "overall_suggestions": overall_suggestions,
+        "priority_reduce": priority_reduce,
+        "priority_add": priority_add,
+    }
+
+
 def _recommended_holding_ratio_range(overall_action: str, risk_level: str, weighted_quant_probability: float) -> str:
     if overall_action == "偏卖出" or risk_level == "高":
         return "20% - 40%"
@@ -358,6 +442,7 @@ def build_portfolio_profile(
             continue
 
         snapshot = _neutral_snapshot_from_position(symbol, position_summary, snapshot_map.get(symbol))
+        snapshot.update(_extract_dcf_proxy_metrics(snapshot))
         latest_price = float(snapshot.get("latest_price") or position_summary["average_cost"] or 0.0)
         cost_basis = float(position_summary["cost_basis_total"])
         market_value = round(latest_price * position_quantity, 2)
@@ -392,6 +477,8 @@ def build_portfolio_profile(
             "holding_style": "空仓观察型",
             "risk_level": "低",
             "risk_score": 0,
+            "overall_action": "观望",
+            "target_holding_ratio_mid": 10.0,
             "weighted_quant_probability": 0.0,
             "weighted_dividend_yield": 0.0,
             "total_market_value": 0.0,
@@ -401,6 +488,9 @@ def build_portfolio_profile(
             "total_realized_pnl": round(total_realized_pnl, 2),
             "active_positions": [],
             "comprehensive_advice": "当前没有持仓，建议先等待更明确的买入信号，再逐步建立试探仓位。",
+            "overall_adjustment_suggestions": ["当前空仓，建议先从小仓位试探，不必急于满仓。"],
+            "priority_reduce_positions": [],
+            "priority_add_positions": [],
             "risk_reasons": ["当前账户没有在途仓位，整体回撤压力较低。"],
             "analysis_note": "持仓比例按已记录交易资金估算。",
         }
@@ -416,6 +506,8 @@ def build_portfolio_profile(
         item["action_color"] = action_summary["action_color"]
         item["action_reason"] = action_summary["action_reason"]
         item["position_style"] = _infer_position_style(snapshot, action_summary, weight_pct)
+        item["dcf_intrinsic_value"] = snapshot.get("dcf_intrinsic_value")
+        item["dcf_valuation_gap_pct"] = snapshot.get("dcf_valuation_gap_pct")
         item["add_price_range"] = price_plan["recommended_buy_price_range"]
         item["reduce_price_range"] = price_plan["recommended_sell_price_range"]
         item["watch_price_range"] = price_plan["watch_price_range"]
@@ -514,6 +606,13 @@ def build_portfolio_profile(
             "等待强弱分化更明确后再调整。"
         )
 
+    adjustment_advice = _build_portfolio_adjustment_advice(
+        holding_items,
+        holding_ratio,
+        recommended_holding_ratio,
+        overall_action,
+    )
+
     return {
         "has_positions": True,
         "holding_ratio": holding_ratio,
@@ -531,6 +630,10 @@ def build_portfolio_profile(
         "total_realized_pnl": round(total_realized_pnl, 2),
         "active_positions": holding_items,
         "comprehensive_advice": comprehensive_advice,
+        "target_holding_ratio_mid": adjustment_advice["target_holding_ratio_mid"],
+        "overall_adjustment_suggestions": adjustment_advice["overall_suggestions"],
+        "priority_reduce_positions": adjustment_advice["priority_reduce"],
+        "priority_add_positions": adjustment_advice["priority_add"],
         "risk_reasons": portfolio_risk_reasons or ["组合结构暂时平衡，没有明显超额风险信号。"],
         "analysis_note": "持仓比例按已记录交易资金估算：当前持仓市值 /（当前持仓市值 + 历史卖出回笼资金）。",
     }

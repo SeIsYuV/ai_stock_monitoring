@@ -70,6 +70,8 @@ def build_trade_analysis_email_body(payload: dict[str, Any]) -> str:
     """Render the latest trade replay result into a readable email body."""
 
     analysis = payload["analysis"]
+    market_snapshot = payload.get("market_snapshot", {})
+    portfolio_profile = payload.get("portfolio_profile", {})
     lines = [
         f"股票：{payload['symbol']}",
         f"分析来源：{payload['provider']} / {payload['model_name']}",
@@ -80,6 +82,8 @@ def build_trade_analysis_email_body(payload: dict[str, Any]) -> str:
         f"推荐买入价：{analysis.get('recommended_buy_price_range', '暂无明确价位')}",
         f"推荐卖出价：{analysis.get('recommended_sell_price_range', '暂无明确价位')}",
         f"观望关注价：{analysis.get('watch_price_range', '暂无明确价位')}",
+        f"DCF代理内在价值：{market_snapshot.get('dcf_intrinsic_value', '暂无')}",
+        f"DCF估值偏差：{market_snapshot.get('dcf_valuation_gap_pct', '暂无')}%" if market_snapshot.get('dcf_valuation_gap_pct') is not None else "DCF估值偏差：暂无",
         "",
         "判断依据：",
     ]
@@ -90,6 +94,15 @@ def build_trade_analysis_email_body(payload: dict[str, Any]) -> str:
     lines.extend(f"- {item}" for item in analysis["next_sell_points"])
     lines.extend(["", "观望关注位："])
     lines.extend(f"- {item}" for item in analysis.get("watch_points", []))
+    if portfolio_profile:
+        lines.extend(["", "组合层面建议："])
+        lines.append(f"- 当前持仓比例：{portfolio_profile.get('holding_ratio', 0)}%")
+        lines.append(f"- 模型建议仓位：{portfolio_profile.get('recommended_holding_ratio', '-')}")
+        lines.append(f"- 目标仓位中枢：{portfolio_profile.get('target_holding_ratio_mid', '-')}")
+        lines.append(f"- 组合建议：{portfolio_profile.get('comprehensive_advice', '-')}")
+        lines.extend(f"- {item}" for item in portfolio_profile.get("overall_adjustment_suggestions", []))
+        lines.extend(f"- {item}" for item in portfolio_profile.get("priority_reduce_positions", []))
+        lines.extend(f"- {item}" for item in portfolio_profile.get("priority_add_positions", []))
     lines.extend(["", "风控建议："])
     lines.extend(f"- {item}" for item in analysis["risk_controls"])
     lines.extend(["", analysis["disclaimer"]])

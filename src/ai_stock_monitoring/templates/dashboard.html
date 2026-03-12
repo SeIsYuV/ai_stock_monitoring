@@ -63,6 +63,18 @@
         </div>
     </div>
     <p><strong>组合建议：</strong>{{ portfolio_profile['comprehensive_advice'] }}</p>
+    <h3>目标仓位调整建议</h3>
+    <ul>
+        {% for item in portfolio_profile['overall_adjustment_suggestions'] %}
+        <li>{{ item }}</li>
+        {% endfor %}
+        {% for item in portfolio_profile['priority_reduce_positions'] %}
+        <li>{{ item }}</li>
+        {% endfor %}
+        {% for item in portfolio_profile['priority_add_positions'] %}
+        <li>{{ item }}</li>
+        {% endfor %}
+    </ul>
     <div class="table-scroll">
         <table class="wide-table compact-table">
             <thead>
@@ -72,6 +84,7 @@
                 <th>加仓价</th>
                 <th>减仓价</th>
                 <th>止损价</th>
+                <th>DCF内在价值/偏差</th>
                 <th>风险</th>
                 <th>综合建议</th>
             </tr>
@@ -87,6 +100,14 @@
                 <td>{{ '%.2f'|format(item['suggested_add_price']) if item['suggested_add_price'] else '-' }}</td>
                 <td>{{ '%.2f'|format(item['suggested_reduce_price']) if item['suggested_reduce_price'] else '-' }}</td>
                 <td>{{ '%.2f'|format(item['suggested_stop_loss_price']) if item['suggested_stop_loss_price'] else '-' }}</td>
+                <td>
+                    {% if item['dcf_intrinsic_value'] %}
+                    {{ '%.2f'|format(item['dcf_intrinsic_value']) }}
+                    <div class="muted">{{ '%.2f%%'|format(item['dcf_valuation_gap_pct']) if item['dcf_valuation_gap_pct'] is not none else '-' }}</div>
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
                 <td>{{ item['risk_level'] }}</td>
                 <td>
                     <div class="action-{{ item['action_color'] }}">{{ item['action'] }}</div>
@@ -331,6 +352,7 @@
                 <th>BOLL上/中/下轨</th>
                 <th>股息率</th>
                 <th>量化盈利概率</th>
+                <th>DCF内在价值/偏差</th>
                 <th>触发状态</th>
                 <th>综合建议</th>
                 <th>更新时间</th>
@@ -362,6 +384,14 @@
                 <td>
                     {% if item['quant_probability'] is not none %}
                     {{ '%.2f%%'|format(item['quant_probability']) }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td>
+                    {% if item['dcf_intrinsic_value'] %}
+                    {{ '%.2f'|format(item['dcf_intrinsic_value']) }}
+                    <div class="muted">{{ '%.2f%%'|format(item['dcf_valuation_gap_pct']) if item['dcf_valuation_gap_pct'] is not none else '-' }}</div>
                     {% else %}
                     -
                     {% endif %}
@@ -402,7 +432,7 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="11">当前账号还没有监控股票。</td>
+                <td colspan="13">当前账号还没有监控股票。</td>
             </tr>
             {% endfor %}
             </tbody>

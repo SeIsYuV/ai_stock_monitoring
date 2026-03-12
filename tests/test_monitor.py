@@ -71,6 +71,7 @@ class MonitorTests(unittest.TestCase):
                 self.assertIn("监控状态", dashboard_response.text)
                 self.assertIn("当前账号：admin", dashboard_response.text)
                 self.assertIn("账户仓位总览", dashboard_response.text)
+                self.assertIn("DCF内在价值/偏差", dashboard_response.text)
                 self.assertIn("综合建议", dashboard_response.text)
                 self.assertTrue("买入｜" in dashboard_response.text or "卖出｜" in dashboard_response.text)
                 self.assertIn("dashboard-current-time", dashboard_response.text)
@@ -171,6 +172,7 @@ class MonitorTests(unittest.TestCase):
         self.assertGreater(profile["active_positions"][0]["suggested_add_price"], 0)
         self.assertGreater(profile["active_positions"][0]["suggested_reduce_price"], 0)
         self.assertGreater(profile["active_positions"][0]["suggested_stop_loss_price"], 0)
+        self.assertTrue(profile["overall_adjustment_suggestions"])
         self.assertIn(profile["risk_level"], {"低", "中", "高"})
         self.assertTrue(profile["comprehensive_advice"])
 
@@ -181,6 +183,25 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("支撑强度", labels)
         self.assertIn("盈亏比", labels)
         self.assertIn("DCF估值", labels)
+
+    def test_stock_detail_page_renders_dcf_metrics(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                client.post(
+                    "/stocks",
+                    data={"symbols_text": "600519"},
+                    follow_redirects=False,
+                )
+                app.state.monitor.refresh_symbol_snapshot("admin", "600519")
+                response = client.get("/stocks/600519")
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("DCF 代理内在价值", response.text)
 
     def test_trades_analysis_route_renders(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:

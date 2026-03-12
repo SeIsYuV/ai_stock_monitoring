@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
-from typing import Iterable, Mapping
+from typing import Any, Iterable, Mapping
 
 from .providers.base import PriceBar
 
@@ -59,6 +59,8 @@ class QuantModelResult:
     label: str
     score: float
     reason: str
+    intrinsic_value: float | None = None
+    valuation_gap_pct: float | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,29 @@ def normalize_selected_models(selected_models: Iterable[str] | None) -> tuple[st
 
 def available_quant_models() -> list[dict[str, str]]:
     return [{"key": key, "label": label} for key, label in MODEL_LABELS.items()]
+
+
+def extract_dcf_metrics(quant_model_breakdown: str | None) -> dict[str, float | None]:
+    try:
+        breakdown = json.loads(str(quant_model_breakdown or "[]"))
+    except json.JSONDecodeError:
+        breakdown = []
+    for item in breakdown:
+        if str(item.get("key") or "") == "dcf_proxy":
+            intrinsic_value = item.get("intrinsic_value")
+            valuation_gap_pct = item.get("valuation_gap_pct")
+            return {
+                "dcf_intrinsic_value": round(float(intrinsic_value), 2) if intrinsic_value is not None else None,
+                "dcf_valuation_gap_pct": round(float(valuation_gap_pct), 2) if valuation_gap_pct is not None else None,
+                "dcf_label": str(item.get("label") or MODEL_LABELS["dcf_proxy"]),
+                "dcf_reason": str(item.get("reason") or ""),
+            }
+    return {
+        "dcf_intrinsic_value": None,
+        "dcf_valuation_gap_pct": None,
+        "dcf_label": MODEL_LABELS["dcf_proxy"],
+        "dcf_reason": "",
+    }
 
 
 def normalize_strategy_params(raw_params: Mapping[str, object] | None) -> dict[str, float | bool]:
@@ -158,6 +183,8 @@ def build_quant_signal(
                 "label": item.label,
                 "score": item.score,
                 "reason": item.reason,
+                "intrinsic_value": item.intrinsic_value,
+                "valuation_gap_pct": item.valuation_gap_pct,
             }
             for item in models
         ],
@@ -531,6 +558,8 @@ def _dcf_proxy_model(
         label=MODEL_LABELS["dcf_proxy"],
         score=_clamp_score(score),
         reason="；".join(reasons),
+        intrinsic_value=round(intrinsic_value, 2),
+        valuation_gap_pct=round(valuation_gap * 100, 2),
     )
 
 

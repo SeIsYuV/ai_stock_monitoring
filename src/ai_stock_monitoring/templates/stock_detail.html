@@ -6,6 +6,7 @@
     {% if snapshot %}
     <p>{{ snapshot['display_name'] }} | 最新价 {{ '%.2f'|format(snapshot['latest_price']) if snapshot['latest_price'] is not none else '-' }}</p>
     <p>量化综合盈利概率：{{ '%.2f%%'|format(snapshot['quant_probability']) if snapshot['quant_probability'] is not none else '-' }}</p>
+    <p>DCF 代理内在价值：{{ '%.2f'|format(snapshot['dcf_intrinsic_value']) if snapshot['dcf_intrinsic_value'] is not none else '-' }}{% if snapshot['dcf_valuation_gap_pct'] is not none %} ｜ 估值偏差 {{ '%.2f%%'|format(snapshot['dcf_valuation_gap_pct']) }}{% endif %}</p>
     <p>BOLL 上 / 中 / 下轨：{{ '%.2f'|format(snapshot['boll_upper']) if snapshot['boll_upper'] is not none else '-' }} / {{ '%.2f'|format(snapshot['boll_mid']) if snapshot['boll_mid'] is not none else '-' }} / {{ '%.2f'|format(snapshot['boll_lower']) if snapshot['boll_lower'] is not none else '-' }}</p>
     <p>{{ snapshot['trigger_detail'] }}</p>
     {% endif %}

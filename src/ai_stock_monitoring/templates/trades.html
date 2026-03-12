@@ -85,6 +85,18 @@
     </div>
     <p><strong>综合建议：</strong>{{ portfolio_profile['comprehensive_advice'] }}</p>
     <p><strong>组合说明：</strong>{{ portfolio_profile['analysis_note'] }}</p>
+    <h3>目标仓位调整建议</h3>
+    <ul>
+        {% for item in portfolio_profile['overall_adjustment_suggestions'] %}
+        <li>{{ item }}</li>
+        {% endfor %}
+        {% for item in portfolio_profile['priority_reduce_positions'] %}
+        <li>{{ item }}</li>
+        {% endfor %}
+        {% for item in portfolio_profile['priority_add_positions'] %}
+        <li>{{ item }}</li>
+        {% endfor %}
+    </ul>
     <h3>风险拆解</h3>
     <ul>
         {% for item in portfolio_profile['risk_reasons'] %}
@@ -105,6 +117,7 @@
                 <th>建议加仓价</th>
                 <th>建议减仓价</th>
                 <th>建议止损价</th>
+                <th>DCF内在价值/偏差</th>
                 <th>持仓风格</th>
                 <th>风险</th>
                 <th>综合建议</th>
@@ -137,6 +150,14 @@
                 <td>
                     {{ '%.2f'|format(item['suggested_stop_loss_price']) if item['suggested_stop_loss_price'] else '-' }}
                     <div class="muted">跌破后重新评估</div>
+                </td>
+                <td>
+                    {% if item['dcf_intrinsic_value'] %}
+                    {{ '%.2f'|format(item['dcf_intrinsic_value']) }}
+                    <div class="muted">{{ '%.2f%%'|format(item['dcf_valuation_gap_pct']) if item['dcf_valuation_gap_pct'] is not none else '-' }}</div>
+                    {% else %}
+                    -
+                    {% endif %}
                 </td>
                 <td>{{ item['position_style'] }}</td>
                 <td>

@@ -63,7 +63,7 @@ from .database import (
 )
 from .mailer import build_login_unlock_email_body, build_test_email_body, build_trade_analysis_email_body, send_message
 from .monitor import StockMonitor, parse_stock_symbols
-from .quant import available_quant_models, normalize_selected_models, normalize_strategy_params
+from .quant import available_quant_models, extract_dcf_metrics, normalize_selected_models, normalize_strategy_params
 from .security import hash_password, password_hash_needs_rehash, verify_password
 from .trade_advisor import TradeAdvisor, build_market_action_summary, build_portfolio_profile, build_position_summary
 
@@ -126,6 +126,7 @@ def _decorate_snapshot_for_display(snapshot: object) -> dict[str, object]:
     payload = dict(snapshot)
     action_summary = build_market_action_summary(payload)
     payload.update(action_summary)
+    payload.update(extract_dcf_metrics(payload.get("quant_model_breakdown")))
     return payload
 
 
@@ -423,10 +424,15 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 ]
             )
 
+        portfolio_profile = build_portfolio_profile(
+            list_trade_records(resolved_settings.db_path, owner_username, None),
+            get_snapshots(resolved_settings.db_path, owner_username),
+        )
         latest_analysis_row = get_latest_trade_analysis(resolved_settings.db_path, owner_username, selected_symbol)
         if latest_analysis_row is not None:
             analysis_sheet = workbook.create_sheet(title="最新分析")
             analysis = json.loads(latest_analysis_row["analysis_json"])
+            market_snapshot = _decorate_snapshot_for_display(json.loads(latest_analysis_row["market_snapshot"]))
             analysis_sheet.append(["股票代码", latest_analysis_row["symbol"]])
             analysis_sheet.append(["分析来源", latest_analysis_row["analysis_provider"]])
             analysis_sheet.append(["模型", latest_analysis_row["model_name"]])
@@ -438,7 +444,39 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             analysis_sheet.append(["推荐买入价", analysis.get("recommended_buy_price_range", "")])
             analysis_sheet.append(["推荐卖出价", analysis.get("recommended_sell_price_range", "")])
             analysis_sheet.append(["观望关注价", analysis.get("watch_price_range", "")])
+            analysis_sheet.append(["DCF代理内在价值", market_snapshot.get("dcf_intrinsic_value") or ""])
+            analysis_sheet.append(["DCF估值偏差(%)", market_snapshot.get("dcf_valuation_gap_pct") or ""])
+            analysis_sheet.append(["组合建议仓位", portfolio_profile.get("recommended_holding_ratio", "")])
+            analysis_sheet.append(["组合调仓目标", portfolio_profile.get("target_holding_ratio_mid", "")])
+            analysis_sheet.append(["组合综合建议", portfolio_profile.get("comprehensive_advice", "")])
+            analysis_sheet.append(["优先减仓对象", " | ".join(portfolio_profile.get("priority_reduce_positions", []))])
+            analysis_sheet.append(["优先加仓对象", " | ".join(portfolio_profile.get("priority_add_positions", []))])
             analysis_sheet.append(["置信度", analysis["confidence"]])
+
+        portfolio_sheet = workbook.create_sheet(title="组合总览")
+        portfolio_sheet.append(["当前持仓比例", portfolio_profile.get("holding_ratio", 0)])
+        portfolio_sheet.append(["模型建议仓位", portfolio_profile.get("recommended_holding_ratio", "")])
+        portfolio_sheet.append(["目标仓位中枢", portfolio_profile.get("target_holding_ratio_mid", "")])
+        portfolio_sheet.append(["持仓风格", portfolio_profile.get("holding_style", "")])
+        portfolio_sheet.append(["风险程度", portfolio_profile.get("risk_level", "")])
+        portfolio_sheet.append(["组合建议", portfolio_profile.get("comprehensive_advice", "")])
+        portfolio_sheet.append(["调仓建议", " | ".join(portfolio_profile.get("overall_adjustment_suggestions", []))])
+        portfolio_sheet.append(["优先减仓", " | ".join(portfolio_profile.get("priority_reduce_positions", []))])
+        portfolio_sheet.append(["优先加仓", " | ".join(portfolio_profile.get("priority_add_positions", []))])
+        portfolio_sheet.append([])
+        portfolio_sheet.append(["股票", "仓位占比", "建议加仓价", "建议减仓价", "建议止损价", "DCF代理内在价值", "DCF估值偏差(%)", "风险", "建议"])
+        for item in portfolio_profile.get("active_positions", []):
+            portfolio_sheet.append([
+                item["symbol"],
+                item.get("weight_pct", 0.0),
+                item.get("suggested_add_price") or "",
+                item.get("suggested_reduce_price") or "",
+                item.get("suggested_stop_loss_price") or "",
+                item.get("dcf_intrinsic_value") or "",
+                item.get("dcf_valuation_gap_pct") or "",
+                item.get("risk_level", ""),
+                item.get("action", ""),
+            ])
 
         buffer = BytesIO()
         workbook.save(buffer)
@@ -580,6 +618,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         snapshot = get_snapshot(resolved_settings.db_path, owner_username, symbol)
         if snapshot is None:
             return _redirect_with_message("/dashboard", "当前账号下未找到该股票")
+        snapshot = _decorate_snapshot_for_display(snapshot)
         monitor: StockMonitor = app.state.monitor
         chart_payload = await asyncio.to_thread(monitor.build_chart_payload, symbol)
         return templates.TemplateResponse(
@@ -1032,6 +1071,7 @@ def _get_authenticated_user(request: Request, settings: AppSettings) -> object |
 
 
 def _serialize_latest_analysis_row(latest_analysis_row: object) -> dict[str, object]:
+    market_snapshot = _decorate_snapshot_for_display(json.loads(latest_analysis_row["market_snapshot"]))
     return {
         "symbol": latest_analysis_row["symbol"],
         "provider": latest_analysis_row["analysis_provider"],
@@ -1039,6 +1079,7 @@ def _serialize_latest_analysis_row(latest_analysis_row: object) -> dict[str, obj
         "status": latest_analysis_row["status"],
         "error_message": latest_analysis_row["error_message"],
         "created_at": latest_analysis_row["created_at"],
+        "market_snapshot": market_snapshot,
         "analysis": json.loads(latest_analysis_row["analysis_json"]),
     }
 
@@ -1049,6 +1090,10 @@ def _send_trade_analysis_email_if_configured(db_path: str, owner_username: str, 
         return None
 
     latest_analysis = _serialize_latest_analysis_row(latest_analysis_row)
+    latest_analysis["portfolio_profile"] = build_portfolio_profile(
+        list_trade_records(db_path, owner_username, None),
+        get_snapshots(db_path, owner_username),
+    )
     email_settings = get_email_settings(db_path, owner_username)
     result = send_message(
         email_settings,
