@@ -241,6 +241,7 @@
                 <th>股息率</th>
                 <th>量化盈利概率</th>
                 <th>触发状态</th>
+                <th>综合建议</th>
                 <th>更新时间</th>
                 <th>操作</th>
             </tr>
@@ -274,11 +275,26 @@
                     -
                     {% endif %}
                 </td>
-                <td class="{{ 'danger-text' if item['trigger_state'] and item['trigger_state'] != '正常' else '' }}">
-                    {{ item['trigger_state'] if item['trigger_state'] else '待刷新' }}
+                <td>
+                    {% if item['buy_signals'] or item['sell_signals'] %}
+                    <div class="signal-list">
+                        {% for signal in item['buy_signals'] %}
+                        <span class="signal-badge signal-buy">买入｜{{ signal }}</span>
+                        {% endfor %}
+                        {% for signal in item['sell_signals'] %}
+                        <span class="signal-badge signal-sell">卖出｜{{ signal }}</span>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <span class="signal-badge signal-neutral">暂无信号</span>
+                    {% endif %}
                     {% if item['trigger_detail'] %}
                     <div style="font-size: 12px; color: #64748b; margin-top: 4px; min-width: 260px;">{{ item['trigger_detail'] }}</div>
                     {% endif %}
+                </td>
+                <td>
+                    <div class="action-{{ item['action_color'] }}">{{ item['action'] }}</div>
+                    <div style="font-size: 12px; color: #64748b; margin-top: 4px; min-width: 220px;">{{ item['action_reason'] }}</div>
                 </td>
                 <td class="nowrap">
                     {% if item['updated_at'] %}

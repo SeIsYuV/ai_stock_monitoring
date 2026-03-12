@@ -19,6 +19,98 @@ import requests
 from .config import AppSettings
 
 
+BUY_SIGNAL_WEIGHTS: dict[str, int] = {
+    "250日线": 2,
+    "BOLL中轨": 1,
+    "BOLL下轨": 2,
+    "股息率": 2,
+    "30周/60周均线": 3,
+    "量化盈利概率": 4,
+}
+
+SELL_SIGNAL_WEIGHTS: dict[str, int] = {
+    "BOLL上轨卖出": 2,
+    "低股息率卖出": 2,
+    "量化走弱卖出": 4,
+}
+
+BUY_SIGNAL_SET = set(BUY_SIGNAL_WEIGHTS)
+SELL_SIGNAL_SET = set(SELL_SIGNAL_WEIGHTS)
+
+
+def split_trigger_signals(trigger_state: str | None) -> list[str]:
+    if not trigger_state or trigger_state == "正常":
+        return []
+    return [item for item in str(trigger_state).split("、") if item]
+
+
+def build_market_action_summary(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Blend buy/sell rules and quant strength into one final action suggestion."""
+
+    trigger_signals = split_trigger_signals(snapshot.get("trigger_state"))
+    buy_signals = [item for item in trigger_signals if item in BUY_SIGNAL_SET]
+    sell_signals = [item for item in trigger_signals if item in SELL_SIGNAL_SET]
+
+    buy_score = sum(BUY_SIGNAL_WEIGHTS.get(item, 0) for item in buy_signals)
+    sell_score = sum(SELL_SIGNAL_WEIGHTS.get(item, 0) for item in sell_signals)
+
+    quant_probability = float(snapshot.get("quant_probability") or 0.0)
+    if quant_probability >= 85:
+        buy_score += 3
+    elif quant_probability >= 70:
+        buy_score += 1
+    elif quant_probability <= 35:
+        sell_score += 4
+    elif quant_probability <= 45:
+        sell_score += 2
+
+    dominant_model_label = "量化模型"
+    dominant_model_score = 0.0
+    try:
+        model_breakdown = json.loads(str(snapshot.get("quant_model_breakdown") or "[]"))
+    except json.JSONDecodeError:
+        model_breakdown = []
+    if model_breakdown:
+        top_model = max(model_breakdown, key=lambda item: float(item.get("score") or 0.0))
+        dominant_model_label = str(top_model.get("label") or dominant_model_label)
+        dominant_model_score = float(top_model.get("score") or 0.0)
+
+    score_gap = buy_score - sell_score
+    if score_gap >= 3:
+        action = "偏买入"
+        action_color = "buy"
+        action_reason = (
+            f"买入信号更强（买入 {buy_score} 分 / 卖出 {sell_score} 分），"
+            f"当前最强量化模型为 {dominant_model_label}（{dominant_model_score:.2f} 分）。"
+        )
+    elif score_gap <= -3:
+        action = "偏卖出"
+        action_color = "sell"
+        action_reason = (
+            f"卖出信号更强（卖出 {sell_score} 分 / 买入 {buy_score} 分），"
+            f"当前最强量化模型为 {dominant_model_label}（{dominant_model_score:.2f} 分）。"
+        )
+    else:
+        action = "观望"
+        action_color = "neutral"
+        action_reason = (
+            f"买卖信号接近（买入 {buy_score} 分 / 卖出 {sell_score} 分），"
+            f"当前最强量化模型为 {dominant_model_label}（{dominant_model_score:.2f} 分），建议等待进一步确认。"
+        )
+
+    return {
+        "buy_signals": buy_signals,
+        "sell_signals": sell_signals,
+        "action": action,
+        "action_color": action_color,
+        "action_reason": action_reason,
+        "dominant_model_label": dominant_model_label,
+        "dominant_model_score": round(dominant_model_score, 2),
+        "buy_score": buy_score,
+        "sell_score": sell_score,
+    }
+
+
 @dataclass(frozen=True)
 class TradeAnalysisResult:
     """Normalized analysis result regardless of provider success or fallback."""
@@ -283,6 +375,7 @@ class TradeAdvisor:
         ma_250 = float(market_snapshot["ma_250"])
         boll_mid = float(market_snapshot["boll_mid"])
         position_quantity = int(position_summary["position_quantity"])
+        signal_summary = build_market_action_summary(market_snapshot)
 
         reasoning: list[str] = []
         next_buy_points: list[str] = []
@@ -296,6 +389,8 @@ class TradeAdvisor:
             reasoning.append(
                 f"当前持仓 {position_quantity} 股，持仓均价约 {average_cost:.2f}。"
             )
+
+        reasoning.append(signal_summary["action_reason"])
 
         if ma_250 and latest_price < ma_250:
             reasoning.append("现价低于 250 日线，趋势偏弱，追高并不划算。")
@@ -321,6 +416,13 @@ class TradeAdvisor:
         else:
             judgment = "偏保守"
 
+        if signal_summary["action"] == "偏卖出":
+            judgment = "偏卖出"
+        elif signal_summary["action"] == "偏买入" and judgment != "不合理":
+            judgment = "偏买入"
+        elif signal_summary["action"] == "观望" and judgment not in {"不合理", "偏激进"}:
+            judgment = "观望"
+
         if dividend_yield >= 4.5:
             reasoning.append("股息率较高，若基本面稳定，可作为观察加分项。")
 
@@ -329,17 +431,24 @@ class TradeAdvisor:
             judgment = "不合理"
             risk_controls.append("卖出数量应小于等于当前实际持仓。")
 
+        if signal_summary["action"] == "偏卖出":
+            position_advice = "当前卖出信号占优，优先考虑分批止盈或减仓，避免把已有利润重新回吐。"
+        elif signal_summary["action"] == "偏买入":
+            position_advice = "当前买入信号占优，可考虑等回踩或分批低吸，但不建议一次性重仓追入。"
+        else:
+            position_advice = "当前买卖信号并存，建议先观望，等待趋势或量化评分进一步拉开差距。"
+
         if not risk_controls:
             risk_controls.append("控制单笔风险，优先使用预设止损和分批执行。")
 
         return {
-            "summary": "已根据持仓成本、趋势位置和股息率做规则化复盘。",
+            "summary": f"已结合买入/卖出规则完成综合判断，当前建议：{signal_summary['action']}。",
             "judgment": judgment,
             "reasoning": reasoning,
             "next_buy_points": next_buy_points,
             "next_sell_points": next_sell_points,
             "risk_controls": risk_controls,
-            "position_advice": "优先考虑小步试错、分批交易，避免把一次判断当成确定性结论。",
+            "position_advice": position_advice,
             "confidence": 58,
             "disclaimer": "该分析仅供复盘参考，不构成投资建议。",
         }

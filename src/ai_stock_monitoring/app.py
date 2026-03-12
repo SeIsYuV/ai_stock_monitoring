@@ -65,7 +65,7 @@ from .mailer import build_login_unlock_email_body, build_test_email_body, build_
 from .monitor import StockMonitor, parse_stock_symbols
 from .quant import available_quant_models, normalize_selected_models, normalize_strategy_params
 from .security import hash_password, password_hash_needs_rehash, verify_password
-from .trade_advisor import TradeAdvisor, build_position_summary
+from .trade_advisor import TradeAdvisor, build_market_action_summary, build_position_summary
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -120,6 +120,13 @@ def _format_stock_display_name(name: str | None, chunk_size: int = 4) -> str:
 templates.env.globals["format_snapshot_timestamp"] = _format_snapshot_timestamp
 templates.env.globals["format_full_timestamp"] = _format_full_timestamp
 templates.env.globals["format_stock_display_name"] = _format_stock_display_name
+
+
+def _decorate_snapshot_for_display(snapshot: object) -> dict[str, object]:
+    payload = dict(snapshot)
+    action_summary = build_market_action_summary(payload)
+    payload.update(action_summary)
+    return payload
 
 
 def create_app(settings: AppSettings | None = None) -> FastAPI:
@@ -452,7 +459,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         monitor: StockMonitor = app.state.monitor
         owner_username = current_user["username"]
         status = monitor.get_market_status()
-        snapshots = await _load_dashboard_snapshots(app, owner_username)
+        raw_snapshots = await _load_dashboard_snapshots(app, owner_username)
+        snapshots = [_decorate_snapshot_for_display(item) for item in raw_snapshots]
         email_settings = get_email_settings(resolved_settings.db_path, owner_username)
         quant_settings = get_quant_settings(resolved_settings.db_path, owner_username)
         quant_strategy_params = normalize_strategy_params(json.loads(quant_settings["strategy_params"] or "{}"))

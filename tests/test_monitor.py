@@ -21,7 +21,7 @@ from src.ai_stock_monitoring.monitor import (
 )
 from src.ai_stock_monitoring.quant import build_quant_signal
 from src.ai_stock_monitoring.security import verify_password
-from src.ai_stock_monitoring.trade_advisor import build_position_summary
+from src.ai_stock_monitoring.trade_advisor import build_market_action_summary, build_position_summary
 
 
 class MonitorTests(unittest.TestCase):
@@ -69,6 +69,8 @@ class MonitorTests(unittest.TestCase):
                 self.assertEqual(dashboard_response.status_code, 200)
                 self.assertIn("监控状态", dashboard_response.text)
                 self.assertIn("当前账号：admin", dashboard_response.text)
+                self.assertIn("综合建议", dashboard_response.text)
+                self.assertTrue("买入｜" in dashboard_response.text or "卖出｜" in dashboard_response.text)
                 self.assertIn("dashboard-current-time", dashboard_response.text)
                 self.assertIn("dashboard-refresh-countdown", dashboard_response.text)
 
@@ -625,6 +627,18 @@ class MonitorTests(unittest.TestCase):
                 self.assertIn("20 日最大波动率阈值", dashboard_response.text)
                 self.assertIn("BOLL 中轨最大偏离", dashboard_response.text)
                 self.assertIn("table-scroll", dashboard_response.text)
+
+    def test_market_action_summary_prefers_sell_when_sell_signals_dominate(self) -> None:
+        summary = build_market_action_summary(
+            {
+                "trigger_state": "BOLL上轨卖出、低股息率卖出、量化走弱卖出、250日线",
+                "quant_probability": 28,
+                "quant_model_breakdown": '[{"label": "趋势跟随", "score": 21}]',
+            }
+        )
+        self.assertEqual(summary["action"], "偏卖出")
+        self.assertEqual(summary["action_color"], "sell")
+        self.assertIn("卖出信号更强", summary["action_reason"])
 
     def test_snapshot_timestamp_is_converted_to_shanghai_time(self) -> None:
         self.assertEqual(_format_snapshot_timestamp("2026-03-12T10:42:00+00:00"), "18:42")
