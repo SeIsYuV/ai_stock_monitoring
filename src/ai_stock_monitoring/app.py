@@ -72,6 +72,9 @@ BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
+SESSION_IDLE_TIMEOUT_SECONDS = 30 * 60
+
+
 def _to_local_datetime(raw_value: str | None, timezone_name: str = "Asia/Shanghai") -> datetime | None:
     if not raw_value:
         return None
@@ -153,6 +156,22 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     app.state.monitor = StockMonitor(resolved_settings)
     app.state.trade_advisor = TradeAdvisor(resolved_settings)
     app.state.monitor_task = None
+
+    @app.middleware("http")
+    async def refresh_authenticated_session(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path in {"/login", "/login/unlock/request", "/login/unlock/confirm", "/healthz"}:
+            return response
+        current_user = _get_authenticated_user(request, resolved_settings)
+        if current_user is None:
+            return response
+        response.set_cookie(
+            resolved_settings.session_cookie_name,
+            _build_session_cookie_value(current_user),
+            httponly=True,
+            samesite="lax",
+        )
+        return response
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> Response:
@@ -338,8 +357,11 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         )
 
     @app.get("/logout")
-    async def logout() -> RedirectResponse:
-        response = RedirectResponse(url="/login", status_code=303)
+    async def logout(reason: str | None = None) -> RedirectResponse:
+        target_url = "/login"
+        if reason == "idle":
+            target_url = "/login?message=%E7%94%B1%E4%BA%8E30%E5%88%86%E9%92%9F%E6%97%A0%E6%93%8D%E4%BD%9C%EF%BC%8C%E5%B7%B2%E8%87%AA%E5%8A%A8%E9%80%80%E5%87%BA%E7%99%BB%E5%BD%95%E3%80%82"
+        response = RedirectResponse(url=target_url, status_code=303)
         response.delete_cookie(resolved_settings.session_cookie_name)
         return response
 
@@ -1052,14 +1074,21 @@ def _mask_email_address(email: str) -> str:
 
 
 def _build_session_cookie_value(user: object) -> str:
-    return f"{user['username']}|{str(user['password_hash'])[:24]}"
+    issued_at = int(datetime.now(UTC).timestamp())
+    return f"{user['username']}|{str(user['password_hash'])[:24]}|{issued_at}"
 
 
 def _get_authenticated_user(request: Request, settings: AppSettings) -> object | None:
     cookie_value = request.cookies.get(settings.session_cookie_name)
+    request.state.auth_failure_reason = None
     if not cookie_value or "|" not in cookie_value:
         return None
-    username, fingerprint = cookie_value.split("|", 1)
+    parts = cookie_value.split("|")
+    if len(parts) < 2:
+        return None
+    username = parts[0]
+    fingerprint = parts[1]
+    issued_at_text = parts[2] if len(parts) >= 3 else None
     if not username:
         return None
     user = get_user(settings.db_path, username)
@@ -1067,11 +1096,27 @@ def _get_authenticated_user(request: Request, settings: AppSettings) -> object |
         return None
     if not str(user["password_hash"]).startswith(fingerprint):
         return None
+    if issued_at_text is not None:
+        try:
+            issued_at = int(issued_at_text)
+        except ValueError:
+            request.state.auth_failure_reason = "invalid"
+            return None
+        now_ts = int(datetime.now(UTC).timestamp())
+        if now_ts - issued_at > SESSION_IDLE_TIMEOUT_SECONDS:
+            request.state.auth_failure_reason = "idle_timeout"
+            return None
     return user
 
 
 def _serialize_latest_analysis_row(latest_analysis_row: object) -> dict[str, object]:
     market_snapshot = _decorate_snapshot_for_display(json.loads(latest_analysis_row["market_snapshot"]))
+    analysis = json.loads(latest_analysis_row["analysis_json"])
+    analysis["comprehensive_advice_text"] = (
+        f"{analysis['position_advice']} 推荐买入价 {analysis.get('recommended_buy_price_range', '-')}；"
+        f"推荐卖出价 {analysis.get('recommended_sell_price_range', '-')}；"
+        f"观望关注价 {analysis.get('watch_price_range', '-')}。"
+    )
     return {
         "symbol": latest_analysis_row["symbol"],
         "provider": latest_analysis_row["analysis_provider"],
@@ -1080,7 +1125,7 @@ def _serialize_latest_analysis_row(latest_analysis_row: object) -> dict[str, obj
         "error_message": latest_analysis_row["error_message"],
         "created_at": latest_analysis_row["created_at"],
         "market_snapshot": market_snapshot,
-        "analysis": json.loads(latest_analysis_row["analysis_json"]),
+        "analysis": analysis,
     }
 
 
@@ -1126,6 +1171,13 @@ def _require_login(request: Request, settings: AppSettings) -> object | Redirect
     current_user = _get_authenticated_user(request, settings)
     if current_user is not None:
         return current_user
+    if getattr(request.state, "auth_failure_reason", None) == "idle_timeout":
+        response = RedirectResponse(
+            url="/login?message=%E7%94%B1%E4%BA%8E30%E5%88%86%E9%92%9F%E6%97%A0%E6%93%8D%E4%BD%9C%EF%BC%8C%E7%99%BB%E5%BD%95%E5%B7%B2%E8%BF%87%E6%9C%9F%EF%BC%8C%E8%AF%B7%E9%87%8D%E6%96%B0%E7%99%BB%E5%BD%95%E3%80%82",
+            status_code=303,
+        )
+        response.delete_cookie(settings.session_cookie_name)
+        return response
     return RedirectResponse(url="/login", status_code=303)
 
 

@@ -98,5 +98,25 @@
     {% endif %}
     {% block content %}{% endblock %}
 </main>
+{% if current_user %}
+<script>
+    (() => {
+        const idleLimitMs = 30 * 60 * 1000;
+        let timerId = null;
+        const resetTimer = () => {
+            if (timerId) {
+                window.clearTimeout(timerId);
+            }
+            timerId = window.setTimeout(() => {
+                window.location.href = '/logout?reason=idle';
+            }, idleLimitMs);
+        };
+        ['click', 'keydown', 'mousemove', 'scroll', 'touchstart'].forEach((eventName) => {
+            window.addEventListener(eventName, resetTimer, { passive: true });
+        });
+        resetTimer();
+    })();
+</script>
+{% endif %}
 </body>
 </html>

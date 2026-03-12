@@ -184,6 +184,22 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("盈亏比", labels)
         self.assertIn("DCF估值", labels)
 
+    def test_idle_session_redirects_to_login(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            settings = AppSettings(db_path=database_file.name, provider_name="mock")
+            app = create_app(settings)
+            with TestClient(app) as client:
+                user = get_user(database_file.name, "admin")
+                self.assertIsNotNone(user)
+                stale_timestamp = 1
+                client.cookies.set(
+                    settings.session_cookie_name,
+                    f"admin|{str(user['password_hash'])[:24]}|{stale_timestamp}",
+                )
+                response = client.get("/dashboard", follow_redirects=False)
+                self.assertEqual(response.status_code, 303)
+                self.assertIn("/login?message=", response.headers["location"])
+
     def test_stock_detail_page_renders_dcf_metrics(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
             app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
@@ -241,6 +257,8 @@ class MonitorTests(unittest.TestCase):
                 self.assertIn("建议止损价", trades_page.text)
                 self.assertIn("最新分析", trades_page.text)
                 self.assertIn("首次建仓", trades_page.text)
+                self.assertIn("综合建议", trades_page.text)
+                self.assertIn("DCF代理内在价值", trades_page.text)
                 self.assertIn("推荐买入价", trades_page.text)
                 self.assertIn("观望关注价", trades_page.text)
 
