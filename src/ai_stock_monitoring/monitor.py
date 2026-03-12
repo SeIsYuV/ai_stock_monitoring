@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 import json
+import math
 import re
 import threading
 from typing import Any
@@ -36,7 +37,7 @@ from .mailer import build_alert_email_body, send_message
 from .market_hours import MarketStatus, TradeCalendar, get_market_status
 from .providers import load_provider
 from .providers.base import PriceBar, Quote
-from .quant import DEFAULT_QUANT_MODELS, build_quant_signal, normalize_selected_models
+from .quant import DEFAULT_QUANT_MODELS, build_quant_signal, normalize_selected_models, normalize_strategy_params
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class SnapshotComputation:
     prev_ma_30w: float
     prev_ma_60w: float
     boll_mid: float
+    boll_lower: float
     dividend_yield: float
     quant_probability: float
     quant_model_breakdown: str
@@ -83,6 +85,18 @@ def calculate_simple_moving_average(values: list[float], window: int) -> float:
     return round(sum(values[-window:]) / window, 2)
 
 
+def calculate_bollinger_lower_band(values: list[float], window: int = 20, std_multiplier: float = 2.0) -> float:
+    """Compute a simple BOLL lower band from the latest closing prices."""
+
+    if len(values) < window:
+        return 0.0
+    sample = values[-window:]
+    middle = sum(sample) / window
+    variance = sum((item - middle) ** 2 for item in sample) / window
+    lower_band = middle - std_multiplier * math.sqrt(variance)
+    return round(lower_band, 2)
+
+
 def has_weekly_crossed(
     prev_ma_30w: float,
     prev_ma_60w: float,
@@ -110,6 +124,7 @@ def compute_snapshot_metrics(
 
     ma_250 = calculate_simple_moving_average(daily_closes, 250)
     boll_mid = calculate_simple_moving_average(daily_closes, 20)
+    boll_lower = calculate_bollinger_lower_band(daily_closes, 20)
     ma_30w = calculate_simple_moving_average(weekly_closes, 30)
     ma_60w = calculate_simple_moving_average(weekly_closes, 60)
     prev_ma_30w = calculate_simple_moving_average(weekly_closes[:-1], 30)
@@ -121,6 +136,8 @@ def compute_snapshot_metrics(
         triggered_labels.append("250日线")
     if boll_mid and quote.latest_price <= boll_mid:
         triggered_labels.append("BOLL中轨")
+    if boll_lower and quote.latest_price <= boll_lower:
+        triggered_labels.append("BOLL下轨")
     if dividend_yield >= 4.5:
         triggered_labels.append("股息率")
     if weekly_crossed:
@@ -130,7 +147,7 @@ def compute_snapshot_metrics(
     trigger_detail = (
         f"现价 {quote.latest_price:.2f} | 250日线 {ma_250:.2f} | "
         f"30周/60周 {ma_30w:.2f}/{ma_60w:.2f} | "
-        f"BOLL中轨 {boll_mid:.2f} | 股息率 {dividend_yield:.2f}% | "
+        f"BOLL中轨/下轨 {boll_mid:.2f}/{boll_lower:.2f} | 股息率 {dividend_yield:.2f}% | "
         f"量化综合盈利概率 {quant_probability:.2f}%"
     )
     return SnapshotComputation(
@@ -143,6 +160,7 @@ def compute_snapshot_metrics(
         prev_ma_30w=prev_ma_30w,
         prev_ma_60w=prev_ma_60w,
         boll_mid=boll_mid,
+        boll_lower=boll_lower,
         dividend_yield=dividend_yield,
         quant_probability=quant_probability,
         quant_model_breakdown=quant_model_breakdown,
@@ -189,6 +207,7 @@ class StockMonitor:
         close_series = closes[-self.settings.detail_chart_days :]
         ma_250_series: list[float | None] = []
         boll_mid_series: list[float | None] = []
+        boll_lower_series: list[float | None] = []
         for index in range(len(daily_bars)):
             ma_250_series.append(
                 calculate_simple_moving_average(closes[: index + 1], 250) if index >= 249 else None
@@ -196,17 +215,22 @@ class StockMonitor:
             boll_mid_series.append(
                 calculate_simple_moving_average(closes[: index + 1], 20) if index >= 19 else None
             )
+            boll_lower_series.append(
+                calculate_bollinger_lower_band(closes[: index + 1], 20) if index >= 19 else None
+            )
         return {
             "labels": labels,
             "close": close_series,
             "ma250": ma_250_series[-self.settings.detail_chart_days :],
             "bollMid": boll_mid_series[-self.settings.detail_chart_days :],
+            "bollLower": boll_lower_series[-self.settings.detail_chart_days :],
         }
 
     def build_snapshot(
         self,
         symbol: str,
         selected_models: list[str] | tuple[str, ...] | None = None,
+        strategy_params: dict[str, float | bool] | None = None,
     ) -> SnapshotComputation:
         """Build a snapshot for one symbol.
 
@@ -243,6 +267,7 @@ class StockMonitor:
             daily_bars=daily_bars,
             weekly_bars=weekly_bars,
             selected_models=normalize_selected_models(selected_models),
+            strategy_params=normalize_strategy_params(strategy_params),
         )
         return compute_snapshot_metrics(
             symbol=symbol,
@@ -255,9 +280,12 @@ class StockMonitor:
         )
 
     def refresh_symbol_snapshot(self, owner_username: str, symbol: str) -> SnapshotComputation:
-        settings = get_quant_settings(self.settings.db_path, owner_username)
-        selected_models = json.loads(settings["selected_models"] or "[]")
-        snapshot = self.build_snapshot(symbol, selected_models=selected_models)
+        quant_config = self._resolve_owner_quant_config(owner_username)
+        snapshot = self.build_snapshot(
+            symbol,
+            selected_models=quant_config["selected_models"],
+            strategy_params=quant_config["strategy_params"],
+        )
         upsert_snapshot(
             db_path=self.settings.db_path,
             owner_username=owner_username,
@@ -268,6 +296,7 @@ class StockMonitor:
             ma_30w=snapshot.ma_30w,
             ma_60w=snapshot.ma_60w,
             boll_mid=snapshot.boll_mid,
+            boll_lower=snapshot.boll_lower,
             dividend_yield=snapshot.dividend_yield,
             quant_probability=snapshot.quant_probability,
             quant_model_breakdown=snapshot.quant_model_breakdown,
@@ -297,18 +326,27 @@ class StockMonitor:
             self._lock.release()
 
     def _refresh_open_session(self, trade_date: date) -> None:
-        snapshot_cache: dict[tuple[str, tuple[str, ...]], SnapshotComputation] = {}
+        snapshot_cache: dict[tuple[str, tuple[str, ...], str], SnapshotComputation] = {}
         for stock in get_monitored_stocks(self.settings.db_path):
             owner_username = stock["owner_username"]
             symbol = stock["symbol"]
             try:
                 email_settings = get_email_settings(self.settings.db_path, owner_username)
-                quant_settings = get_quant_settings(self.settings.db_path, owner_username)
-                selected_models = tuple(json.loads(quant_settings["selected_models"] or "[]")) or DEFAULT_QUANT_MODELS
-                cache_key = (symbol, tuple(selected_models))
+                quant_settings = self._resolve_owner_quant_config(owner_username)
+                selected_models = quant_settings["selected_models"]
+                strategy_params = quant_settings["strategy_params"]
+                cache_key = (
+                    symbol,
+                    tuple(selected_models),
+                    json.dumps(strategy_params, ensure_ascii=False, sort_keys=True),
+                )
                 snapshot = snapshot_cache.get(cache_key)
                 if snapshot is None:
-                    snapshot = self.build_snapshot(symbol, selected_models=selected_models)
+                    snapshot = self.build_snapshot(
+                        symbol,
+                        selected_models=selected_models,
+                        strategy_params=strategy_params,
+                    )
                     snapshot_cache[cache_key] = snapshot
                 upsert_snapshot(
                     db_path=self.settings.db_path,
@@ -320,6 +358,7 @@ class StockMonitor:
                     ma_30w=snapshot.ma_30w,
                     ma_60w=snapshot.ma_60w,
                     boll_mid=snapshot.boll_mid,
+                    boll_lower=snapshot.boll_lower,
                     dividend_yield=snapshot.dividend_yield,
                     quant_probability=snapshot.quant_probability,
                     quant_model_breakdown=snapshot.quant_model_breakdown,
@@ -359,6 +398,22 @@ class StockMonitor:
                     email_settings=email_settings,
                     required_hits=2,
                 )
+                self._process_intraday_signal(
+                    owner_username=owner_username,
+                    symbol=symbol,
+                    display_name=snapshot.display_name,
+                    trigger_type="BOLL下轨",
+                    trade_marker=trade_date.isoformat(),
+                    condition_met=bool(snapshot.boll_lower and snapshot.latest_price <= snapshot.boll_lower),
+                    detail=snapshot.trigger_detail,
+                    current_price=snapshot.latest_price,
+                    indicator_values={
+                        "boll_lower": snapshot.boll_lower,
+                        "latest_price": snapshot.latest_price,
+                    },
+                    email_settings=email_settings,
+                    required_hits=2,
+                )
                 threshold = float(quant_settings["probability_threshold"])
                 if bool(quant_settings["enabled"]):
                     self._process_intraday_signal(
@@ -366,7 +421,7 @@ class StockMonitor:
                         symbol=symbol,
                         display_name=snapshot.display_name,
                         trigger_type="量化盈利概率",
-                        trade_marker=f"{trade_date.isoformat()}-{datetime.now(UTC).hour}",
+                        trade_marker=trade_date.isoformat(),
                         condition_met=bool(snapshot.quant_probability >= threshold),
                         detail=f"{snapshot.trigger_detail} | 量化阈值 {threshold:.2f}%",
                         current_price=snapshot.latest_price,
@@ -382,6 +437,17 @@ class StockMonitor:
                 self.last_error_message = None
             except Exception as exc:
                 self.last_error_message = f"{owner_username}/{symbol} 刷新失败：{exc}"
+
+    def _resolve_owner_quant_config(self, owner_username: str) -> dict[str, Any]:
+        """Load one user's quant configuration and normalize it for downstream use."""
+
+        settings = get_quant_settings(self.settings.db_path, owner_username)
+        return {
+            "enabled": bool(settings["enabled"]),
+            "probability_threshold": float(settings["probability_threshold"]),
+            "selected_models": tuple(json.loads(settings["selected_models"] or "[]")) or DEFAULT_QUANT_MODELS,
+            "strategy_params": normalize_strategy_params(json.loads(settings["strategy_params"] or "{}")),
+        }
 
     def _process_intraday_signal(
         self,
@@ -435,17 +501,24 @@ class StockMonitor:
 
     def _prepare_dividend_alerts(self, trade_date: date) -> None:
         marker = trade_date.isoformat()
-        snapshot_cache: dict[str, SnapshotComputation] = {}
+        snapshot_cache: dict[tuple[str, tuple[str, ...], str], SnapshotComputation] = {}
         owners = sorted({row["owner_username"] for row in get_monitored_stocks(self.settings.db_path)})
         for owner_username in owners:
+            quant_config = self._resolve_owner_quant_config(owner_username)
+            cache_suffix = json.dumps(quant_config["strategy_params"], ensure_ascii=False, sort_keys=True)
             job_state = get_job_state(self.settings.db_path, owner_username, "dividend_prep")
             if job_state and job_state["last_run_marker"] == marker:
                 continue
             for stock in get_monitored_stocks(self.settings.db_path, owner_username):
-                snapshot = snapshot_cache.get(stock["symbol"])
+                cache_key = (stock["symbol"], tuple(quant_config["selected_models"]), cache_suffix)
+                snapshot = snapshot_cache.get(cache_key)
                 if snapshot is None:
-                    snapshot = self.build_snapshot(stock["symbol"])
-                    snapshot_cache[stock["symbol"]] = snapshot
+                    snapshot = self.build_snapshot(
+                        stock["symbol"],
+                        selected_models=quant_config["selected_models"],
+                        strategy_params=quant_config["strategy_params"],
+                    )
+                    snapshot_cache[cache_key] = snapshot
                 state = get_signal_state(self.settings.db_path, owner_username, stock["symbol"], "股息率")
                 if snapshot.dividend_yield >= 4.5 and (state is None or state["last_event_marker"] != marker):
                     payload = self._build_pending_payload(
@@ -480,17 +553,24 @@ class StockMonitor:
         next_trade_day = self.trade_calendar.next_trading_day(trade_date)
         if next_trade_day is None:
             return
-        snapshot_cache: dict[str, SnapshotComputation] = {}
+        snapshot_cache: dict[tuple[str, tuple[str, ...], str], SnapshotComputation] = {}
         owners = sorted({row["owner_username"] for row in get_monitored_stocks(self.settings.db_path)})
         for owner_username in owners:
+            quant_config = self._resolve_owner_quant_config(owner_username)
+            cache_suffix = json.dumps(quant_config["strategy_params"], ensure_ascii=False, sort_keys=True)
             job_state = get_job_state(self.settings.db_path, owner_username, "weekly_cross_prep")
             if job_state and job_state["last_run_marker"] == marker:
                 continue
             for stock in get_monitored_stocks(self.settings.db_path, owner_username):
-                snapshot = snapshot_cache.get(stock["symbol"])
+                cache_key = (stock["symbol"], tuple(quant_config["selected_models"]), cache_suffix)
+                snapshot = snapshot_cache.get(cache_key)
                 if snapshot is None:
-                    snapshot = self.build_snapshot(stock["symbol"])
-                    snapshot_cache[stock["symbol"]] = snapshot
+                    snapshot = self.build_snapshot(
+                        stock["symbol"],
+                        selected_models=quant_config["selected_models"],
+                        strategy_params=quant_config["strategy_params"],
+                    )
+                    snapshot_cache[cache_key] = snapshot
                 state = get_signal_state(self.settings.db_path, owner_username, stock["symbol"], "30周/60周均线")
                 if snapshot.weekly_crossed and (state is None or state["last_event_marker"] != marker):
                     payload = self._build_pending_payload(

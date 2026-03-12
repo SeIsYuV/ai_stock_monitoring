@@ -7,10 +7,11 @@ from fastapi.testclient import TestClient
 
 from src.ai_stock_monitoring.app import create_app
 from src.ai_stock_monitoring.config import AppSettings
-from src.ai_stock_monitoring.database import get_login_unlock_code, get_user, initialize_database
+from src.ai_stock_monitoring.database import get_alert_history, get_login_unlock_code, get_user, initialize_database, list_recent_login_events
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
 from src.ai_stock_monitoring.monitor import (
     StockMonitor,
+    calculate_bollinger_lower_band,
     calculate_simple_moving_average,
     has_weekly_crossed,
     parse_stock_symbols,
@@ -154,6 +155,37 @@ class MonitorTests(unittest.TestCase):
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
 
+    def test_email_settings_test_route_sends_mail(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                client.post(
+                    "/settings/email",
+                    data={
+                        "recipient_email": "to@example.com",
+                        "smtp_server": "smtp.qq.com",
+                        "sender_email": "from@example.com",
+                        "sender_password": "secret",
+                    },
+                    follow_redirects=False,
+                )
+                with patch("src.ai_stock_monitoring.app.send_message") as mocked_send:
+                    mocked_send.return_value.success = True
+                    mocked_send.return_value.error = None
+                    mocked_send.return_value.status = "发送成功"
+                    send_response = client.post(
+                        "/settings/email/test",
+                        follow_redirects=False,
+                    )
+                    self.assertEqual(send_response.status_code, 303)
+                    mocked_send.assert_called_once()
+                    self.assertIn("[邮箱测试]", mocked_send.call_args.kwargs["subject"])
+
     def test_trade_analysis_email_route_sends_mail(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
             app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
@@ -201,6 +233,27 @@ class MonitorTests(unittest.TestCase):
                     )
                     self.assertEqual(send_response.status_code, 303)
                     mocked_send.assert_called_once()
+
+    def test_boll_lower_band_is_available_in_snapshot_and_dashboard(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                dashboard_response = client.get("/dashboard")
+                self.assertEqual(dashboard_response.status_code, 200)
+                self.assertIn("BOLL中轨/下轨", dashboard_response.text)
+
+                chart_payload = app.state.monitor.build_chart_payload("600519")
+                self.assertIn("bollLower", chart_payload)
+                self.assertEqual(len(chart_payload["bollLower"]), len(chart_payload["labels"]))
+
+                bars_daily = app.state.monitor.provider.get_daily_bars("600519")
+                lower_band = calculate_bollinger_lower_band([item.close_price for item in bars_daily], 20)
+                self.assertGreater(lower_band, 0)
 
     def test_add_stock_refreshes_snapshot_immediately(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
@@ -467,6 +520,78 @@ class MonitorTests(unittest.TestCase):
                     follow_redirects=False,
                 )
                 self.assertEqual(login_response.status_code, 303)
+
+    def test_recent_login_history_is_recorded_and_rendered(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            with TestClient(app) as client:
+                login_response = client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    headers={"user-agent": "pytest-agent/1.0", "x-forwarded-for": "1.2.3.4"},
+                    follow_redirects=False,
+                )
+                self.assertEqual(login_response.status_code, 303)
+                events = list_recent_login_events(database_file.name, "admin")
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["client_host"], "1.2.3.4")
+                self.assertEqual(events[0]["user_agent"], "pytest-agent/1.0")
+
+                dashboard_response = client.get("/dashboard")
+                self.assertEqual(dashboard_response.status_code, 200)
+                self.assertIn("最近登录记录", dashboard_response.text)
+                self.assertIn("1.2.3.4", dashboard_response.text)
+                self.assertIn("20 日最大波动率阈值", dashboard_response.text)
+                self.assertIn("BOLL 中轨最大偏离", dashboard_response.text)
+                self.assertIn("table-scroll", dashboard_response.text)
+
+    def test_quant_alert_is_deduplicated_within_same_day(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            settings = AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=())
+            app = create_app(settings)
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                add_stock_response = client.post(
+                    "/stocks",
+                    data={"symbols_text": "600519"},
+                    follow_redirects=False,
+                )
+                self.assertEqual(add_stock_response.status_code, 303)
+                quant_response = client.post(
+                    "/settings/quant",
+                    data={
+                        "enabled": "1",
+                        "probability_threshold": "50",
+                        "selected_models": [
+                            "trend_following",
+                            "mean_reversion",
+                            "dividend_quality",
+                            "weekly_resonance",
+                            "volatility_filter",
+                        ],
+                        "require_price_above_ma250": "1",
+                        "require_weekly_bullish": "1",
+                        "min_dividend_yield": "3",
+                        "max_20d_volatility_pct": "4",
+                        "min_20d_momentum_pct": "1",
+                        "max_boll_deviation_pct": "4",
+                    },
+                    follow_redirects=False,
+                )
+                self.assertEqual(quant_response.status_code, 303)
+
+                app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T10:00:00+08:00"))
+                app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T14:00:00+08:00"))
+
+                alerts = [
+                    row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
+                    if row["trigger_type"] == "量化盈利概率"
+                ]
+                self.assertEqual(len(alerts), 1)
 
 
 

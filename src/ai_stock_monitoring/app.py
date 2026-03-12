@@ -46,20 +46,22 @@ from .database import (
     get_unread_alerts,
     get_user,
     initialize_database,
+    list_recent_login_events,
     list_trade_records,
     list_trade_records_for_symbol,
     list_users,
     mark_alert_as_read,
     record_failed_login,
+    record_login_event,
     remove_monitored_stock,
     save_email_settings,
     save_login_unlock_code,
     save_quant_settings,
     update_user_password,
 )
-from .mailer import build_login_unlock_email_body, build_trade_analysis_email_body, send_message
+from .mailer import build_login_unlock_email_body, build_test_email_body, build_trade_analysis_email_body, send_message
 from .monitor import StockMonitor, parse_stock_symbols
-from .quant import available_quant_models, normalize_selected_models
+from .quant import available_quant_models, normalize_selected_models, normalize_strategy_params
 from .security import hash_password, password_hash_needs_rehash, verify_password
 from .trade_advisor import TradeAdvisor, build_position_summary
 
@@ -159,6 +161,12 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 status_code=500,
             )
 
+        record_login_event(
+            resolved_settings.db_path,
+            user["username"],
+            _request_client_host(request),
+            _request_user_agent(request),
+        )
         response = RedirectResponse(url="/dashboard", status_code=303)
         response.set_cookie(
             resolved_settings.session_cookie_name,
@@ -389,8 +397,10 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         snapshots = await _load_dashboard_snapshots(app, owner_username)
         email_settings = get_email_settings(resolved_settings.db_path, owner_username)
         quant_settings = get_quant_settings(resolved_settings.db_path, owner_username)
+        quant_strategy_params = normalize_strategy_params(json.loads(quant_settings["strategy_params"] or "{}"))
         unread_alerts = get_unread_alerts(resolved_settings.db_path, owner_username) if status.is_market_open else []
         selected_models = normalize_selected_models(json.loads(quant_settings["selected_models"] or "[]"))
+        recent_login_events = list_recent_login_events(resolved_settings.db_path, owner_username)
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -404,7 +414,9 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 quant_settings=quant_settings,
                 quant_model_options=available_quant_models(),
                 quant_selected_models=selected_models,
+                quant_strategy_params=quant_strategy_params,
                 is_admin=bool(current_user["is_admin"]),
+                recent_login_events=recent_login_events,
                 monitor=monitor,
                 price_column_label="最新价" if status.is_market_open else "最近收盘/最新可用价",
                 snapshots=snapshots,
@@ -541,6 +553,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 "ma_30w": snapshot.ma_30w,
                 "ma_60w": snapshot.ma_60w,
                 "boll_mid": snapshot.boll_mid,
+                "boll_lower": snapshot.boll_lower,
                 "dividend_yield": snapshot.dividend_yield,
                 "quant_probability": snapshot.quant_probability,
                 "trigger_state": snapshot.trigger_state,
@@ -634,6 +647,12 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         enabled: str | None = Form(None),
         probability_threshold: float = Form(90),
         selected_models: list[str] | None = Form(None),
+        require_price_above_ma250: str | None = Form(None),
+        require_weekly_bullish: str | None = Form(None),
+        min_dividend_yield: float = Form(3.0),
+        max_20d_volatility_pct: float = Form(4.0),
+        min_20d_momentum_pct: float = Form(1.0),
+        max_boll_deviation_pct: float = Form(4.0),
     ) -> RedirectResponse:
         current_user = _require_login(request, resolved_settings)
         if isinstance(current_user, RedirectResponse):
@@ -641,12 +660,23 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
         normalized_models = list(normalize_selected_models(selected_models or []))
         threshold = max(50.0, min(99.0, float(probability_threshold)))
+        strategy_params = normalize_strategy_params(
+            {
+                "require_price_above_ma250": require_price_above_ma250 is not None,
+                "require_weekly_bullish": require_weekly_bullish is not None,
+                "min_dividend_yield": min_dividend_yield,
+                "max_20d_volatility": max_20d_volatility_pct / 100,
+                "min_20d_momentum_pct": min_20d_momentum_pct / 100,
+                "max_boll_deviation_pct": max_boll_deviation_pct / 100,
+            }
+        )
         save_quant_settings(
             db_path=resolved_settings.db_path,
             owner_username=current_user["username"],
             enabled=enabled is not None,
             probability_threshold=threshold,
             selected_models=normalized_models,
+            strategy_params=strategy_params,
         )
         snapshots = get_snapshots(resolved_settings.db_path, current_user["username"])
         for item in snapshots:
@@ -732,10 +762,13 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         email_settings = get_email_settings(resolved_settings.db_path, current_user["username"])
         result = send_message(
             email_settings,
-            subject="AI Stock Monitoring 测试邮件",
-            body="这是一封测试邮件，表示当前账号的 SMTP 配置可用。",
+            subject=f"[邮箱测试] {current_user['username']} SMTP 配置检查",
+            body=build_test_email_body(current_user["username"], str(email_settings["recipient_email"] or "")),
         )
-        notice = "测试邮件发送成功" if result.success else f"测试邮件发送失败：{result.error}"
+        if result.success:
+            notice = f"测试邮件发送成功，请检查收件箱：{email_settings['recipient_email']}"
+        else:
+            notice = f"测试邮件发送失败：{result.error}"
         return _redirect_with_message("/dashboard", notice)
 
     @app.post("/alerts/{alert_id}/read")
@@ -838,6 +871,15 @@ def _resolve_unlock_email_target(email_settings: object) -> str:
     return str(email_settings["recipient_email"] or "").strip()
 
 
+def _request_client_host(request: Request) -> str:
+    forwarded_for = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return forwarded_for or (request.client.host if request.client else "unknown")
+
+
+def _request_user_agent(request: Request) -> str:
+    return (request.headers.get("user-agent") or "unknown")[:120]
+
+
 def _mask_email_address(email: str) -> str:
     if "@" not in email:
         return email
@@ -909,9 +951,8 @@ def _redirect_with_message(path: str, message: str) -> RedirectResponse:
 
 
 def _login_subject(request: Request, username: str = "") -> str:
-    forwarded_for = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    client_host = forwarded_for or (request.client.host if request.client else "unknown")
-    user_agent = (request.headers.get("user-agent") or "unknown")[:120]
+    client_host = _request_client_host(request)
+    user_agent = _request_user_agent(request)
     return f"{username.lower()}|{client_host}|{user_agent}"
 
 

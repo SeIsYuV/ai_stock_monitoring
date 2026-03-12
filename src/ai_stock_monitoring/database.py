@@ -16,7 +16,7 @@ import sqlite3
 from typing import Any, Iterator
 
 from .config import AppSettings
-from .quant import DEFAULT_QUANT_MODELS
+from .quant import DEFAULT_QUANT_MODELS, DEFAULT_QUANT_STRATEGY_PARAMS, normalize_strategy_params
 from .security import hash_password
 
 
@@ -59,6 +59,7 @@ def initialize_database(settings: AppSettings) -> None:
                 enabled INTEGER NOT NULL DEFAULT 0,
                 probability_threshold REAL NOT NULL DEFAULT 90,
                 selected_models TEXT NOT NULL,
+                strategy_params TEXT NOT NULL DEFAULT '{}',
                 updated_at TEXT NOT NULL
             );
 
@@ -79,6 +80,7 @@ def initialize_database(settings: AppSettings) -> None:
                 ma_30w REAL NOT NULL,
                 ma_60w REAL NOT NULL,
                 boll_mid REAL NOT NULL,
+                boll_lower REAL NOT NULL DEFAULT 0,
                 dividend_yield REAL NOT NULL,
                 quant_probability REAL NOT NULL DEFAULT 0,
                 quant_model_breakdown TEXT NOT NULL DEFAULT '',
@@ -165,6 +167,14 @@ def initialize_database(settings: AppSettings) -> None:
                 consumed_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS user_login_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                login_at TEXT NOT NULL,
+                client_host TEXT NOT NULL,
+                user_agent TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_user_alert_history_owner_time
                 ON user_alert_history (owner_username, triggered_at DESC);
             CREATE INDEX IF NOT EXISTS idx_user_trade_record_owner_symbol_time
@@ -173,8 +183,12 @@ def initialize_database(settings: AppSettings) -> None:
                 ON user_trade_analysis (owner_username, symbol, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_user_signal_state_owner_delivery
                 ON user_signal_state (owner_username, pending_delivery, deliver_on);
+            CREATE INDEX IF NOT EXISTS idx_user_login_history_username_time
+                ON user_login_history (username, login_at DESC);
             """
         )
+
+        _ensure_schema_migrations(connection)
 
         now = datetime.now(UTC).isoformat()
         connection.execute(
@@ -350,6 +364,27 @@ def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
+def _column_exists(connection: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    columns = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(row["name"] == column_name for row in columns)
+
+
+def _ensure_schema_migrations(connection: sqlite3.Connection) -> None:
+    if _table_exists(connection, "user_quant_settings") and not _column_exists(connection, "user_quant_settings", "strategy_params"):
+        connection.execute(
+            "ALTER TABLE user_quant_settings ADD COLUMN strategy_params TEXT NOT NULL DEFAULT '{}'"
+        )
+    if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "boll_lower"):
+        connection.execute(
+            "ALTER TABLE user_stock_snapshot ADD COLUMN boll_lower REAL NOT NULL DEFAULT 0"
+        )
+    if _table_exists(connection, "user_quant_settings"):
+        connection.execute(
+            "UPDATE user_quant_settings SET strategy_params = ? WHERE strategy_params IS NULL OR strategy_params = ''",
+            (json.dumps(DEFAULT_QUANT_STRATEGY_PARAMS, ensure_ascii=False),),
+        )
+
+
 def _ensure_user_config_rows(connection: sqlite3.Connection, username: str, now: str) -> None:
     connection.execute(
         """
@@ -361,11 +396,16 @@ def _ensure_user_config_rows(connection: sqlite3.Connection, username: str, now:
     )
     connection.execute(
         """
-        INSERT INTO user_quant_settings (owner_username, enabled, probability_threshold, selected_models, updated_at)
-        VALUES (?, 0, 90, ?, ?)
+        INSERT INTO user_quant_settings (owner_username, enabled, probability_threshold, selected_models, strategy_params, updated_at)
+        VALUES (?, 0, 90, ?, ?, ?)
         ON CONFLICT(owner_username) DO NOTHING
         """,
-        (username, json.dumps(list(DEFAULT_QUANT_MODELS), ensure_ascii=False), now),
+        (
+            username,
+            json.dumps(list(DEFAULT_QUANT_MODELS), ensure_ascii=False),
+            json.dumps(DEFAULT_QUANT_STRATEGY_PARAMS, ensure_ascii=False),
+            now,
+        ),
     )
 
 
@@ -517,7 +557,7 @@ def save_email_settings(
 def get_quant_settings(db_path: str, owner_username: str) -> sqlite3.Row:
     with get_connection(db_path) as connection:
         row = connection.execute(
-            "SELECT owner_username, enabled, probability_threshold, selected_models, updated_at FROM user_quant_settings WHERE owner_username = ?",
+            "SELECT owner_username, enabled, probability_threshold, selected_models, strategy_params, updated_at FROM user_quant_settings WHERE owner_username = ?",
             (owner_username,),
         ).fetchone()
     if row is None:
@@ -531,19 +571,22 @@ def save_quant_settings(
     enabled: bool,
     probability_threshold: float,
     selected_models: list[str],
+    strategy_params: dict[str, float | bool] | None = None,
 ) -> None:
     now = datetime.now(UTC).isoformat()
+    normalized_params = normalize_strategy_params(strategy_params)
     with get_connection(db_path) as connection:
         connection.execute(
             """
             UPDATE user_quant_settings
-            SET enabled = ?, probability_threshold = ?, selected_models = ?, updated_at = ?
+            SET enabled = ?, probability_threshold = ?, selected_models = ?, strategy_params = ?, updated_at = ?
             WHERE owner_username = ?
             """,
             (
                 1 if enabled else 0,
                 probability_threshold,
                 json.dumps(selected_models, ensure_ascii=False),
+                json.dumps(normalized_params, ensure_ascii=False),
                 now,
                 owner_username,
             ),
@@ -644,6 +687,38 @@ def consume_login_unlock_code(db_path: str, username: str) -> None:
         )
 
 
+def record_login_event(db_path: str, username: str, client_host: str, user_agent: str) -> None:
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO user_login_history (username, login_at, client_host, user_agent)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                username,
+                datetime.now(UTC).isoformat(),
+                (client_host or "unknown")[:128],
+                (user_agent or "unknown")[:255],
+            ),
+        )
+
+
+def list_recent_login_events(db_path: str, username: str, limit: int = 5) -> list[sqlite3.Row]:
+    with get_connection(db_path) as connection:
+        return list(
+            connection.execute(
+                """
+                SELECT id, username, login_at, client_host, user_agent
+                FROM user_login_history
+                WHERE username = ?
+                ORDER BY login_at DESC
+                LIMIT ?
+                """,
+                (username, limit),
+            ).fetchall()
+        )
+
+
 def list_monitored_stocks(connection: sqlite3.Connection, owner_username: str | None = None) -> list[sqlite3.Row]:
     query = "SELECT owner_username, symbol, display_name, created_at FROM user_monitored_stock"
     parameters: list[str] = []
@@ -687,6 +762,7 @@ def get_snapshots(db_path: str, owner_username: str) -> list[sqlite3.Row]:
                        ss.ma_30w,
                        ss.ma_60w,
                        ss.boll_mid,
+                       ss.boll_lower,
                        ss.dividend_yield,
                        ss.quant_probability,
                        ss.quant_model_breakdown,
@@ -722,6 +798,7 @@ def upsert_snapshot(
     ma_30w: float,
     ma_60w: float,
     boll_mid: float,
+    boll_lower: float,
     dividend_yield: float,
     quant_probability: float,
     quant_model_breakdown: str,
@@ -734,10 +811,10 @@ def upsert_snapshot(
             """
             INSERT INTO user_stock_snapshot (
                 owner_username, symbol, display_name, latest_price, ma_250, ma_30w, ma_60w,
-                boll_mid, dividend_yield, quant_probability, quant_model_breakdown,
+                boll_mid, boll_lower, dividend_yield, quant_probability, quant_model_breakdown,
                 trigger_state, trigger_detail, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(owner_username, symbol) DO UPDATE SET
                 display_name = excluded.display_name,
                 latest_price = excluded.latest_price,
@@ -745,6 +822,7 @@ def upsert_snapshot(
                 ma_30w = excluded.ma_30w,
                 ma_60w = excluded.ma_60w,
                 boll_mid = excluded.boll_mid,
+                boll_lower = excluded.boll_lower,
                 dividend_yield = excluded.dividend_yield,
                 quant_probability = excluded.quant_probability,
                 quant_model_breakdown = excluded.quant_model_breakdown,
@@ -761,6 +839,7 @@ def upsert_snapshot(
                 ma_30w,
                 ma_60w,
                 boll_mid,
+                boll_lower,
                 dividend_yield,
                 quant_probability,
                 quant_model_breakdown,

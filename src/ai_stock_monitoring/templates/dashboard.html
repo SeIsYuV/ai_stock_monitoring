@@ -46,7 +46,7 @@
 
     <div class="card">
         <h2>邮箱配置</h2>
-        <p>当前账号独立配置发件邮箱和收件邮箱。</p>
+        <p>当前账号独立配置发件邮箱和收件邮箱，保存后可直接发送测试邮件检查是否可用。</p>
         <form method="post" action="/settings/email">
             <label>收件人邮箱</label>
             <input type="email" name="recipient_email" value="{{ email_settings['recipient_email'] }}">
@@ -64,13 +64,27 @@
             <button type="submit">保存配置</button>
         </form>
         <form method="post" action="/settings/email/test">
-            <button type="submit" class="secondary">测试发送</button>
+            <button type="submit" class="secondary">发送测试邮件</button>
         </form>
     </div>
 
     <div class="card">
         <h2>量化提醒模型</h2>
-        <p>这里展示的是“模型综合盈利概率评分”，不是实际收益承诺。建议把它当成筛选器，而不是单独决策依据。</p>
+        <p>这里展示的是“模型综合盈利概率评分”，不是实际收益承诺。更适合拿来筛股票、控风险、辅助复盘。</p>
+        <div class="metric-grid">
+            <div class="metric-card">
+                <strong>趋势过滤</strong>
+                <span class="muted">优先保留站上 250 日线、20 日动量更强的标的。</span>
+            </div>
+            <div class="metric-card">
+                <strong>波动过滤</strong>
+                <span class="muted">限制 20 日波动率，降低高波动追涨带来的回撤。</span>
+            </div>
+            <div class="metric-card">
+                <strong>均值过滤</strong>
+                <span class="muted">限制价格偏离 BOLL 中轨过远的情况，避免买在过热位置。</span>
+            </div>
+        </div>
         <form method="post" action="/settings/quant">
             <div class="checkbox-item" style="margin-bottom: 12px;">
                 <input type="checkbox" name="enabled" value="1" {% if quant_settings['enabled'] %}checked{% endif %}>
@@ -87,6 +101,23 @@
                 </label>
                 {% endfor %}
             </div>
+            <label class="checkbox-item">
+                <input type="checkbox" name="require_price_above_ma250" value="1" {% if quant_strategy_params['require_price_above_ma250'] %}checked{% endif %}>
+                <span>要求价格站上 250 日线</span>
+            </label>
+            <label class="checkbox-item">
+                <input type="checkbox" name="require_weekly_bullish" value="1" {% if quant_strategy_params['require_weekly_bullish'] %}checked{% endif %}>
+                <span>要求 30 周均线位于 60 周均线上方</span>
+            </label>
+            <label>最低股息率阈值（%）</label>
+            <input type="number" name="min_dividend_yield" min="0" max="20" step="0.1" value="{{ '%.2f'|format(quant_strategy_params['min_dividend_yield']) }}">
+            <label>20 日最小动量阈值（%）</label>
+            <input type="number" name="min_20d_momentum_pct" min="-20" max="50" step="0.1" value="{{ '%.2f'|format(quant_strategy_params['min_20d_momentum_pct'] * 100) }}">
+            <label>20 日最大波动率阈值（%）</label>
+            <input type="number" name="max_20d_volatility_pct" min="0.5" max="20" step="0.1" value="{{ '%.2f'|format(quant_strategy_params['max_20d_volatility'] * 100) }}">
+            <label>BOLL 中轨最大偏离（%）</label>
+            <input type="number" name="max_boll_deviation_pct" min="1" max="20" step="0.1" value="{{ '%.2f'|format(quant_strategy_params['max_boll_deviation_pct'] * 100) }}">
+            <p class="hint-text">如果你更强调胜率，可以适度提高动量阈值、降低波动率上限，并保留长周期多头过滤。</p>
             <button type="submit" class="secondary">保存量化设置</button>
         </form>
     </div>
@@ -104,6 +135,33 @@
             <input type="password" name="confirm_password" minlength="8" required>
             <button type="submit" class="secondary">修改当前账号密码</button>
         </form>
+        <div class="soft-panel">
+            <h3 style="margin-bottom: 8px;">最近登录记录</h3>
+            {% if recent_login_events %}
+            <div class="table-scroll">
+                <table class="compact-table wide-table">
+                    <thead>
+                    <tr>
+                        <th>登录时间</th>
+                        <th>来源 IP</th>
+                        <th>终端信息</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {% for item in recent_login_events %}
+                    <tr>
+                        <td class="nowrap">{{ item['login_at'][:19].replace('T', ' ') }}</td>
+                        <td class="nowrap">{{ item['client_host'] }}</td>
+                        <td>{{ item['user_agent'] }}</td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p class="muted">当前还没有成功登录记录。</p>
+            {% endif %}
+        </div>
     </div>
 </section>
 
@@ -128,95 +186,106 @@
 
     <div class="card">
         <h2>账号列表</h2>
-        <table>
-            <thead>
-            <tr>
-                <th>账号</th>
-                <th>角色</th>
-                <th>创建时间</th>
-            </tr>
-            </thead>
-            <tbody>
-            {% for item in users %}
-            <tr>
-                <td>{{ item['username'] }}</td>
-                <td>{{ '管理员' if item['is_admin'] else '普通用户' }}</td>
-                <td>{{ item['created_at'][:19].replace('T', ' ') }}</td>
-            </tr>
-            {% endfor %}
-            </tbody>
-        </table>
+        <div class="table-scroll">
+            <table class="compact-table wide-table">
+                <thead>
+                <tr>
+                    <th>账号</th>
+                    <th>角色</th>
+                    <th>创建时间</th>
+                </tr>
+                </thead>
+                <tbody>
+                {% for item in users %}
+                <tr>
+                    <td>{{ item['username'] }}</td>
+                    <td>{{ '管理员' if item['is_admin'] else '普通用户' }}</td>
+                    <td class="nowrap">{{ item['created_at'][:19].replace('T', ' ') }}</td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
     </div>
 </section>
 {% endif %}
 
 <section class="card" style="margin-top: 16px;">
     <h2>监控列表</h2>
-    <table>
-        <thead>
-        <tr>
-            <th>代码</th>
-            <th>名称</th>
-            <th>{{ price_column_label }}</th>
-            <th>250日线</th>
-            <th>30周/60周</th>
-            <th>BOLL中轨</th>
-            <th>股息率</th>
-            <th>量化盈利概率</th>
-            <th>触发状态</th>
-            <th>更新时间</th>
-            <th>操作</th>
-        </tr>
-        </thead>
-        <tbody>
-        {% for item in snapshots %}
-        <tr>
-            <td><a class="inline-link" href="/stocks/{{ item['symbol'] }}">{{ item['symbol'] }}</a></td>
-            <td>{{ item['display_name'] or '-' }}</td>
-            <td>{{ '%.2f'|format(item['latest_price']) if item['latest_price'] is not none else '-' }}</td>
-            <td>{{ '%.2f'|format(item['ma_250']) if item['ma_250'] is not none else '-' }}</td>
-            <td>
-                {% if item['ma_30w'] is not none %}
-                {{ '%.2f'|format(item['ma_30w']) }} / {{ '%.2f'|format(item['ma_60w']) }}
-                {% else %}
-                -
-                {% endif %}
-            </td>
-            <td>{{ '%.2f'|format(item['boll_mid']) if item['boll_mid'] is not none else '-' }}</td>
-            <td>{{ '%.2f%%'|format(item['dividend_yield']) if item['dividend_yield'] is not none else '-' }}</td>
-            <td>
-                {% if item['quant_probability'] is not none %}
-                {{ '%.2f%%'|format(item['quant_probability']) }}
-                {% else %}
-                -
-                {% endif %}
-            </td>
-            <td class="{{ 'danger-text' if item['trigger_state'] and item['trigger_state'] != '正常' else '' }}">
-                {{ item['trigger_state'] if item['trigger_state'] else '待刷新' }}
-                {% if item['trigger_detail'] %}
-                <div style="font-size: 12px; color: #64748b; margin-top: 4px;">{{ item['trigger_detail'] }}</div>
-                {% endif %}
-            </td>
-            <td>
-                {% if item['updated_at'] %}
-                {{ item['updated_at'][:19].replace('T', ' ') }}
-                {% else %}
-                -
-                {% endif %}
-            </td>
-            <td>
-                <form method="post" action="/stocks/{{ item['symbol'] }}/delete">
-                    <button type="submit" class="danger">删除</button>
-                </form>
-            </td>
-        </tr>
-        {% else %}
-        <tr>
-            <td colspan="11">当前账号还没有监控股票。</td>
-        </tr>
-        {% endfor %}
-        </tbody>
-    </table>
+    <p class="hint-text">表格支持左右滑动查看更多字段，适合在手机和平板上查看。</p>
+    <div class="table-scroll">
+        <table class="wide-table">
+            <thead>
+            <tr>
+                <th>代码</th>
+                <th>名称</th>
+                <th>{{ price_column_label }}</th>
+                <th>250日线</th>
+                <th>30周/60周</th>
+                <th>BOLL中轨/下轨</th>
+                <th>股息率</th>
+                <th>量化盈利概率</th>
+                <th>触发状态</th>
+                <th>更新时间</th>
+                <th>操作</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in snapshots %}
+            <tr>
+                <td><a class="inline-link" href="/stocks/{{ item['symbol'] }}">{{ item['symbol'] }}</a></td>
+                <td>{{ item['display_name'] or '-' }}</td>
+                <td>{{ '%.2f'|format(item['latest_price']) if item['latest_price'] is not none else '-' }}</td>
+                <td>{{ '%.2f'|format(item['ma_250']) if item['ma_250'] is not none else '-' }}</td>
+                <td>
+                    {% if item['ma_30w'] is not none %}
+                    {{ '%.2f'|format(item['ma_30w']) }} / {{ '%.2f'|format(item['ma_60w']) }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td>
+                    {% if item['boll_mid'] is not none %}
+                    {{ '%.2f'|format(item['boll_mid']) }} / {{ '%.2f'|format(item['boll_lower']) }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td>{{ '%.2f%%'|format(item['dividend_yield']) if item['dividend_yield'] is not none else '-' }}</td>
+                <td>
+                    {% if item['quant_probability'] is not none %}
+                    {{ '%.2f%%'|format(item['quant_probability']) }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td class="{{ 'danger-text' if item['trigger_state'] and item['trigger_state'] != '正常' else '' }}">
+                    {{ item['trigger_state'] if item['trigger_state'] else '待刷新' }}
+                    {% if item['trigger_detail'] %}
+                    <div style="font-size: 12px; color: #64748b; margin-top: 4px; min-width: 260px;">{{ item['trigger_detail'] }}</div>
+                    {% endif %}
+                </td>
+                <td class="nowrap">
+                    {% if item['updated_at'] %}
+                    {{ item['updated_at'][:19].replace('T', ' ') }}
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td>
+                    <form method="post" action="/stocks/{{ item['symbol'] }}/delete">
+                        <button type="submit" class="danger">删除</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="11">当前账号还没有监控股票。</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </section>
 
 <section class="card" style="margin-top: 16px;">

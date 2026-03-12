@@ -5,12 +5,13 @@ from __future__ import annotations
 设计目标：
 - 不承诺真实收益率，只给出统一的技术面/股息面综合评分
 - 使用当前项目已经具备的数据（价格、均线、股息率）完成多模型投票
-- 输出结构尽量稳定，便于页面展示和告警持久化
+- 暴露几组实用参数，让用户可以用更严格的趋势 / 波动 / 股息过滤条件提升命中质量
 """
 
 from dataclasses import dataclass
 import json
-from typing import Iterable
+import math
+from typing import Iterable, Mapping
 
 from .providers.base import PriceBar
 
@@ -20,6 +21,7 @@ DEFAULT_QUANT_MODELS: tuple[str, ...] = (
     "mean_reversion",
     "dividend_quality",
     "weekly_resonance",
+    "volatility_filter",
 )
 
 MODEL_LABELS = {
@@ -27,6 +29,16 @@ MODEL_LABELS = {
     "mean_reversion": "均值回归",
     "dividend_quality": "股息质量",
     "weekly_resonance": "周线共振",
+    "volatility_filter": "波动过滤",
+}
+
+DEFAULT_QUANT_STRATEGY_PARAMS: dict[str, float | bool] = {
+    "require_price_above_ma250": True,
+    "require_weekly_bullish": True,
+    "min_dividend_yield": 3.0,
+    "max_20d_volatility": 0.04,
+    "min_20d_momentum_pct": 0.01,
+    "max_boll_deviation_pct": 0.04,
 }
 
 
@@ -55,6 +67,24 @@ def available_quant_models() -> list[dict[str, str]]:
     return [{"key": key, "label": label} for key, label in MODEL_LABELS.items()]
 
 
+def normalize_strategy_params(raw_params: Mapping[str, object] | None) -> dict[str, float | bool]:
+    params = dict(DEFAULT_QUANT_STRATEGY_PARAMS)
+    if raw_params:
+        if "require_price_above_ma250" in raw_params:
+            params["require_price_above_ma250"] = bool(raw_params["require_price_above_ma250"])
+        if "require_weekly_bullish" in raw_params:
+            params["require_weekly_bullish"] = bool(raw_params["require_weekly_bullish"])
+        if "min_dividend_yield" in raw_params:
+            params["min_dividend_yield"] = max(0.0, float(raw_params["min_dividend_yield"]))
+        if "max_20d_volatility" in raw_params:
+            params["max_20d_volatility"] = max(0.005, float(raw_params["max_20d_volatility"]))
+        if "min_20d_momentum_pct" in raw_params:
+            params["min_20d_momentum_pct"] = float(raw_params["min_20d_momentum_pct"])
+        if "max_boll_deviation_pct" in raw_params:
+            params["max_boll_deviation_pct"] = max(0.01, float(raw_params["max_boll_deviation_pct"]))
+    return params
+
+
 def build_quant_signal(
     latest_price: float,
     ma_250: float,
@@ -65,29 +95,33 @@ def build_quant_signal(
     daily_bars: list[PriceBar],
     weekly_bars: list[PriceBar],
     selected_models: Iterable[str] | None = None,
+    strategy_params: Mapping[str, object] | None = None,
 ) -> QuantSignal:
-    """Compute an ensemble probability-like score from several simple models.
+    """Compute an ensemble probability-like score from several simple models."""
 
-    这是“盈利概率评分”，不是回测后的真实胜率承诺。
-    页面上会明确展示这是模型综合评分。
-    """
-
+    params = normalize_strategy_params(strategy_params)
     closes = [float(item.close_price) for item in daily_bars]
     weekly_closes = [float(item.close_price) for item in weekly_bars]
+    daily_returns = _daily_returns(closes)
+    volatility_20 = _annualized_volatility(daily_returns[-20:]) if len(daily_returns) >= 20 else 0.0
+    momentum_20_pct = _price_change_ratio(closes[-20], closes[-1]) if len(closes) >= 20 else 0.0
+
     models: list[QuantModelResult] = []
 
     for model_key in normalize_selected_models(selected_models):
         if model_key == "trend_following":
-            models.append(_trend_following_model(latest_price, ma_250, closes))
+            models.append(_trend_following_model(latest_price, ma_250, closes, params))
         elif model_key == "mean_reversion":
-            models.append(_mean_reversion_model(latest_price, ma_250, boll_mid))
+            models.append(_mean_reversion_model(latest_price, ma_250, boll_mid, params))
         elif model_key == "dividend_quality":
-            models.append(_dividend_quality_model(latest_price, ma_250, dividend_yield))
+            models.append(_dividend_quality_model(latest_price, ma_250, dividend_yield, params))
         elif model_key == "weekly_resonance":
-            models.append(_weekly_resonance_model(ma_30w, ma_60w, weekly_closes))
+            models.append(_weekly_resonance_model(ma_30w, ma_60w, weekly_closes, params))
+        elif model_key == "volatility_filter":
+            models.append(_volatility_filter_model(volatility_20, momentum_20_pct, params))
 
     probability = round(sum(item.score for item in models) / max(len(models), 1), 2)
-    summary = _build_summary(probability, models)
+    summary = _build_summary(probability, models, params)
     breakdown = json.dumps(
         [
             {
@@ -108,31 +142,39 @@ def build_quant_signal(
     )
 
 
-def _trend_following_model(latest_price: float, ma_250: float, closes: list[float]) -> QuantModelResult:
+def _trend_following_model(
+    latest_price: float,
+    ma_250: float,
+    closes: list[float],
+    params: Mapping[str, float | bool],
+) -> QuantModelResult:
     score = 45.0
     reasons: list[str] = []
+    require_above_ma250 = bool(params["require_price_above_ma250"])
+    min_20d_momentum_pct = float(params["min_20d_momentum_pct"])
+
     if ma_250 > 0 and latest_price >= ma_250:
         score += 22
         reasons.append("价格站上 250 日线")
     elif ma_250 > 0:
-        score -= 18
+        score -= 24 if require_above_ma250 else 14
         reasons.append("价格仍在 250 日线下方")
 
     if len(closes) >= 20:
-        momentum_20 = closes[-1] - closes[-20]
-        if momentum_20 > 0:
+        momentum_20_pct = _price_change_ratio(closes[-20], closes[-1])
+        if momentum_20_pct >= min_20d_momentum_pct:
             score += 18
-            reasons.append("近 20 日动量为正")
+            reasons.append(f"20 日涨幅达到 {momentum_20_pct * 100:.2f}%")
         else:
-            score -= 10
-            reasons.append("近 20 日动量偏弱")
+            score -= 14
+            reasons.append(f"20 日涨幅低于阈值 {min_20d_momentum_pct * 100:.2f}%")
     if len(closes) >= 5:
-        momentum_5 = closes[-1] - closes[-5]
-        if momentum_5 > 0:
+        momentum_5_pct = _price_change_ratio(closes[-5], closes[-1])
+        if momentum_5_pct > 0:
             score += 8
             reasons.append("短线继续抬升")
         else:
-            score -= 5
+            score -= 6
             reasons.append("短线延续性一般")
     return QuantModelResult(
         key="trend_following",
@@ -142,20 +184,26 @@ def _trend_following_model(latest_price: float, ma_250: float, closes: list[floa
     )
 
 
-def _mean_reversion_model(latest_price: float, ma_250: float, boll_mid: float) -> QuantModelResult:
+def _mean_reversion_model(
+    latest_price: float,
+    ma_250: float,
+    boll_mid: float,
+    params: Mapping[str, float | bool],
+) -> QuantModelResult:
     score = 50.0
     reasons: list[str] = []
+    max_boll_deviation_pct = float(params["max_boll_deviation_pct"])
     if boll_mid > 0:
         deviation = (latest_price - boll_mid) / boll_mid
-        if -0.03 <= deviation <= 0.02:
+        if abs(deviation) <= max_boll_deviation_pct:
             score += 20
-            reasons.append("价格靠近 BOLL 中轨，回撤后再上攻的性价比较好")
-        elif deviation < -0.08:
+            reasons.append(f"价格距离 BOLL 中轨不超过 {max_boll_deviation_pct * 100:.2f}%")
+        elif deviation < -(max_boll_deviation_pct * 2):
             score -= 18
             reasons.append("价格明显跌破中轨，弱势回撤风险更高")
         else:
-            score -= 4
-            reasons.append("价格相对中轨不够理想")
+            score -= 6
+            reasons.append("价格偏离 BOLL 中轨较多")
     if ma_250 > 0 and latest_price >= ma_250:
         score += 12
         reasons.append("均值回归发生在长线支撑之上")
@@ -167,18 +215,24 @@ def _mean_reversion_model(latest_price: float, ma_250: float, boll_mid: float) -
     )
 
 
-def _dividend_quality_model(latest_price: float, ma_250: float, dividend_yield: float) -> QuantModelResult:
+def _dividend_quality_model(
+    latest_price: float,
+    ma_250: float,
+    dividend_yield: float,
+    params: Mapping[str, float | bool],
+) -> QuantModelResult:
     score = 40.0
     reasons: list[str] = []
-    if dividend_yield >= 5.0:
+    min_dividend_yield = float(params["min_dividend_yield"])
+    if dividend_yield >= max(5.0, min_dividend_yield):
         score += 28
         reasons.append("股息率较高")
-    elif dividend_yield >= 4.0:
+    elif dividend_yield >= min_dividend_yield:
         score += 18
-        reasons.append("股息率达到观察区间")
+        reasons.append(f"股息率达到自定义阈值 {min_dividend_yield:.2f}%")
     else:
-        score += 5
-        reasons.append("股息率一般")
+        score -= 8
+        reasons.append(f"股息率低于阈值 {min_dividend_yield:.2f}%")
     if ma_250 > 0 and latest_price >= ma_250:
         score += 12
         reasons.append("高股息同时保持中长期趋势")
@@ -193,15 +247,21 @@ def _dividend_quality_model(latest_price: float, ma_250: float, dividend_yield: 
     )
 
 
-def _weekly_resonance_model(ma_30w: float, ma_60w: float, weekly_closes: list[float]) -> QuantModelResult:
+def _weekly_resonance_model(
+    ma_30w: float,
+    ma_60w: float,
+    weekly_closes: list[float],
+    params: Mapping[str, float | bool],
+) -> QuantModelResult:
     score = 48.0
     reasons: list[str] = []
+    require_weekly_bullish = bool(params["require_weekly_bullish"])
     if ma_30w > 0 and ma_60w > 0:
         if ma_30w >= ma_60w:
             score += 22
             reasons.append("30 周均线位于 60 周均线之上")
         else:
-            score -= 14
+            score -= 18 if require_weekly_bullish else 10
             reasons.append("30 周均线仍弱于 60 周均线")
     if len(weekly_closes) >= 4:
         weekly_momentum = weekly_closes[-1] - weekly_closes[-4]
@@ -219,7 +279,62 @@ def _weekly_resonance_model(ma_30w: float, ma_60w: float, weekly_closes: list[fl
     )
 
 
-def _build_summary(probability: float, models: list[QuantModelResult]) -> str:
+def _volatility_filter_model(
+    volatility_20: float,
+    momentum_20_pct: float,
+    params: Mapping[str, float | bool],
+) -> QuantModelResult:
+    score = 52.0
+    reasons: list[str] = []
+    max_20d_volatility = float(params["max_20d_volatility"])
+    if volatility_20 <= max_20d_volatility:
+        score += 18
+        reasons.append(f"20 日波动率 {volatility_20 * 100:.2f}% 低于阈值")
+    else:
+        score -= 16
+        reasons.append(f"20 日波动率 {volatility_20 * 100:.2f}% 高于阈值 {max_20d_volatility * 100:.2f}%")
+    if momentum_20_pct > 0:
+        score += 8
+        reasons.append("低波动下仍保持正收益")
+    else:
+        score -= 6
+        reasons.append("低波动过滤未配合正趋势")
+    return QuantModelResult(
+        key="volatility_filter",
+        label=MODEL_LABELS["volatility_filter"],
+        score=_clamp_score(score),
+        reason="；".join(reasons) or "缺少波动率数据",
+    )
+
+
+def _daily_returns(closes: list[float]) -> list[float]:
+    returns: list[float] = []
+    for previous, current in zip(closes, closes[1:]):
+        if previous <= 0:
+            continue
+        returns.append((current - previous) / previous)
+    return returns
+
+
+def _annualized_volatility(returns: list[float]) -> float:
+    if not returns:
+        return 0.0
+    mean_value = sum(returns) / len(returns)
+    variance = sum((item - mean_value) ** 2 for item in returns) / len(returns)
+    return math.sqrt(variance) * math.sqrt(252)
+
+
+def _price_change_ratio(base_price: float, latest_price: float) -> float:
+    if base_price <= 0:
+        return 0.0
+    return (latest_price - base_price) / base_price
+
+
+def _build_summary(
+    probability: float,
+    models: list[QuantModelResult],
+    params: Mapping[str, float | bool],
+) -> str:
     top_model = max(models, key=lambda item: item.score) if models else None
     if probability >= 90:
         prefix = "综合评分极强"
@@ -231,7 +346,13 @@ def _build_summary(probability: float, models: list[QuantModelResult]) -> str:
         prefix = "综合评分一般"
     if top_model is None:
         return prefix
-    return f"{prefix}，当前最强信号来自{top_model.label}模型。"
+    return (
+        f"{prefix}，当前最强信号来自{top_model.label}模型；"
+        f"最小股息率阈值 {float(params['min_dividend_yield']):.2f}% ，"
+        f"20 日动量阈值 {float(params['min_20d_momentum_pct']) * 100:.2f}% ，"
+        f"20 日波动率上限 {float(params['max_20d_volatility']) * 100:.2f}% ，"
+        f"BOLL 偏离上限 {float(params['max_boll_deviation_pct']) * 100:.2f}%。"
+    )
 
 
 def _clamp_score(score: float) -> float:

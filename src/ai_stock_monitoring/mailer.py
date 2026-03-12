@@ -3,6 +3,7 @@ from __future__ import annotations
 """SMTP mail helpers shared by alerts and trade analysis emails."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from email.message import EmailMessage
 import smtplib
 from typing import Any
@@ -49,6 +50,19 @@ def build_alert_email_body(payload: dict[str, Any]) -> str:
         f"指标详情：{payload['detail']}\n"
         f"触发时间：{payload['triggered_at']}\n"
         "\n本系统仅为监控参考，不构成任何投资建议。"
+    )
+
+
+def build_test_email_body(username: str, recipient_email: str) -> str:
+    """Render a short SMTP connectivity test email for the current account."""
+
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return (
+        "AI Stock Monitoring 邮箱测试成功。\n\n"
+        f"当前账号：{username}\n"
+        f"收件邮箱：{recipient_email}\n"
+        f"测试时间：{generated_at}\n\n"
+        "如果你收到了这封邮件，说明当前 SMTP 配置可正常用于提醒和解封验证码发送。"
     )
 
 

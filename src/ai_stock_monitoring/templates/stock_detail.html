@@ -6,6 +6,7 @@
     {% if snapshot %}
     <p>{{ snapshot['display_name'] }} | 最新价 {{ '%.2f'|format(snapshot['latest_price']) if snapshot['latest_price'] is not none else '-' }}</p>
     <p>量化综合盈利概率：{{ '%.2f%%'|format(snapshot['quant_probability']) if snapshot['quant_probability'] is not none else '-' }}</p>
+    <p>BOLL 中轨 / 下轨：{{ '%.2f'|format(snapshot['boll_mid']) if snapshot['boll_mid'] is not none else '-' }} / {{ '%.2f'|format(snapshot['boll_lower']) if snapshot['boll_lower'] is not none else '-' }}</p>
     <p>{{ snapshot['trigger_detail'] }}</p>
     {% endif %}
 </section>
@@ -13,12 +14,12 @@
 <section class="card">
     <h2>当日日线图（最近 {{ chart_payload['labels']|length }} 个交易日）</h2>
     <canvas id="stockChart" width="1100" height="420" style="width: 100%; max-width: 1100px;"></canvas>
-    <p style="font-size: 13px; color: #64748b;">蓝线为收盘价，绿线为 250 日线，橙线为 BOLL 中轨（20 日均线）。</p>
+    <p style="font-size: 13px; color: #64748b;">蓝线为收盘价，绿线为 250 日线，橙线为 BOLL 中轨，红线为 BOLL 下轨。</p>
     <script>
         const payload = {{ chart_payload | tojson }};
         const canvas = document.getElementById('stockChart');
         const context = canvas.getContext('2d');
-        const series = [payload.close, payload.ma250, payload.bollMid].flat().filter((value) => value !== null);
+        const series = [payload.close, payload.ma250, payload.bollMid, payload.bollLower].flat().filter((value) => value !== null);
         const minValue = Math.min(...series);
         const maxValue = Math.max(...series);
         const width = canvas.width;
@@ -57,6 +58,7 @@
         drawLine(payload.close, '#2563eb');
         drawLine(payload.ma250, '#059669');
         drawLine(payload.bollMid, '#ea580c');
+        drawLine(payload.bollLower, '#dc2626');
     </script>
 </section>
 {% endblock %}
