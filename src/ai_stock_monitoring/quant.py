@@ -25,6 +25,7 @@ DEFAULT_QUANT_MODELS: tuple[str, ...] = (
     "volatility_filter",
     "support_strength",
     "risk_reward",
+    "dcf_proxy",
 )
 
 MODEL_LABELS = {
@@ -35,6 +36,7 @@ MODEL_LABELS = {
     "volatility_filter": "波动过滤",
     "support_strength": "支撑强度",
     "risk_reward": "盈亏比",
+    "dcf_proxy": "DCF估值",
 }
 
 DEFAULT_QUANT_STRATEGY_PARAMS: dict[str, float | bool] = {
@@ -46,6 +48,8 @@ DEFAULT_QUANT_STRATEGY_PARAMS: dict[str, float | bool] = {
     "max_boll_deviation_pct": 0.04,
     "support_zone_tolerance_pct": 0.03,
     "min_reward_risk_ratio": 1.6,
+    "dcf_discount_rate": 0.10,
+    "dcf_terminal_growth": 0.03,
 }
 
 
@@ -93,6 +97,12 @@ def normalize_strategy_params(raw_params: Mapping[str, object] | None) -> dict[s
             params["support_zone_tolerance_pct"] = max(0.005, float(raw_params["support_zone_tolerance_pct"]))
         if "min_reward_risk_ratio" in raw_params:
             params["min_reward_risk_ratio"] = max(0.5, float(raw_params["min_reward_risk_ratio"]))
+        if "dcf_discount_rate" in raw_params:
+            params["dcf_discount_rate"] = max(0.05, float(raw_params["dcf_discount_rate"]))
+        if "dcf_terminal_growth" in raw_params:
+            params["dcf_terminal_growth"] = max(0.0, min(0.08, float(raw_params["dcf_terminal_growth"])))
+    if float(params["dcf_terminal_growth"]) >= float(params["dcf_discount_rate"]) - 0.01:
+        params["dcf_terminal_growth"] = round(float(params["dcf_discount_rate"]) - 0.02, 4)
     return params
 
 
@@ -136,6 +146,8 @@ def build_quant_signal(
             models.append(_support_strength_model(latest_price, ma_250, boll_mid, boll_lower, params))
         elif model_key == "risk_reward":
             models.append(_risk_reward_model(latest_price, ma_250, boll_mid, boll_lower, boll_upper, params))
+        elif model_key == "dcf_proxy":
+            models.append(_dcf_proxy_model(latest_price, dividend_yield, closes, weekly_closes, params))
 
     probability = round(sum(item.score for item in models) / max(len(models), 1), 2)
     summary = _build_summary(probability, models, params)
@@ -439,6 +451,89 @@ def _risk_reward_model(
     )
 
 
+def _dcf_proxy_model(
+    latest_price: float,
+    dividend_yield: float,
+    closes: list[float],
+    weekly_closes: list[float],
+    params: Mapping[str, float | bool],
+) -> QuantModelResult:
+    """Approximate a DCF-style valuation using cashflow proxies.
+
+    当前项目的数据源暂无完整财报自由现金流，因此这里采用保守代理：
+    - 以每股股息现金流作为当前可观测现金流近似
+    - 用日线/周线动量对未来 5 年增长做小幅修正
+    - 再用折现率 + 永续增长率估算每股内在价值
+
+    这不是标准财报级 DCF，但可以把“收益型股票是否值得继续持有/加仓”
+    融入现有量化组合，作为一个偏基本面方向的辅助因子。
+    """
+
+    score = 46.0
+    reasons: list[str] = []
+    discount_rate = float(params["dcf_discount_rate"])
+    terminal_growth = float(params["dcf_terminal_growth"])
+
+    if latest_price <= 0 or dividend_yield <= 0:
+        return QuantModelResult(
+            key="dcf_proxy",
+            label=MODEL_LABELS["dcf_proxy"],
+            score=_clamp_score(35.0),
+            reason="缺少稳定现金流代理数据，DCF 估值置信度较低",
+        )
+
+    annual_cash_flow = latest_price * (dividend_yield / 100)
+    momentum_20 = _price_change_ratio(closes[-20], closes[-1]) if len(closes) >= 20 else 0.0
+    weekly_momentum = _price_change_ratio(weekly_closes[-8], weekly_closes[-1]) if len(weekly_closes) >= 8 else 0.0
+    growth_adjustment = max(-0.02, min(0.03, momentum_20 * 0.5 + weekly_momentum * 0.2))
+    projected_growth = max(-0.01, min(discount_rate - 0.02, terminal_growth + growth_adjustment))
+
+    present_value = 0.0
+    cash_flow = annual_cash_flow
+    for year in range(1, 6):
+        cash_flow *= 1 + projected_growth
+        present_value += cash_flow / ((1 + discount_rate) ** year)
+
+    terminal_cash_flow = cash_flow * (1 + terminal_growth)
+    terminal_value = terminal_cash_flow / max(discount_rate - terminal_growth, 0.01)
+    intrinsic_value = present_value + terminal_value / ((1 + discount_rate) ** 5)
+    valuation_gap = (intrinsic_value - latest_price) / latest_price
+
+    reasons.append(
+        f"DCF 代理估值约 {intrinsic_value:.2f}，相对现价偏差 {valuation_gap * 100:.2f}%"
+    )
+    reasons.append(
+        "当前数据源暂无自由现金流，DCF 暂以股息现金流作保守代理"
+    )
+
+    if valuation_gap >= 0.25:
+        score += 28
+        reasons.append("估值折价较明显")
+    elif valuation_gap >= 0.10:
+        score += 18
+        reasons.append("估值略有安全边际")
+    elif valuation_gap >= -0.05:
+        score += 6
+        reasons.append("估值基本合理")
+    else:
+        score -= 16
+        reasons.append("现价已接近或高于代理内在价值")
+
+    if dividend_yield >= 4.5:
+        score += 8
+        reasons.append("股息现金流较充足，DCF 参考意义更强")
+    elif dividend_yield < 2.5:
+        score -= 6
+        reasons.append("股息现金流偏弱，DCF 代理稳定性一般")
+
+    return QuantModelResult(
+        key="dcf_proxy",
+        label=MODEL_LABELS["dcf_proxy"],
+        score=_clamp_score(score),
+        reason="；".join(reasons),
+    )
+
+
 def _daily_returns(closes: list[float]) -> list[float]:
     returns: list[float] = []
     for previous, current in zip(closes, closes[1:]):
@@ -491,7 +586,8 @@ def _build_summary(
         f"20 日波动率上限 {float(params['max_20d_volatility']) * 100:.2f}% ，"
         f"BOLL 偏离上限 {float(params['max_boll_deviation_pct']) * 100:.2f}% ，"
         f"支撑区容忍度 {float(params['support_zone_tolerance_pct']) * 100:.2f}% ，"
-        f"最小盈亏比 {float(params['min_reward_risk_ratio']):.2f}。"
+        f"最小盈亏比 {float(params['min_reward_risk_ratio']):.2f} ，"
+        f"DCF 折现率 {float(params['dcf_discount_rate']) * 100:.2f}% / 永续增长 {float(params['dcf_terminal_growth']) * 100:.2f}%。"
     )
 
 

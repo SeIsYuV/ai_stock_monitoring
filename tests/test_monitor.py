@@ -70,6 +70,7 @@ class MonitorTests(unittest.TestCase):
                 self.assertEqual(dashboard_response.status_code, 200)
                 self.assertIn("监控状态", dashboard_response.text)
                 self.assertIn("当前账号：admin", dashboard_response.text)
+                self.assertIn("账户仓位总览", dashboard_response.text)
                 self.assertIn("综合建议", dashboard_response.text)
                 self.assertTrue("买入｜" in dashboard_response.text or "卖出｜" in dashboard_response.text)
                 self.assertIn("dashboard-current-time", dashboard_response.text)
@@ -119,6 +120,9 @@ class MonitorTests(unittest.TestCase):
         )
         self.assertIn("-", plan["recommended_buy_price_range"])
         self.assertIn("-", plan["recommended_sell_price_range"])
+        self.assertGreater(plan["suggested_add_price"], 0)
+        self.assertGreater(plan["suggested_reduce_price"], 0)
+        self.assertGreater(plan["suggested_stop_loss_price"], 0)
         self.assertTrue(plan["buy_price_plan"])
         self.assertTrue(plan["watch_price_plan"])
 
@@ -164,6 +168,9 @@ class MonitorTests(unittest.TestCase):
         self.assertGreater(profile["holding_ratio"], 0)
         self.assertIn("%", profile["recommended_holding_ratio"])
         self.assertEqual(len(profile["active_positions"]), 2)
+        self.assertGreater(profile["active_positions"][0]["suggested_add_price"], 0)
+        self.assertGreater(profile["active_positions"][0]["suggested_reduce_price"], 0)
+        self.assertGreater(profile["active_positions"][0]["suggested_stop_loss_price"], 0)
         self.assertIn(profile["risk_level"], {"低", "中", "高"})
         self.assertTrue(profile["comprehensive_advice"])
 
@@ -173,6 +180,7 @@ class MonitorTests(unittest.TestCase):
         labels = {item["label"] for item in json.loads(snapshot.quant_model_breakdown)}
         self.assertIn("支撑强度", labels)
         self.assertIn("盈亏比", labels)
+        self.assertIn("DCF估值", labels)
 
     def test_trades_analysis_route_renders(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
@@ -208,6 +216,8 @@ class MonitorTests(unittest.TestCase):
                 self.assertEqual(trades_page.status_code, 200)
                 self.assertIn("当前账户持仓画像", trades_page.text)
                 self.assertIn("模型建议仓位", trades_page.text)
+                self.assertIn("建议加仓价", trades_page.text)
+                self.assertIn("建议止损价", trades_page.text)
                 self.assertIn("最新分析", trades_page.text)
                 self.assertIn("首次建仓", trades_page.text)
                 self.assertIn("推荐买入价", trades_page.text)

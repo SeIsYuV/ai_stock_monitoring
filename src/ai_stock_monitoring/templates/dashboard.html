@@ -33,6 +33,76 @@
     {% endif %}
 </section>
 
+<section class="card" style="margin-bottom: 16px;">
+    <h2>账户仓位总览</h2>
+    {% if portfolio_profile['has_positions'] %}
+    <div class="metric-grid" style="margin-bottom: 16px;">
+        <div class="metric-card">
+            <strong>当前持仓比例</strong>
+            <span class="muted">{{ '%.2f%%'|format(portfolio_profile['holding_ratio']) }}</span>
+        </div>
+        <div class="metric-card">
+            <strong>模型建议仓位</strong>
+            <span class="muted">{{ portfolio_profile['recommended_holding_ratio'] }}</span>
+        </div>
+        <div class="metric-card">
+            <strong>持仓风格</strong>
+            <span class="muted">{{ portfolio_profile['holding_style'] }}</span>
+        </div>
+        <div class="metric-card">
+            <strong>风险程度</strong>
+            <span class="muted">{{ portfolio_profile['risk_level'] }}</span>
+        </div>
+        <div class="metric-card">
+            <strong>组合加权量化分</strong>
+            <span class="muted">{{ '%.2f%%'|format(portfolio_profile['weighted_quant_probability']) }}</span>
+        </div>
+        <div class="metric-card">
+            <strong>综合建议</strong>
+            <span class="muted">{{ portfolio_profile['overall_action'] }}</span>
+        </div>
+    </div>
+    <p><strong>组合建议：</strong>{{ portfolio_profile['comprehensive_advice'] }}</p>
+    <div class="table-scroll">
+        <table class="wide-table compact-table">
+            <thead>
+            <tr>
+                <th>股票</th>
+                <th>仓位占比</th>
+                <th>加仓价</th>
+                <th>减仓价</th>
+                <th>止损价</th>
+                <th>风险</th>
+                <th>综合建议</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in portfolio_profile['active_positions'] %}
+            <tr>
+                <td>
+                    <a class="inline-link" href="/trades?symbol={{ item['symbol'] }}">{{ item['symbol'] }}</a>
+                    <div class="muted">{{ item['display_name'] }}</div>
+                </td>
+                <td>{{ '%.2f%%'|format(item['weight_pct']) }}</td>
+                <td>{{ '%.2f'|format(item['suggested_add_price']) if item['suggested_add_price'] else '-' }}</td>
+                <td>{{ '%.2f'|format(item['suggested_reduce_price']) if item['suggested_reduce_price'] else '-' }}</td>
+                <td>{{ '%.2f'|format(item['suggested_stop_loss_price']) if item['suggested_stop_loss_price'] else '-' }}</td>
+                <td>{{ item['risk_level'] }}</td>
+                <td>
+                    <div class="action-{{ item['action_color'] }}">{{ item['action'] }}</div>
+                    <div class="muted">{{ item['action_reason'] }}</div>
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p>{{ portfolio_profile['comprehensive_advice'] }}</p>
+    <p class="muted">{{ portfolio_profile['analysis_note'] }}</p>
+    {% endif %}
+</section>
+
 <section class="grid">
     <div class="card">
         <h2>股票代码管理</h2>
@@ -84,6 +154,10 @@
                 <strong>均值过滤</strong>
                 <span class="muted">限制价格偏离 BOLL 中轨过远的情况，避免买在过热位置。</span>
             </div>
+            <div class="metric-card">
+                <strong>DCF 估值</strong>
+                <span class="muted">使用现金流折现思路；当前数据源缺少财报自由现金流时，会以股息现金流作保守代理。</span>
+            </div>
         </div>
         <form method="post" action="/settings/quant">
             <div class="checkbox-item" style="margin-bottom: 12px;">
@@ -121,7 +195,11 @@
             <input type="number" name="support_zone_tolerance_pct" min="0.5" max="15" step="0.1" value="{{ '%.2f'|format(quant_strategy_params['support_zone_tolerance_pct'] * 100) }}">
             <label>最小盈亏比</label>
             <input type="number" name="min_reward_risk_ratio" min="0.5" max="5" step="0.1" value="{{ '%.2f'|format(quant_strategy_params['min_reward_risk_ratio']) }}">
-            <p class="hint-text">当前组合借鉴了多因子量化里常见的趋势确认、均值回归、波动过滤、支撑强度和盈亏比过滤思路。若更强调胜率，可提高动量阈值、降低波动率上限、提高最小盈亏比，并保留长周期多头过滤。</p>
+            <label>DCF 折现率（%）</label>
+            <input type="number" name="dcf_discount_rate_pct" min="5" max="20" step="0.1" value="{{ '%.2f'|format(quant_strategy_params['dcf_discount_rate'] * 100) }}">
+            <label>DCF 永续增长率（%）</label>
+            <input type="number" name="dcf_terminal_growth_pct" min="0" max="8" step="0.1" value="{{ '%.2f'|format(quant_strategy_params['dcf_terminal_growth'] * 100) }}">
+            <p class="hint-text">当前组合借鉴了多因子量化里常见的趋势确认、均值回归、波动过滤、支撑强度、盈亏比过滤和 DCF 估值思路。若更强调胜率，可提高动量阈值、降低波动率上限、提高最小盈亏比，并适度上调 DCF 折现率以提升安全边际。</p>
             <button type="submit" class="secondary">保存量化设置</button>
         </form>
     </div>

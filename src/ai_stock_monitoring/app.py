@@ -469,6 +469,10 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         status = monitor.get_market_status()
         raw_snapshots = await _load_dashboard_snapshots(app, owner_username)
         snapshots = [_decorate_snapshot_for_display(item) for item in raw_snapshots]
+        portfolio_profile = build_portfolio_profile(
+            list_trade_records(resolved_settings.db_path, owner_username, None),
+            raw_snapshots,
+        )
         email_settings = get_email_settings(resolved_settings.db_path, owner_username)
         quant_settings = get_quant_settings(resolved_settings.db_path, owner_username)
         quant_strategy_params = normalize_strategy_params(json.loads(quant_settings["strategy_params"] or "{}"))
@@ -492,6 +496,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 quant_model_options=available_quant_models(),
                 quant_selected_models=selected_models,
                 quant_strategy_params=quant_strategy_params,
+                portfolio_profile=portfolio_profile,
                 is_admin=bool(current_user["is_admin"]),
                 recent_login_events=recent_login_events,
                 latest_login_event=latest_login_event,
@@ -758,6 +763,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         max_boll_deviation_pct: float = Form(4.0),
         support_zone_tolerance_pct: float = Form(3.0),
         min_reward_risk_ratio: float = Form(1.6),
+        dcf_discount_rate_pct: float = Form(10.0),
+        dcf_terminal_growth_pct: float = Form(3.0),
     ) -> RedirectResponse:
         current_user = _require_login(request, resolved_settings)
         if isinstance(current_user, RedirectResponse):
@@ -775,6 +782,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 "max_boll_deviation_pct": max_boll_deviation_pct / 100,
                 "support_zone_tolerance_pct": support_zone_tolerance_pct / 100,
                 "min_reward_risk_ratio": min_reward_risk_ratio,
+                "dcf_discount_rate": dcf_discount_rate_pct / 100,
+                "dcf_terminal_growth": dcf_terminal_growth_pct / 100,
             }
         )
         save_quant_settings(

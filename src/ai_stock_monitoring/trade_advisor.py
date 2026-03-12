@@ -178,6 +178,15 @@ def build_recommended_price_plan(
     buy_range = _format_price_range(primary_buy_levels)
     sell_range = _format_price_range(primary_sell_levels)
     watch_range = _format_price_range(_positive_price_levels(breakout_watch, defense_watch), padding_pct=0.0)
+    suggested_add_price = round(max(primary_buy_levels), 2) if primary_buy_levels else 0.0
+    suggested_reduce_price = round(min(primary_sell_levels), 2) if primary_sell_levels else 0.0
+    stop_loss_base = min(_positive_price_levels(boll_lower, ma_250, average_cost, boll_mid), default=0.0)
+    if stop_loss_base > 0:
+        suggested_stop_loss_price = round(stop_loss_base * 0.97, 2)
+    elif latest_price > 0:
+        suggested_stop_loss_price = round(latest_price * 0.92, 2)
+    else:
+        suggested_stop_loss_price = 0.0
 
     buy_price_plan: list[str] = []
     sell_price_plan: list[str] = []
@@ -216,6 +225,9 @@ def build_recommended_price_plan(
         "recommended_buy_price_range": buy_range,
         "recommended_sell_price_range": sell_range,
         "watch_price_range": watch_range,
+        "suggested_add_price": suggested_add_price,
+        "suggested_reduce_price": suggested_reduce_price,
+        "suggested_stop_loss_price": suggested_stop_loss_price,
         "buy_price_plan": buy_price_plan,
         "sell_price_plan": sell_price_plan,
         "watch_price_plan": watch_price_plan,
@@ -398,11 +410,18 @@ def build_portfolio_profile(
         snapshot = item["snapshot"]
         action_summary = build_market_action_summary(snapshot)
         risk_info = _evaluate_symbol_risk(snapshot, action_summary, weight_pct)
+        price_plan = build_recommended_price_plan(snapshot, action_summary, item["position_summary"])
         item["weight_pct"] = weight_pct
         item["action"] = action_summary["action"]
         item["action_color"] = action_summary["action_color"]
         item["action_reason"] = action_summary["action_reason"]
         item["position_style"] = _infer_position_style(snapshot, action_summary, weight_pct)
+        item["add_price_range"] = price_plan["recommended_buy_price_range"]
+        item["reduce_price_range"] = price_plan["recommended_sell_price_range"]
+        item["watch_price_range"] = price_plan["watch_price_range"]
+        item["suggested_add_price"] = price_plan["suggested_add_price"]
+        item["suggested_reduce_price"] = price_plan["suggested_reduce_price"]
+        item["suggested_stop_loss_price"] = price_plan["suggested_stop_loss_price"]
         item.update(risk_info)
 
     holding_items.sort(key=lambda entry: (-entry["weight_pct"], entry["symbol"]))

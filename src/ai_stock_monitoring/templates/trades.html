@@ -102,6 +102,9 @@
                 <th>持仓市值</th>
                 <th>浮盈亏</th>
                 <th>仓位占比</th>
+                <th>建议加仓价</th>
+                <th>建议减仓价</th>
+                <th>建议止损价</th>
                 <th>持仓风格</th>
                 <th>风险</th>
                 <th>综合建议</th>
@@ -123,6 +126,18 @@
                     <div class="muted">{{ '%.2f%%'|format(item['unrealized_pnl_pct']) }}</div>
                 </td>
                 <td>{{ '%.2f%%'|format(item['weight_pct']) }}</td>
+                <td>
+                    {{ '%.2f'|format(item['suggested_add_price']) if item['suggested_add_price'] else '-' }}
+                    <div class="muted">{{ item['add_price_range'] }}</div>
+                </td>
+                <td>
+                    {{ '%.2f'|format(item['suggested_reduce_price']) if item['suggested_reduce_price'] else '-' }}
+                    <div class="muted">{{ item['reduce_price_range'] }}</div>
+                </td>
+                <td>
+                    {{ '%.2f'|format(item['suggested_stop_loss_price']) if item['suggested_stop_loss_price'] else '-' }}
+                    <div class="muted">跌破后重新评估</div>
+                </td>
                 <td>{{ item['position_style'] }}</td>
                 <td>
                     <span class="signal-badge {% if item['risk_level'] == '高' %}signal-buy{% elif item['risk_level'] == '中' %}signal-neutral{% else %}signal-sell{% endif %}">
