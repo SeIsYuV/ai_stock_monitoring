@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+
+{% block content %}
+{% for alert in unread_alerts %}
+<div class="modal">
+    <h3>{{ alert["symbol"] }} {{ alert["display_name"] }}</h3>
+    <p><span class="pill">{{ alert["trigger_type"] }}</span></p>
+    <p>当前价格：{{ alert["current_price"] }}</p>
+    <p>触发时间：{{ alert["triggered_at"] }}</p>
+    <form method="post" action="/alerts/{{ alert['id'] }}/read">
+        <button type="submit">确认</button>
+    </form>
+</div>
+{% endfor %}
+
+<section class="card" style="margin-bottom: 16px;">
+    <h1>监控状态</h1>
+    <p class="{{ 'status-ok' if status.is_market_open else 'status-danger' }}">{{ status.label }}</p>
+    <p>当前时间：{{ status.current_time.strftime('%Y-%m-%d %H:%M:%S') }}</p>
+    <p>距离下次刷新：{{ status.next_refresh_seconds if status.next_refresh_seconds is not none else '-' }} 秒</p>
+    {% if monitor.last_error_message %}
+    <p class="danger-text">最近一次异常：{{ monitor.last_error_message }}</p>
+    {% endif %}
+</section>
+
+<section class="grid">
+    <div class="card">
+        <h2>股票代码管理</h2>
+        <form method="post" action="/stocks">
+            <label>新增股票代码</label>
+            <textarea name="symbols_text" placeholder="支持批量输入，例如：&#10;600519&#10;000001,300750" required></textarea>
+            <button type="submit">加入监控</button>
+        </form>
+        <p>支持换行、逗号、空格分隔；仅接受 6 位 A 股代码。</p>
+    </div>
+
+    <div class="card">
+        <h2>邮箱配置</h2>
+        <form method="post" action="/settings/email">
+            <label>收件人邮箱</label>
+            <input type="email" name="recipient_email" value="{{ email_settings['recipient_email'] }}">
+            <label>SMTP 服务器</label>
+            <select name="smtp_server">
+                <option value="" {% if not email_settings['smtp_server'] %}selected{% endif %}>请选择</option>
+                <option value="smtp.qq.com" {% if email_settings['smtp_server'] == 'smtp.qq.com' %}selected{% endif %}>QQ 邮箱</option>
+                <option value="smtp.163.com" {% if email_settings['smtp_server'] == 'smtp.163.com' %}selected{% endif %}>163 邮箱</option>
+                <option value="smtp.qiye.163.com" {% if email_settings['smtp_server'] == 'smtp.qiye.163.com' %}selected{% endif %}>网易企业邮</option>
+            </select>
+            <label>发件人邮箱</label>
+            <input type="email" name="sender_email" value="{{ email_settings['sender_email'] }}">
+            <label>授权码 / 密码</label>
+            <input type="password" name="sender_password" value="{{ email_settings['sender_password'] }}">
+            <button type="submit">保存配置</button>
+        </form>
+        <form method="post" action="/settings/email/test">
+            <button type="submit" class="secondary">测试发送</button>
+        </form>
+    </div>
+</section>
+
+<section class="card" style="margin-top: 16px;">
+    <h2>监控列表</h2>
+    <table>
+        <thead>
+        <tr>
+            <th>代码</th>
+            <th>名称</th>
+            <th>最新价</th>
+            <th>250日线</th>
+            <th>30周/60周</th>
+            <th>BOLL中轨</th>
+            <th>股息率</th>
+            <th>触发状态</th>
+            <th>操作</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% for item in snapshots %}
+        <tr>
+            <td><a class="inline-link" href="/stocks/{{ item['symbol'] }}">{{ item['symbol'] }}</a></td>
+            <td>{{ item['display_name'] or '-' }}</td>
+            <td>{{ '%.2f'|format(item['latest_price']) if item['latest_price'] is not none else '-' }}</td>
+            <td>{{ '%.2f'|format(item['ma_250']) if item['ma_250'] is not none else '-' }}</td>
+            <td>
+                {% if item['ma_30w'] is not none %}
+                {{ '%.2f'|format(item['ma_30w']) }} / {{ '%.2f'|format(item['ma_60w']) }}
+                {% else %}
+                -
+                {% endif %}
+            </td>
+            <td>{{ '%.2f'|format(item['boll_mid']) if item['boll_mid'] is not none else '-' }}</td>
+            <td>{{ '%.2f%%'|format(item['dividend_yield']) if item['dividend_yield'] is not none else '-' }}</td>
+            <td class="{{ 'danger-text' if item['trigger_state'] and item['trigger_state'] != '正常' else '' }}">
+                {{ item['trigger_state'] if item['trigger_state'] else '待刷新' }}
+                {% if item['trigger_detail'] %}
+                <div style="font-size: 12px; color: #64748b; margin-top: 4px;">{{ item['trigger_detail'] }}</div>
+                {% endif %}
+            </td>
+            <td>
+                <form method="post" action="/stocks/{{ item['symbol'] }}/delete">
+                    <button type="submit" class="danger">删除</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="card" style="margin-top: 16px;">
+    <h2>系统状态</h2>
+    <div class="footer-status">
+        <span>服务器：{{ system_status['server'] }}</span>
+        <span>数据接口：{{ system_status['provider'] }}</span>
+        <span>邮件服务：{{ system_status['mail'] }}</span>
+        <span>最近刷新：{{ system_status['last_refresh'] }}</span>
+        <span>当前时间：{{ status.current_time.strftime('%Y-%m-%d %H:%M:%S') }}</span>
+    </div>
+</section>
+{% endblock %}

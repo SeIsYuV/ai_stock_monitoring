@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  ai-stock-monitoring:
+    build: .
+    container_name: ai-stock-monitoring
+    ports:
+      - "8080:8080"
+    environment:
+      ASM_HOST: 0.0.0.0
+      ASM_PORT: 8080
+      ASM_DB_PATH: /app/data/stock_monitor.db
+      ASM_PROVIDER: ${ASM_PROVIDER:-akshare}
+      ASM_LLM_PROVIDER: ${ASM_LLM_PROVIDER:-openai}
+      ASM_LLM_MODEL: ${ASM_LLM_MODEL:-gpt-4.1-mini}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

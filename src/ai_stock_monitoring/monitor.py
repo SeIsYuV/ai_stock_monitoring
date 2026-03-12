@@ -1,11 +1,474 @@
-from .config import load_config
+from __future__ import annotations
+
+"""Monitoring engine for market checks, alerts and chart data."""
+
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+import json
+import re
+import threading
+from typing import Any
+
+from .config import AppSettings
+from .database import (
+    add_alert_history,
+    get_email_settings,
+    get_job_state,
+    get_monitored_stocks,
+    get_signal_state,
+    list_pending_signal_states,
+    set_job_state,
+    upsert_signal_state,
+    upsert_snapshot,
+)
+from .mailer import build_alert_email_body, send_message
+from .market_hours import MarketStatus, TradeCalendar, get_market_status
+from .providers import load_provider
+from .providers.base import PriceBar, Quote
+
+
+@dataclass(frozen=True)
+class SnapshotComputation:
+    symbol: str
+    display_name: str
+    latest_price: float
+    ma_250: float
+    ma_30w: float
+    ma_60w: float
+    prev_ma_30w: float
+    prev_ma_60w: float
+    boll_mid: float
+    dividend_yield: float
+    trigger_state: str
+    trigger_detail: str
+    triggered_labels: tuple[str, ...]
+    weekly_crossed: bool
+    updated_at: datetime
+
+
+def validate_stock_symbol(symbol: str) -> bool:
+    return len(symbol) == 6 and symbol.isdigit()
+
+
+def parse_stock_symbols(raw_text: str) -> tuple[list[str], list[str]]:
+    candidates = [item.strip() for item in re.split(r"[\s,，;；]+", raw_text) if item.strip()]
+    valid_symbols: list[str] = []
+    invalid_symbols: list[str] = []
+    for symbol in candidates:
+        if validate_stock_symbol(symbol):
+            if symbol not in valid_symbols:
+                valid_symbols.append(symbol)
+        else:
+            invalid_symbols.append(symbol)
+    return valid_symbols, invalid_symbols
+
+
+def calculate_simple_moving_average(values: list[float], window: int) -> float:
+    if len(values) < window:
+        return 0.0
+    return round(sum(values[-window:]) / window, 2)
+
+
+def has_weekly_crossed(
+    prev_ma_30w: float,
+    prev_ma_60w: float,
+    current_ma_30w: float,
+    current_ma_60w: float,
+) -> bool:
+    if not all([prev_ma_30w, prev_ma_60w, current_ma_30w, current_ma_60w]):
+        return False
+    prev_diff = prev_ma_30w - prev_ma_60w
+    current_diff = current_ma_30w - current_ma_60w
+    return prev_diff == 0 or current_diff == 0 or prev_diff * current_diff < 0
+
+
+def compute_snapshot_metrics(
+    symbol: str,
+    quote: Quote,
+    daily_bars: list[PriceBar],
+    weekly_bars: list[PriceBar],
+    dividend_yield: float,
+) -> SnapshotComputation:
+    daily_closes = [item.close_price for item in daily_bars]
+    weekly_closes = [item.close_price for item in weekly_bars]
+
+    ma_250 = calculate_simple_moving_average(daily_closes, 250)
+    boll_mid = calculate_simple_moving_average(daily_closes, 20)
+    ma_30w = calculate_simple_moving_average(weekly_closes, 30)
+    ma_60w = calculate_simple_moving_average(weekly_closes, 60)
+    prev_ma_30w = calculate_simple_moving_average(weekly_closes[:-1], 30)
+    prev_ma_60w = calculate_simple_moving_average(weekly_closes[:-1], 60)
+    weekly_crossed = has_weekly_crossed(prev_ma_30w, prev_ma_60w, ma_30w, ma_60w)
+
+    triggered_labels: list[str] = []
+    if ma_250 and quote.latest_price <= ma_250:
+        triggered_labels.append("250日线")
+    if boll_mid and quote.latest_price <= boll_mid:
+        triggered_labels.append("BOLL中轨")
+    if dividend_yield >= 4.5:
+        triggered_labels.append("股息率")
+    if weekly_crossed:
+        triggered_labels.append("30周/60周均线")
+
+    trigger_state = "、".join(triggered_labels) if triggered_labels else "正常"
+    trigger_detail = (
+        f"现价 {quote.latest_price:.2f} | 250日线 {ma_250:.2f} | "
+        f"30周/60周 {ma_30w:.2f}/{ma_60w:.2f} | "
+        f"BOLL中轨 {boll_mid:.2f} | 股息率 {dividend_yield:.2f}%"
+    )
+    return SnapshotComputation(
+        symbol=symbol,
+        display_name=quote.name,
+        latest_price=quote.latest_price,
+        ma_250=ma_250,
+        ma_30w=ma_30w,
+        ma_60w=ma_60w,
+        prev_ma_30w=prev_ma_30w,
+        prev_ma_60w=prev_ma_60w,
+        boll_mid=boll_mid,
+        dividend_yield=dividend_yield,
+        trigger_state=trigger_state,
+        trigger_detail=trigger_detail,
+        triggered_labels=tuple(triggered_labels),
+        weekly_crossed=weekly_crossed,
+        updated_at=quote.updated_at,
+    )
 
 
 class StockMonitor:
-    def __init__(self) -> None:
-        self.config = load_config()
+    def __init__(self, settings: AppSettings) -> None:
+        self.settings = settings
+        self.provider = load_provider(settings.provider_name)
+        try:
+            self.trade_calendar = TradeCalendar(self.provider.get_trade_dates())
+        except Exception as exc:
+            self.trade_calendar = TradeCalendar()
+            self.last_error_message = f"交易日历加载失败，已回退工作日模式：{exc}"
+        self._lock = threading.Lock()
+        self.last_refresh_at: datetime | None = None
+        if not hasattr(self, "last_error_message"):
+            self.last_error_message: str | None = None
 
     def run(self) -> str:
-        symbols = ", ".join(self.config.watchlist)
-        return f"AI stock monitoring project initialized. Watching: {symbols}"
+        tracked_symbols = get_monitored_stocks(self.settings.db_path)
+        return f"Monitoring {len(tracked_symbols)} stock(s) with provider {self.provider.provider_name}."
 
+    def get_market_status(self, now: datetime | None = None) -> MarketStatus:
+        return get_market_status(
+            refresh_interval_seconds=self.settings.refresh_interval_seconds,
+            trade_calendar=self.trade_calendar,
+            timezone_name=self.settings.timezone_name,
+            now=now,
+        )
+
+    def build_chart_payload(self, symbol: str) -> dict[str, Any]:
+        daily_bars = self.provider.get_daily_bars(symbol, limit=self.settings.detail_chart_days)
+        labels = [item.traded_on.isoformat() for item in daily_bars]
+        closes = [item.close_price for item in daily_bars]
+        ma_250_series = [
+            round(sum(closes[max(0, index - 249) : index + 1]) / min(index + 1, 250), 2)
+            if index >= 249
+            else None
+            for index in range(len(closes))
+        ]
+        boll_mid_series = [
+            round(sum(closes[max(0, index - 19) : index + 1]) / min(index + 1, 20), 2)
+            if index >= 19
+            else None
+            for index in range(len(closes))
+        ]
+        return {
+            "labels": labels,
+            "close": closes,
+            "ma250": ma_250_series,
+            "bollMid": boll_mid_series,
+        }
+
+    def build_snapshot(self, symbol: str) -> SnapshotComputation:
+        quote = self.provider.get_quote(symbol)
+        daily_bars = self.provider.get_daily_bars(symbol)
+        weekly_bars = self.provider.get_weekly_bars(symbol)
+        dividend_yield = self.provider.get_trailing_dividend_yield(symbol, quote.latest_price)
+        return compute_snapshot_metrics(
+            symbol=symbol,
+            quote=quote,
+            daily_bars=daily_bars,
+            weekly_bars=weekly_bars,
+            dividend_yield=dividend_yield,
+        )
+
+    def run_cycle(self, now: datetime | None = None) -> None:
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
+            status = self.get_market_status(now)
+            trade_date = status.current_time.date()
+            if status.is_pre_open_window:
+                self._prepare_dividend_alerts(trade_date)
+            if status.is_market_open:
+                self._deliver_pending_alerts(trade_date)
+                self._refresh_open_session(trade_date)
+            if status.is_post_close and self.trade_calendar.is_last_trading_day_of_week(trade_date):
+                self._prepare_weekly_cross_alerts(trade_date)
+        except Exception as exc:  # pragma: no cover - runtime guard
+            self.last_error_message = str(exc)
+        finally:
+            self._lock.release()
+
+    def _refresh_open_session(self, trade_date: date) -> None:
+        email_settings = get_email_settings(self.settings.db_path)
+        for stock in get_monitored_stocks(self.settings.db_path):
+            symbol = stock["symbol"]
+            try:
+                snapshot = self.build_snapshot(symbol)
+                upsert_snapshot(
+                    db_path=self.settings.db_path,
+                    symbol=snapshot.symbol,
+                    display_name=snapshot.display_name,
+                    latest_price=snapshot.latest_price,
+                    ma_250=snapshot.ma_250,
+                    ma_30w=snapshot.ma_30w,
+                    ma_60w=snapshot.ma_60w,
+                    boll_mid=snapshot.boll_mid,
+                    dividend_yield=snapshot.dividend_yield,
+                    trigger_state=snapshot.trigger_state,
+                    trigger_detail=snapshot.trigger_detail,
+                    updated_at=snapshot.updated_at.isoformat(),
+                )
+                self._process_intraday_signal(
+                    symbol=symbol,
+                    display_name=snapshot.display_name,
+                    trigger_type="250日线",
+                    trade_marker=trade_date.isoformat(),
+                    condition_met=bool(snapshot.ma_250 and snapshot.latest_price <= snapshot.ma_250),
+                    detail=snapshot.trigger_detail,
+                    current_price=snapshot.latest_price,
+                    indicator_values={
+                        "ma_250": snapshot.ma_250,
+                        "latest_price": snapshot.latest_price,
+                    },
+                    email_settings=email_settings,
+                )
+                self._process_intraday_signal(
+                    symbol=symbol,
+                    display_name=snapshot.display_name,
+                    trigger_type="BOLL中轨",
+                    trade_marker=trade_date.isoformat(),
+                    condition_met=bool(snapshot.boll_mid and snapshot.latest_price <= snapshot.boll_mid),
+                    detail=snapshot.trigger_detail,
+                    current_price=snapshot.latest_price,
+                    indicator_values={
+                        "boll_mid": snapshot.boll_mid,
+                        "latest_price": snapshot.latest_price,
+                    },
+                    email_settings=email_settings,
+                )
+                self.last_refresh_at = datetime.now(UTC)
+                self.last_error_message = None
+            except Exception as exc:
+                self.last_error_message = f"{symbol} 刷新失败：{exc}"
+
+    def _process_intraday_signal(
+        self,
+        symbol: str,
+        display_name: str,
+        trigger_type: str,
+        trade_marker: str,
+        condition_met: bool,
+        detail: str,
+        current_price: float,
+        indicator_values: dict[str, float | str],
+        email_settings: Any,
+    ) -> None:
+        state = get_signal_state(self.settings.db_path, symbol, trigger_type)
+        hits = 1 if condition_met and state is None else 0
+        if condition_met and state is not None:
+            hits = state["consecutive_hits"] + 1
+        if not condition_met:
+            hits = 0
+
+        last_event_marker = state["last_event_marker"] if state else None
+        should_alert = condition_met and hits >= 2 and last_event_marker != trade_marker
+        if should_alert:
+            self._emit_alert(
+                symbol=symbol,
+                display_name=display_name,
+                trigger_type=trigger_type,
+                current_price=current_price,
+                detail=detail,
+                indicator_values=indicator_values,
+                email_settings=email_settings,
+                triggered_at=datetime.now(UTC).isoformat(),
+            )
+            last_event_marker = trade_marker
+
+        upsert_signal_state(
+            db_path=self.settings.db_path,
+            symbol=symbol,
+            trigger_type=trigger_type,
+            consecutive_hits=hits,
+            last_condition_met=condition_met,
+            last_event_marker=last_event_marker,
+            pending_delivery=bool(state and state["pending_delivery"]),
+            deliver_on=state["deliver_on"] if state else None,
+            pending_payload=json.loads(state["pending_payload"]) if state and state["pending_payload"] else None,
+        )
+
+    def _prepare_dividend_alerts(self, trade_date: date) -> None:
+        marker = trade_date.isoformat()
+        job_state = get_job_state(self.settings.db_path, "dividend_prep")
+        if job_state and job_state["last_run_marker"] == marker:
+            return
+
+        for stock in get_monitored_stocks(self.settings.db_path):
+            snapshot = self.build_snapshot(stock["symbol"])
+            state = get_signal_state(self.settings.db_path, stock["symbol"], "股息率")
+            if snapshot.dividend_yield >= 4.5 and (state is None or state["last_event_marker"] != marker):
+                payload = self._build_pending_payload(
+                    symbol=snapshot.symbol,
+                    display_name=snapshot.display_name,
+                    trigger_type="股息率",
+                    current_price=snapshot.latest_price,
+                    detail=snapshot.trigger_detail,
+                    indicator_values={
+                        "dividend_yield": snapshot.dividend_yield,
+                        "latest_price": snapshot.latest_price,
+                    },
+                    event_marker=marker,
+                )
+                upsert_signal_state(
+                    db_path=self.settings.db_path,
+                    symbol=snapshot.symbol,
+                    trigger_type="股息率",
+                    consecutive_hits=1,
+                    last_condition_met=True,
+                    last_event_marker=state["last_event_marker"] if state else None,
+                    pending_delivery=True,
+                    deliver_on=marker,
+                    pending_payload=payload,
+                )
+        set_job_state(self.settings.db_path, "dividend_prep", marker)
+
+    def _prepare_weekly_cross_alerts(self, trade_date: date) -> None:
+        marker = trade_date.isoformat()
+        job_state = get_job_state(self.settings.db_path, "weekly_cross_prep")
+        if job_state and job_state["last_run_marker"] == marker:
+            return
+
+        next_trade_day = self.trade_calendar.next_trading_day(trade_date)
+        if next_trade_day is None:
+            return
+        for stock in get_monitored_stocks(self.settings.db_path):
+            snapshot = self.build_snapshot(stock["symbol"])
+            state = get_signal_state(self.settings.db_path, stock["symbol"], "30周/60周均线")
+            if snapshot.weekly_crossed and (state is None or state["last_event_marker"] != marker):
+                payload = self._build_pending_payload(
+                    symbol=snapshot.symbol,
+                    display_name=snapshot.display_name,
+                    trigger_type="30周/60周均线",
+                    current_price=snapshot.latest_price,
+                    detail=snapshot.trigger_detail,
+                    indicator_values={
+                        "ma_30w": snapshot.ma_30w,
+                        "ma_60w": snapshot.ma_60w,
+                    },
+                    event_marker=marker,
+                )
+                upsert_signal_state(
+                    db_path=self.settings.db_path,
+                    symbol=snapshot.symbol,
+                    trigger_type="30周/60周均线",
+                    consecutive_hits=1,
+                    last_condition_met=True,
+                    last_event_marker=state["last_event_marker"] if state else None,
+                    pending_delivery=True,
+                    deliver_on=next_trade_day.isoformat(),
+                    pending_payload=payload,
+                )
+        set_job_state(self.settings.db_path, "weekly_cross_prep", marker)
+
+    def _deliver_pending_alerts(self, trade_date: date) -> None:
+        email_settings = get_email_settings(self.settings.db_path)
+        for state in list_pending_signal_states(self.settings.db_path, trade_date.isoformat()):
+            payload = json.loads(state["pending_payload"] or "{}")
+            if not payload:
+                continue
+            triggered_at = datetime.now(UTC).isoformat()
+            self._emit_alert(
+                symbol=payload["symbol"],
+                display_name=payload["display_name"],
+                trigger_type=payload["trigger_type"],
+                current_price=float(payload["current_price"]),
+                detail=str(payload["detail"]),
+                indicator_values=payload["indicator_values"],
+                email_settings=email_settings,
+                triggered_at=triggered_at,
+            )
+            upsert_signal_state(
+                db_path=self.settings.db_path,
+                symbol=state["symbol"],
+                trigger_type=state["trigger_type"],
+                consecutive_hits=state["consecutive_hits"],
+                last_condition_met=bool(state["last_condition_met"]),
+                last_event_marker=payload.get("event_marker"),
+                pending_delivery=False,
+                deliver_on=None,
+                pending_payload=None,
+            )
+
+    def _emit_alert(
+        self,
+        symbol: str,
+        display_name: str,
+        trigger_type: str,
+        current_price: float,
+        detail: str,
+        indicator_values: dict[str, float | str],
+        email_settings: Any,
+        triggered_at: str,
+    ) -> None:
+        payload = {
+            "symbol": symbol,
+            "display_name": display_name,
+            "trigger_type": trigger_type,
+            "current_price": current_price,
+            "detail": detail,
+            "indicator_values": indicator_values,
+            "triggered_at": triggered_at,
+        }
+        email_result = send_message(
+            email_settings,
+            subject=f"[{trigger_type}] {symbol} {display_name}",
+            body=build_alert_email_body(payload),
+        )
+        add_alert_history(
+            db_path=self.settings.db_path,
+            symbol=symbol,
+            display_name=display_name,
+            trigger_type=trigger_type,
+            current_price=current_price,
+            indicator_values=indicator_values,
+            email_status=email_result.status,
+            email_error=email_result.error,
+            triggered_at=triggered_at,
+        )
+
+    @staticmethod
+    def _build_pending_payload(
+        symbol: str,
+        display_name: str,
+        trigger_type: str,
+        current_price: float,
+        detail: str,
+        indicator_values: dict[str, float | str],
+        event_marker: str,
+    ) -> dict[str, Any]:
+        return {
+            "symbol": symbol,
+            "display_name": display_name,
+            "trigger_type": trigger_type,
+            "current_price": current_price,
+            "detail": detail,
+            "indicator_values": indicator_values,
+            "event_marker": event_marker,
+        }

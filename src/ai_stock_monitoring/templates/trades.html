@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="grid" style="margin-bottom: 16px;">
+    <div class="card">
+        <h1>录入交易</h1>
+        <form method="post" action="/trades">
+            <label>股票代码</label>
+            <input type="text" name="symbol" maxlength="6" value="{{ selected_symbol }}" placeholder="例如 600519" required>
+            <label>方向</label>
+            <select name="side">
+                <option value="buy">买入</option>
+                <option value="sell">卖出</option>
+            </select>
+            <label>成交价格</label>
+            <input type="number" name="price" step="0.01" min="0.01" required>
+            <label>成交数量</label>
+            <input type="number" name="quantity" step="1" min="1" required>
+            <label>成交时间</label>
+            <input type="datetime-local" name="traded_at" required>
+            <label>备注</label>
+            <textarea name="note" placeholder="例如：突破后追涨 / 分批止盈 / 回踩 20 日线加仓"></textarea>
+            <button type="submit">保存交易记录</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>生成分析</h2>
+        <form method="post" action="/trades/analyze">
+            <label>分析股票代码</label>
+            <input type="text" name="symbol" maxlength="6" value="{{ selected_symbol }}" placeholder="例如 600519" required>
+            <button type="submit">用大模型分析当前操作</button>
+        </form>
+        <p>如果已配置 `OPENAI_API_KEY`，会优先调用大模型；否则自动回退到规则分析。</p>
+        {% if position_summary %}
+        <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 16px 0;">
+        <h3>当前持仓摘要</h3>
+        <p>持仓数量：{{ position_summary['position_quantity'] }}</p>
+        <p>持仓均价：{{ '%.2f'|format(position_summary['average_cost']) }}</p>
+        <p>累计已实现盈亏：{{ '%.2f'|format(position_summary['realized_pnl']) }}</p>
+        <p>异常卖出数量：{{ position_summary['invalid_sell_quantity'] }}</p>
+        {% endif %}
+    </div>
+</section>
+
+{% if latest_analysis %}
+<section class="card" style="margin-bottom: 16px;">
+    <h2>最新分析</h2>
+    <p>股票：{{ latest_analysis['symbol'] }}</p>
+    <p>来源：{{ latest_analysis['provider'] }} / {{ latest_analysis['model_name'] }}</p>
+    <p>状态：{{ latest_analysis['status'] }}</p>
+    <p>生成时间：{{ latest_analysis['created_at'] }}</p>
+    {% if latest_analysis['error_message'] %}
+    <p class="danger-text">补充说明：{{ latest_analysis['error_message'] }}</p>
+    {% endif %}
+    <p><strong>结论：</strong>{{ latest_analysis['analysis']['summary'] }}</p>
+    <p><strong>合理性判断：</strong>{{ latest_analysis['analysis']['judgment'] }}</p>
+    <p><strong>仓位建议：</strong>{{ latest_analysis['analysis']['position_advice'] }}</p>
+    <p><strong>置信度：</strong>{{ latest_analysis['analysis']['confidence'] }}</p>
+    <p><strong>风险提示：</strong>{{ latest_analysis['analysis']['disclaimer'] }}</p>
+    <h3>判断依据</h3>
+    <ul>
+        {% for item in latest_analysis['analysis']['reasoning'] %}
+        <li>{{ item }}</li>
+        {% endfor %}
+    </ul>
+    <h3>下一步买点</h3>
+    <ul>
+        {% for item in latest_analysis['analysis']['next_buy_points'] %}
+        <li>{{ item }}</li>
+        {% endfor %}
+    </ul>
+    <h3>下一步卖点</h3>
+    <ul>
+        {% for item in latest_analysis['analysis']['next_sell_points'] %}
+        <li>{{ item }}</li>
+        {% endfor %}
+    </ul>
+    <h3>风控建议</h3>
+    <ul>
+        {% for item in latest_analysis['analysis']['risk_controls'] %}
+        <li>{{ item }}</li>
+        {% endfor %}
+    </ul>
+</section>
+{% endif %}
+
+<section class="card">
+    <h2>交易流水</h2>
+    <table>
+        <thead>
+        <tr>
+            <th>成交时间</th>
+            <th>股票</th>
+            <th>方向</th>
+            <th>价格</th>
+            <th>数量</th>
+            <th>备注</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% for trade in trade_records %}
+        <tr>
+            <td>{{ trade['traded_at'] }}</td>
+            <td><a class="inline-link" href="/trades?symbol={{ trade['symbol'] }}">{{ trade['symbol'] }}</a></td>
+            <td>{{ '买入' if trade['side'] == 'buy' else '卖出' }}</td>
+            <td>{{ '%.2f'|format(trade['price']) }}</td>
+            <td>{{ trade['quantity'] }}</td>
+            <td>{{ trade['note'] or '-' }}</td>
+        </tr>
+        {% else %}
+        <tr>
+            <td colspan="6">还没有交易记录，可以先录入一笔买入或卖出。</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

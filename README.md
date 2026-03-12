@@ -1,26 +1,82 @@
 # AI Stock Monitoring
 
-一个用于股票行情监控与信号分析的 Python 项目骨架。
+一个面向个人投资者的轻量化 A 股监控系统，当前版本已经具备：
 
-## 项目结构
+- `FastAPI` Web 服务与极简登录页
+- `SQLite` 内置数据库
+- 股票代码批量管理、邮箱配置、监控状态页面
+- `AKShare` 实时行情、历史日线/周线、交易日历接入
+- 250 日线、BOLL 中轨、30 周/60 周均线、近 12 个月股息率计算
+- 开盘前股息率预警、盘中连续 2 次触发预警、周线交叉次日开盘提醒
+- 告警历史、Web 弹窗确认、股票详情图表
+- 交易流水录入、持仓重建、交易复盘与大模型分析
 
-- `main.py`：项目入口
-- `src/ai_stock_monitoring/config.py`：配置加载
-- `src/ai_stock_monitoring/monitor.py`：监控核心逻辑
-- `tests/`：基础测试
+## 当前范围
 
-## 快速开始
+这个版本已经能作为首个可用版本运行，但仍有一些后续优化项：
+
+- 图表为极简 `canvas` 绘制，未引入专业前端图表库
+- 邮件提醒依赖真实 SMTP 配置
+- 交易复盘在配置 `OPENAI_API_KEY` 后会优先调用 OpenAI Responses API，否则自动回退到规则分析
+- 暂未接入券商回单或自动同步成交记录，交易流水需要手动录入
+
+## 本地启动
+
+1. 创建并激活虚拟环境
+2. 安装依赖：`pip install -r requirements.txt`
+3. 启动服务：`./start.sh` 或 `python main.py`
+4. 打开：`http://127.0.0.1:8080`
+
+默认管理员账号：
+
+- 用户名：`admin`
+- 密码：`admin123`
+
+## Docker 启动
+
+1. 构建并启动：`docker-compose up -d --build`
+2. 打开：`http://127.0.0.1:8080`
+3. 数据文件会落在宿主机 `./data/`
+
+## 关键环境变量
+
+- `ASM_ADMIN_USERNAME`
+- `ASM_ADMIN_PASSWORD`
+- `ASM_HOST`
+- `ASM_PORT`
+- `ASM_DB_PATH`
+- `ASM_REFRESH_INTERVAL`
+- `ASM_PROVIDER`
+- `ASM_DETAIL_CHART_DAYS`
+- `ASM_LLM_PROVIDER`
+- `ASM_LLM_MODEL`
+- `ASM_LLM_BASE_URL`
+- `OPENAI_API_KEY`
+
+默认数据源为 `akshare`；如果想离线演示，可设置：`ASM_PROVIDER=mock`
+
+## 交易复盘说明
+
+交易复盘页支持手动录入：
+
+- 股票代码
+- 买入 / 卖出方向
+- 成交价格
+- 成交数量
+- 成交时间
+- 备注
+
+系统会自动：
+
+- 重建当前持仓数量、持仓均价、已实现盈亏
+- 结合当前均线、股息率、触发状态给出复盘结果
+- 在配置 `OPENAI_API_KEY` 后调用大模型，判断当前操作是否合理
+- 给出下一步更稳健的买点、卖点和风控建议
+
+## 测试
+
+使用标准库运行：
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python main.py
+python -m unittest discover -s tests -q
 ```
-
-## 下一步建议
-
-1. 接入真实行情数据源
-2. 增加策略与告警逻辑
-3. 补充回测与自动化测试
-
