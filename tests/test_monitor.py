@@ -1,4 +1,5 @@
 from datetime import date, datetime
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -21,7 +22,7 @@ from src.ai_stock_monitoring.monitor import (
 )
 from src.ai_stock_monitoring.quant import build_quant_signal
 from src.ai_stock_monitoring.security import verify_password
-from src.ai_stock_monitoring.trade_advisor import build_market_action_summary, build_position_summary
+from src.ai_stock_monitoring.trade_advisor import build_market_action_summary, build_position_summary, build_recommended_price_plan
 
 
 class MonitorTests(unittest.TestCase):
@@ -96,6 +97,38 @@ class MonitorTests(unittest.TestCase):
         self.assertAlmostEqual(summary["average_cost"], 11.0, places=2)
         self.assertAlmostEqual(summary["realized_pnl"], 200.0, places=2)
 
+
+    def test_build_recommended_price_plan_contains_explicit_ranges(self) -> None:
+        signal_summary = build_market_action_summary(
+            {
+                "trigger_state": "250日线、BOLL下轨、量化盈利概率",
+                "quant_probability": 91,
+                "quant_model_breakdown": '[{"label": "趋势跟随", "score": 93}]',
+            }
+        )
+        plan = build_recommended_price_plan(
+            {
+                "latest_price": 10.0,
+                "ma_250": 9.8,
+                "boll_mid": 10.2,
+                "boll_lower": 9.5,
+                "boll_upper": 11.4,
+            },
+            signal_summary,
+            {"average_cost": 9.2},
+        )
+        self.assertIn("-", plan["recommended_buy_price_range"])
+        self.assertIn("-", plan["recommended_sell_price_range"])
+        self.assertTrue(plan["buy_price_plan"])
+        self.assertTrue(plan["watch_price_plan"])
+
+    def test_enhanced_quant_models_are_in_snapshot_breakdown(self) -> None:
+        monitor = StockMonitor(AppSettings(provider_name="mock"))
+        snapshot = monitor.build_snapshot("600519")
+        labels = {item["label"] for item in json.loads(snapshot.quant_model_breakdown)}
+        self.assertIn("支撑强度", labels)
+        self.assertIn("盈亏比", labels)
+
     def test_trades_analysis_route_renders(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
             app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
@@ -130,6 +163,8 @@ class MonitorTests(unittest.TestCase):
                 self.assertEqual(trades_page.status_code, 200)
                 self.assertIn("最新分析", trades_page.text)
                 self.assertIn("首次建仓", trades_page.text)
+                self.assertIn("推荐买入价", trades_page.text)
+                self.assertIn("观望关注价", trades_page.text)
 
     def test_trade_export_route_returns_excel(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
@@ -504,6 +539,8 @@ class MonitorTests(unittest.TestCase):
             latest_price=monitor.provider.get_quote("600519").latest_price,
             ma_250=calculate_simple_moving_average([item.close_price for item in bars_daily], 250),
             boll_mid=calculate_simple_moving_average([item.close_price for item in bars_daily], 20),
+            boll_lower=calculate_bollinger_lower_band([item.close_price for item in bars_daily]),
+            boll_upper=calculate_bollinger_upper_band([item.close_price for item in bars_daily]),
             ma_30w=calculate_simple_moving_average([item.close_price for item in bars_weekly], 30),
             ma_60w=calculate_simple_moving_average([item.close_price for item in bars_weekly], 60),
             dividend_yield=monitor.provider.get_trailing_dividend_yield("600519", monitor.provider.get_quote("600519").latest_price),
@@ -623,6 +660,8 @@ class MonitorTests(unittest.TestCase):
                 self.assertEqual(dashboard_response.status_code, 200)
                 self.assertIn("最近登录记录", dashboard_response.text)
                 self.assertIn("最近一次登录", dashboard_response.text)
+                self.assertIn("账号列表", dashboard_response.text)
+                self.assertIn("最近登录", dashboard_response.text)
                 self.assertIn("1.2.3.4", dashboard_response.text)
                 self.assertIn("20 日最大波动率阈值", dashboard_response.text)
                 self.assertIn("BOLL 中轨最大偏离", dashboard_response.text)
@@ -691,6 +730,8 @@ class MonitorTests(unittest.TestCase):
                         "max_20d_volatility_pct": "4",
                         "min_20d_momentum_pct": "1",
                         "max_boll_deviation_pct": "4",
+                        "support_zone_tolerance_pct": "3",
+                        "min_reward_risk_ratio": "1.8",
                     },
                     follow_redirects=False,
                 )
@@ -736,6 +777,8 @@ class MonitorTests(unittest.TestCase):
                         "max_20d_volatility_pct": "4",
                         "min_20d_momentum_pct": "1",
                         "max_boll_deviation_pct": "4",
+                        "support_zone_tolerance_pct": "3",
+                        "min_reward_risk_ratio": "1.8",
                     },
                     follow_redirects=False,
                 )

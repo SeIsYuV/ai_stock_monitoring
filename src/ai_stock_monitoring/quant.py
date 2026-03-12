@@ -5,6 +5,7 @@ from __future__ import annotations
 设计目标：
 - 不承诺真实收益率，只给出统一的技术面/股息面综合评分
 - 使用当前项目已经具备的数据（价格、均线、股息率）完成多模型投票
+- 参考高星量化项目常见思路：多因子打分、趋势确认、支撑阻力、风险收益比过滤
 - 暴露几组实用参数，让用户可以用更严格的趋势 / 波动 / 股息过滤条件提升命中质量
 """
 
@@ -22,6 +23,8 @@ DEFAULT_QUANT_MODELS: tuple[str, ...] = (
     "dividend_quality",
     "weekly_resonance",
     "volatility_filter",
+    "support_strength",
+    "risk_reward",
 )
 
 MODEL_LABELS = {
@@ -30,6 +33,8 @@ MODEL_LABELS = {
     "dividend_quality": "股息质量",
     "weekly_resonance": "周线共振",
     "volatility_filter": "波动过滤",
+    "support_strength": "支撑强度",
+    "risk_reward": "盈亏比",
 }
 
 DEFAULT_QUANT_STRATEGY_PARAMS: dict[str, float | bool] = {
@@ -39,6 +44,8 @@ DEFAULT_QUANT_STRATEGY_PARAMS: dict[str, float | bool] = {
     "max_20d_volatility": 0.04,
     "min_20d_momentum_pct": 0.01,
     "max_boll_deviation_pct": 0.04,
+    "support_zone_tolerance_pct": 0.03,
+    "min_reward_risk_ratio": 1.6,
 }
 
 
@@ -82,6 +89,10 @@ def normalize_strategy_params(raw_params: Mapping[str, object] | None) -> dict[s
             params["min_20d_momentum_pct"] = float(raw_params["min_20d_momentum_pct"])
         if "max_boll_deviation_pct" in raw_params:
             params["max_boll_deviation_pct"] = max(0.01, float(raw_params["max_boll_deviation_pct"]))
+        if "support_zone_tolerance_pct" in raw_params:
+            params["support_zone_tolerance_pct"] = max(0.005, float(raw_params["support_zone_tolerance_pct"]))
+        if "min_reward_risk_ratio" in raw_params:
+            params["min_reward_risk_ratio"] = max(0.5, float(raw_params["min_reward_risk_ratio"]))
     return params
 
 
@@ -89,6 +100,8 @@ def build_quant_signal(
     latest_price: float,
     ma_250: float,
     boll_mid: float,
+    boll_lower: float,
+    boll_upper: float,
     ma_30w: float,
     ma_60w: float,
     dividend_yield: float,
@@ -119,6 +132,10 @@ def build_quant_signal(
             models.append(_weekly_resonance_model(ma_30w, ma_60w, weekly_closes, params))
         elif model_key == "volatility_filter":
             models.append(_volatility_filter_model(volatility_20, momentum_20_pct, params))
+        elif model_key == "support_strength":
+            models.append(_support_strength_model(latest_price, ma_250, boll_mid, boll_lower, params))
+        elif model_key == "risk_reward":
+            models.append(_risk_reward_model(latest_price, ma_250, boll_mid, boll_lower, boll_upper, params))
 
     probability = round(sum(item.score for item in models) / max(len(models), 1), 2)
     summary = _build_summary(probability, models, params)
@@ -166,16 +183,18 @@ def _trend_following_model(
             score += 18
             reasons.append(f"20 日涨幅达到 {momentum_20_pct * 100:.2f}%")
         else:
-            score -= 14
-            reasons.append(f"20 日涨幅低于阈值 {min_20d_momentum_pct * 100:.2f}%")
+            score -= 16
+            reasons.append(f"20 日涨幅仅 {momentum_20_pct * 100:.2f}%")
+
     if len(closes) >= 5:
-        momentum_5_pct = _price_change_ratio(closes[-5], closes[-1])
-        if momentum_5_pct > 0:
+        slope_5 = _price_change_ratio(closes[-5], closes[-1])
+        if slope_5 > 0:
             score += 8
-            reasons.append("短线继续抬升")
+            reasons.append("近 5 日短趋势继续向上")
         else:
             score -= 6
-            reasons.append("短线延续性一般")
+            reasons.append("近 5 日短趋势未走强")
+
     return QuantModelResult(
         key="trend_following",
         label=MODEL_LABELS["trend_following"],
@@ -307,6 +326,119 @@ def _volatility_filter_model(
     )
 
 
+def _support_strength_model(
+    latest_price: float,
+    ma_250: float,
+    boll_mid: float,
+    boll_lower: float,
+    params: Mapping[str, float | bool],
+) -> QuantModelResult:
+    """Evaluate whether price is close to a valid support zone instead of far away from it."""
+
+    score = 50.0
+    reasons: list[str] = []
+    tolerance = float(params["support_zone_tolerance_pct"])
+    support_levels = [value for value in (boll_lower, ma_250, boll_mid) if value > 0]
+    if not support_levels:
+        return QuantModelResult(
+            key="support_strength",
+            label=MODEL_LABELS["support_strength"],
+            score=_clamp_score(score),
+            reason="缺少支撑位数据",
+        )
+
+    nearest_support = min(support_levels, key=lambda item: abs(latest_price - item))
+    deviation = (latest_price - nearest_support) / nearest_support if nearest_support > 0 else 0.0
+    if 0 <= deviation <= tolerance:
+        score += 24
+        reasons.append(f"价格贴近支撑位 {nearest_support:.2f} 且未跌破")
+    elif 0 <= deviation <= tolerance * 2:
+        score += 10
+        reasons.append(f"价格位于支撑位 {nearest_support:.2f} 上方不远处")
+    elif deviation < 0 and abs(deviation) <= tolerance:
+        score -= 8
+        reasons.append(f"价格小幅跌破支撑位 {nearest_support:.2f}，需要确认是否假跌破")
+    else:
+        score -= 18
+        reasons.append("价格距离主要支撑位偏远，性价比一般")
+
+    if boll_lower > 0 and latest_price < boll_lower:
+        score -= 10
+        reasons.append("价格跌破 BOLL 下轨，短线承压")
+
+    return QuantModelResult(
+        key="support_strength",
+        label=MODEL_LABELS["support_strength"],
+        score=_clamp_score(score),
+        reason="；".join(reasons),
+    )
+
+
+def _risk_reward_model(
+    latest_price: float,
+    ma_250: float,
+    boll_mid: float,
+    boll_lower: float,
+    boll_upper: float,
+    params: Mapping[str, float | bool],
+) -> QuantModelResult:
+    """Approximate reward/risk using nearby support and resistance.
+
+    这里不做复杂回测，只用当前已有的 BOLL / 均线数据粗略估算：
+    - 上方空间：距离最近有效压力位（优先 BOLL 上轨）
+    - 下方风险：距离最近有效支撑位（优先 BOLL 下轨 / 250 日线 / 中轨）
+    这样能把“看起来不错”进一步收敛成“盈亏比是否划算”。
+    """
+
+    score = 50.0
+    reasons: list[str] = []
+    min_ratio = float(params["min_reward_risk_ratio"])
+
+    support_levels = [value for value in (boll_lower, ma_250, boll_mid) if 0 < value < latest_price]
+    support = max(support_levels) if support_levels else 0.0
+    resistance_levels = [value for value in (boll_upper,) if value > latest_price]
+    resistance = min(resistance_levels) if resistance_levels else 0.0
+
+    if support <= 0 or resistance <= 0:
+        if support <= 0:
+            score -= 8
+            reasons.append("缺少有效下方支撑，止损锚点不清晰")
+        if resistance <= 0:
+            score -= 8
+            reasons.append("上方空间有限或已接近压力位")
+        return QuantModelResult(
+            key="risk_reward",
+            label=MODEL_LABELS["risk_reward"],
+            score=_clamp_score(score),
+            reason="；".join(reasons),
+        )
+
+    downside_pct = (latest_price - support) / latest_price
+    upside_pct = (resistance - latest_price) / latest_price
+    ratio = upside_pct / max(downside_pct, 0.003)
+
+    if ratio >= min_ratio:
+        score += 24
+        reasons.append(f"预估盈亏比约 {ratio:.2f}，高于阈值 {min_ratio:.2f}")
+    elif ratio >= 1.0:
+        score += 10
+        reasons.append(f"预估盈亏比约 {ratio:.2f}，尚可但不够优秀")
+    else:
+        score -= 18
+        reasons.append(f"预估盈亏比约 {ratio:.2f}，收益空间不足以覆盖风险")
+
+    if boll_upper > 0 and latest_price >= boll_upper:
+        score -= 10
+        reasons.append("价格已接近或触及 BOLL 上轨，追高性价比下降")
+
+    return QuantModelResult(
+        key="risk_reward",
+        label=MODEL_LABELS["risk_reward"],
+        score=_clamp_score(score),
+        reason="；".join(reasons),
+    )
+
+
 def _daily_returns(closes: list[float]) -> list[float]:
     returns: list[float] = []
     for previous, current in zip(closes, closes[1:]):
@@ -335,7 +467,9 @@ def _build_summary(
     models: list[QuantModelResult],
     params: Mapping[str, float | bool],
 ) -> str:
-    top_model = max(models, key=lambda item: item.score) if models else None
+    ranked_models = sorted(models, key=lambda item: item.score, reverse=True)
+    top_model = ranked_models[0] if ranked_models else None
+    secondary_model = ranked_models[1] if len(ranked_models) > 1 else None
     if probability >= 90:
         prefix = "综合评分极强"
     elif probability >= 80:
@@ -346,12 +480,18 @@ def _build_summary(
         prefix = "综合评分一般"
     if top_model is None:
         return prefix
+
+    summary = (
+        f"{prefix}，当前最强信号来自{top_model.label}模型"
+        f"（次强为{secondary_model.label}）" if secondary_model else f"{prefix}，当前最强信号来自{top_model.label}模型"
+    )
     return (
-        f"{prefix}，当前最强信号来自{top_model.label}模型；"
-        f"最小股息率阈值 {float(params['min_dividend_yield']):.2f}% ，"
+        f"{summary}；最小股息率阈值 {float(params['min_dividend_yield']):.2f}% ，"
         f"20 日动量阈值 {float(params['min_20d_momentum_pct']) * 100:.2f}% ，"
         f"20 日波动率上限 {float(params['max_20d_volatility']) * 100:.2f}% ，"
-        f"BOLL 偏离上限 {float(params['max_boll_deviation_pct']) * 100:.2f}%。"
+        f"BOLL 偏离上限 {float(params['max_boll_deviation_pct']) * 100:.2f}% ，"
+        f"支撑区容忍度 {float(params['support_zone_tolerance_pct']) * 100:.2f}% ，"
+        f"最小盈亏比 {float(params['min_reward_risk_ratio']):.2f}。"
     )
 
 

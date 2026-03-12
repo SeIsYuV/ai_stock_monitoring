@@ -77,6 +77,9 @@ def build_trade_analysis_email_body(payload: dict[str, Any]) -> str:
         f"结论：{analysis['summary']}",
         f"合理性判断：{analysis['judgment']}",
         f"仓位建议：{analysis['position_advice']}",
+        f"推荐买入价：{analysis.get('recommended_buy_price_range', '暂无明确价位')}",
+        f"推荐卖出价：{analysis.get('recommended_sell_price_range', '暂无明确价位')}",
+        f"观望关注价：{analysis.get('watch_price_range', '暂无明确价位')}",
         "",
         "判断依据：",
     ]
@@ -85,6 +88,8 @@ def build_trade_analysis_email_body(payload: dict[str, Any]) -> str:
     lines.extend(f"- {item}" for item in analysis["next_buy_points"])
     lines.extend(["", "下一步卖点："])
     lines.extend(f"- {item}" for item in analysis["next_sell_points"])
+    lines.extend(["", "观望关注位："])
+    lines.extend(f"- {item}" for item in analysis.get("watch_points", []))
     lines.extend(["", "风控建议："])
     lines.extend(f"- {item}" for item in analysis["risk_controls"])
     lines.extend(["", analysis["disclaimer"]])

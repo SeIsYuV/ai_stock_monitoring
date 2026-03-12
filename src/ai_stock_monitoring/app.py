@@ -430,6 +430,9 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             analysis_sheet.append(["结论", analysis["summary"]])
             analysis_sheet.append(["合理性判断", analysis["judgment"]])
             analysis_sheet.append(["仓位建议", analysis["position_advice"]])
+            analysis_sheet.append(["推荐买入价", analysis.get("recommended_buy_price_range", "")])
+            analysis_sheet.append(["推荐卖出价", analysis.get("recommended_sell_price_range", "")])
+            analysis_sheet.append(["观望关注价", analysis.get("watch_price_range", "")])
             analysis_sheet.append(["置信度", analysis["confidence"]])
 
         buffer = BytesIO()
@@ -748,6 +751,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         max_20d_volatility_pct: float = Form(4.0),
         min_20d_momentum_pct: float = Form(1.0),
         max_boll_deviation_pct: float = Form(4.0),
+        support_zone_tolerance_pct: float = Form(3.0),
+        min_reward_risk_ratio: float = Form(1.6),
     ) -> RedirectResponse:
         current_user = _require_login(request, resolved_settings)
         if isinstance(current_user, RedirectResponse):
@@ -763,6 +768,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 "max_20d_volatility": max_20d_volatility_pct / 100,
                 "min_20d_momentum_pct": min_20d_momentum_pct / 100,
                 "max_boll_deviation_pct": max_boll_deviation_pct / 100,
+                "support_zone_tolerance_pct": support_zone_tolerance_pct / 100,
+                "min_reward_risk_ratio": min_reward_risk_ratio,
             }
         )
         save_quant_settings(

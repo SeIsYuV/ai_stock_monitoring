@@ -492,7 +492,21 @@ def list_users(db_path: str) -> list[sqlite3.Row]:
     with get_connection(db_path) as connection:
         return list(
             connection.execute(
-                "SELECT username, is_admin, created_at, updated_at FROM user_account ORDER BY is_admin DESC, username ASC"
+                """
+                SELECT ua.username,
+                       ua.is_admin,
+                       ua.created_at,
+                       ua.updated_at,
+                       ll.latest_login_at
+                FROM user_account ua
+                LEFT JOIN (
+                    SELECT username, MAX(login_at) AS latest_login_at
+                    FROM user_login_history
+                    GROUP BY username
+                ) ll
+                  ON ll.username = ua.username
+                ORDER BY ua.is_admin DESC, ua.username ASC
+                """
             ).fetchall()
         )
 

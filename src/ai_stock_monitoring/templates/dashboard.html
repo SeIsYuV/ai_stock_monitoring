@@ -117,7 +117,11 @@
             <input type="number" name="max_20d_volatility_pct" min="0.5" max="20" step="0.1" value="{{ '%.2f'|format(quant_strategy_params['max_20d_volatility'] * 100) }}">
             <label>BOLL 中轨最大偏离（%）</label>
             <input type="number" name="max_boll_deviation_pct" min="1" max="20" step="0.1" value="{{ '%.2f'|format(quant_strategy_params['max_boll_deviation_pct'] * 100) }}">
-            <p class="hint-text">如果你更强调胜率，可以适度提高动量阈值、降低波动率上限，并保留长周期多头过滤。</p>
+            <label>支撑区容忍度（%）</label>
+            <input type="number" name="support_zone_tolerance_pct" min="0.5" max="15" step="0.1" value="{{ '%.2f'|format(quant_strategy_params['support_zone_tolerance_pct'] * 100) }}">
+            <label>最小盈亏比</label>
+            <input type="number" name="min_reward_risk_ratio" min="0.5" max="5" step="0.1" value="{{ '%.2f'|format(quant_strategy_params['min_reward_risk_ratio']) }}">
+            <p class="hint-text">当前组合借鉴了多因子量化里常见的趋势确认、均值回归、波动过滤、支撑强度和盈亏比过滤思路。若更强调胜率，可提高动量阈值、降低波动率上限、提高最小盈亏比，并保留长周期多头过滤。</p>
             <button type="submit" class="secondary">保存量化设置</button>
         </form>
     </div>
@@ -194,21 +198,30 @@
 
     <div class="card">
         <h2>账号列表</h2>
+        <p class="hint-text">这里会展示每个账号最近一次成功登录时间，便于管理员快速排查账号活跃情况。</p>
         <div class="table-scroll">
-            <table class="compact-table wide-table">
+            <table class="compact-table tight-table">
                 <thead>
                 <tr>
                     <th>账号</th>
                     <th>角色</th>
+                    <th>最近登录</th>
                     <th>创建时间</th>
                 </tr>
                 </thead>
                 <tbody>
                 {% for item in users %}
                 <tr>
-                    <td>{{ item['username'] }}</td>
-                    <td>{{ '管理员' if item['is_admin'] else '普通用户' }}</td>
-                    <td class="nowrap">{{ item['created_at'][:19].replace('T', ' ') }}</td>
+                    <td class="nowrap">{{ item['username'] }}</td>
+                    <td class="nowrap">{{ '管理员' if item['is_admin'] else '普通用户' }}</td>
+                    <td class="nowrap">
+                        {% if item['latest_login_at'] %}
+                        {{ format_full_timestamp(item['latest_login_at']) }}
+                        {% else %}
+                        <span class="account-login-empty">从未登录</span>
+                        {% endif %}
+                    </td>
+                    <td class="nowrap">{{ format_full_timestamp(item['created_at']) }}</td>
                 </tr>
                 {% endfor %}
                 </tbody>

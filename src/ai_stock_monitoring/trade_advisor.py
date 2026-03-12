@@ -111,6 +111,116 @@ def build_market_action_summary(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+
+def _positive_price_levels(*levels: float) -> list[float]:
+    return [round(float(value), 2) for value in levels if float(value or 0.0) > 0]
+
+
+
+def _deduplicate_prices(levels: list[float]) -> list[float]:
+    unique: list[float] = []
+    for value in sorted(levels):
+        if not unique or abs(unique[-1] - value) > 0.01:
+            unique.append(round(value, 2))
+    return unique
+
+
+
+def _format_price_range(levels: list[float], padding_pct: float = 0.012) -> str:
+    cleaned = _deduplicate_prices(_positive_price_levels(*levels))
+    if not cleaned:
+        return "暂无明确价位"
+    if len(cleaned) == 1:
+        value = cleaned[0]
+        return f"{value * (1 - padding_pct):.2f} - {value * (1 + padding_pct):.2f}"
+    return f"{min(cleaned) * (1 - padding_pct):.2f} - {max(cleaned) * (1 + padding_pct):.2f}"
+
+
+
+def build_recommended_price_plan(
+    snapshot: Mapping[str, Any],
+    signal_summary: Mapping[str, Any],
+    position_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build explicit price plans for buy / sell / wait scenarios.
+
+    这里不追求给一个“绝对准确”的单点价格，而是给出更适合实盘执行的区间：
+    - 买入看支撑：250 日线、BOLL 中轨、BOLL 下轨
+    - 卖出看压力：BOLL 上轨、成本保护、量化走弱后的反弹区
+    - 观望看确认：向上确认位与向下防守位
+    """
+
+    latest_price = float(snapshot.get("latest_price") or 0.0)
+    ma_250 = float(snapshot.get("ma_250") or 0.0)
+    boll_mid = float(snapshot.get("boll_mid") or 0.0)
+    boll_lower = float(snapshot.get("boll_lower") or 0.0)
+    boll_upper = float(snapshot.get("boll_upper") or 0.0)
+    average_cost = float(position_summary.get("average_cost") or 0.0)
+    action = str(signal_summary.get("action") or "观望")
+
+    support_levels = _deduplicate_prices(_positive_price_levels(boll_lower, ma_250, boll_mid))
+    resistance_levels = _deduplicate_prices(
+        _positive_price_levels(
+            boll_upper,
+            average_cost * 1.08 if average_cost > 0 else 0.0,
+            latest_price * 1.05 if latest_price > 0 else 0.0,
+        )
+    )
+
+    below_or_equal_supports = [level for level in support_levels if latest_price <= 0 or level <= latest_price * 1.03]
+    primary_buy_levels = below_or_equal_supports or support_levels[:2]
+    primary_sell_levels = [level for level in resistance_levels if level >= latest_price * 0.99] or resistance_levels[-2:]
+
+    breakout_watch = max(_positive_price_levels(ma_250, boll_mid, latest_price), default=0.0)
+    defense_watch = min(_positive_price_levels(boll_lower, ma_250, boll_mid), default=0.0)
+
+    buy_range = _format_price_range(primary_buy_levels)
+    sell_range = _format_price_range(primary_sell_levels)
+    watch_range = _format_price_range(_positive_price_levels(breakout_watch, defense_watch), padding_pct=0.0)
+
+    buy_price_plan: list[str] = []
+    sell_price_plan: list[str] = []
+    watch_price_plan: list[str] = []
+
+    if primary_buy_levels:
+        buy_price_plan.append(f"推荐买入区间：{buy_range}，优先在支撑位附近分批挂单，不追高。")
+        if boll_lower > 0:
+            buy_price_plan.append(f"更激进的低吸价可关注 BOLL 下轨 {boll_lower:.2f} 附近。")
+        if ma_250 > 0:
+            buy_price_plan.append(f"若价格回踩并守住 250 日线 {ma_250:.2f}，可视为中线加仓确认。")
+    else:
+        buy_price_plan.append("当前缺少稳定支撑位，暂不建议主动抄底。")
+
+    if primary_sell_levels:
+        sell_price_plan.append(f"推荐卖出区间：{sell_range}，更适合分批止盈而不是一次性清仓。")
+        if boll_upper > 0:
+            sell_price_plan.append(f"若价格冲到 BOLL 上轨 {boll_upper:.2f} 附近且量能跟不上，可优先兑现一部分利润。")
+        if average_cost > 0:
+            sell_price_plan.append(f"若已有持仓，至少保证卖出价明显高于成本 {average_cost:.2f} 再做进攻型止盈。")
+    else:
+        sell_price_plan.append("当前上方明确压力位不足，卖出更应结合成本线与量化走弱信号。")
+
+    if breakout_watch > 0:
+        watch_price_plan.append(f"向上关注价：{breakout_watch:.2f}，站稳后再看是否形成新一轮上攻。")
+    if defense_watch > 0:
+        watch_price_plan.append(f"向下防守价：{defense_watch:.2f}，跌破后需重新评估仓位与节奏。")
+    if action == "观望" and breakout_watch > 0 and defense_watch > 0:
+        watch_price_plan.append(f"当前更适合观望，重点观察 {watch_range} 这组确认/防守价位。")
+    elif action == "偏买入":
+        watch_price_plan.append("当前偏买入，但仍应等待回踩确认，不建议直接追涨。")
+    elif action == "偏卖出":
+        watch_price_plan.append("当前偏卖出，若反弹未能重新站稳关键均线，优先执行减仓计划。")
+
+    return {
+        "recommended_buy_price_range": buy_range,
+        "recommended_sell_price_range": sell_range,
+        "watch_price_range": watch_range,
+        "buy_price_plan": buy_price_plan,
+        "sell_price_plan": sell_price_plan,
+        "watch_price_plan": watch_price_plan,
+    }
+
+
 @dataclass(frozen=True)
 class TradeAnalysisResult:
     """Normalized analysis result regardless of provider success or fallback."""
@@ -197,7 +307,11 @@ class TradeAdvisor:
             "ma_30w": float(snapshot.get("ma_30w") or 0.0),
             "ma_60w": float(snapshot.get("ma_60w") or 0.0),
             "boll_mid": float(snapshot.get("boll_mid") or 0.0),
+            "boll_lower": float(snapshot.get("boll_lower") or 0.0),
+            "boll_upper": float(snapshot.get("boll_upper") or 0.0),
             "dividend_yield": float(snapshot.get("dividend_yield") or 0.0),
+            "quant_probability": float(snapshot.get("quant_probability") or 0.0),
+            "quant_model_breakdown": snapshot.get("quant_model_breakdown") or "[]",
             "trigger_state": snapshot.get("trigger_state") or "正常",
             "trigger_detail": snapshot.get("trigger_detail") or "",
             "updated_at": snapshot.get("updated_at") or "",
@@ -264,11 +378,15 @@ class TradeAdvisor:
                     "summary": {"type": "string"},
                     "judgment": {
                         "type": "string",
-                        "enum": ["合理", "偏激进", "偏保守", "不合理"],
+                        "enum": ["合理", "偏激进", "偏保守", "不合理", "偏买入", "偏卖出", "观望"],
                     },
                     "reasoning": {"type": "array", "items": {"type": "string"}},
                     "next_buy_points": {"type": "array", "items": {"type": "string"}},
                     "next_sell_points": {"type": "array", "items": {"type": "string"}},
+                    "watch_points": {"type": "array", "items": {"type": "string"}},
+                    "recommended_buy_price_range": {"type": "string"},
+                    "recommended_sell_price_range": {"type": "string"},
+                    "watch_price_range": {"type": "string"},
                     "risk_controls": {"type": "array", "items": {"type": "string"}},
                     "position_advice": {"type": "string"},
                     "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
@@ -280,6 +398,10 @@ class TradeAdvisor:
                     "reasoning",
                     "next_buy_points",
                     "next_sell_points",
+                    "watch_points",
+                    "recommended_buy_price_range",
+                    "recommended_sell_price_range",
+                    "watch_price_range",
                     "risk_controls",
                     "position_advice",
                     "confidence",
@@ -317,7 +439,7 @@ class TradeAdvisor:
                             {
                                 "type": "input_text",
                                 "text": (
-                                    "请分析以下 A 股交易记录是否合理，并给出下一步更稳健的买卖点建议。"
+                                    "请分析以下 A 股交易记录是否合理，并给出下一步更稳健的买卖点建议，以及明确的推荐买入价格、推荐卖出价格、观望关注价格。"
                                     "输出必须符合 JSON Schema。\n"
                                     f"{json.dumps(prompt, ensure_ascii=False)}"
                                 ),
@@ -374,12 +496,15 @@ class TradeAdvisor:
         dividend_yield = float(market_snapshot["dividend_yield"])
         ma_250 = float(market_snapshot["ma_250"])
         boll_mid = float(market_snapshot["boll_mid"])
+        quant_probability = float(market_snapshot.get("quant_probability") or 0.0)
         position_quantity = int(position_summary["position_quantity"])
         signal_summary = build_market_action_summary(market_snapshot)
+        price_plan = build_recommended_price_plan(market_snapshot, signal_summary, position_summary)
 
         reasoning: list[str] = []
         next_buy_points: list[str] = []
         next_sell_points: list[str] = []
+        watch_points: list[str] = list(price_plan["watch_price_plan"])
         risk_controls: list[str] = []
 
         # 规则分析的目标不是代替投顾，而是在没有 LLM 时给出基础复盘建议。
@@ -391,19 +516,34 @@ class TradeAdvisor:
             )
 
         reasoning.append(signal_summary["action_reason"])
+        reasoning.append(
+            f"推荐买入价区间 {price_plan['recommended_buy_price_range']}，"
+            f"推荐卖出价区间 {price_plan['recommended_sell_price_range']}。"
+        )
 
         if ma_250 and latest_price < ma_250:
             reasoning.append("现价低于 250 日线，趋势偏弱，追高并不划算。")
-            next_buy_points.append(f"优先等待站回 250 日线附近，即 {ma_250:.2f} 一线再考虑加仓。")
         else:
             reasoning.append("现价位于 250 日线之上，中长期趋势相对更稳。")
-            next_buy_points.append("可等待回踩 250 日线或 20 日均线附近，再分批介入。")
+
+        if dividend_yield >= 4.5:
+            reasoning.append("股息率较高，若基本面稳定，可作为观察加分项。")
+        elif dividend_yield < 3.5:
+            reasoning.append("股息率已经偏低，防守型持有价值下降。")
+
+        if quant_probability >= 85:
+            reasoning.append("量化综合评分处于高位，说明多因子共振更偏向买入侧。")
+        elif quant_probability <= 40:
+            reasoning.append("量化综合评分偏低，说明当前更需要先考虑风控而不是继续进攻。")
+
+        next_buy_points.extend(price_plan["buy_price_plan"])
+        next_sell_points.extend(price_plan["sell_price_plan"])
 
         if boll_mid and latest_price < boll_mid:
-            next_sell_points.append("若反弹至 BOLL 中轨附近但量能不足，可考虑减仓。")
+            next_sell_points.append(f"若反弹至 BOLL 中轨 {boll_mid:.2f} 附近但量能不足，可考虑先减一部分仓位。")
             risk_controls.append("弱势区间内不要一次性满仓抄底，优先分批建仓。")
         else:
-            next_sell_points.append("若后续冲高但无法放量突破前高，可分批止盈。")
+            next_sell_points.append("若后续冲高但无法放量突破前高，可沿上方压力带分批止盈。")
 
         if position_quantity > 0 and average_cost > 0:
             if latest_price < average_cost:
@@ -423,32 +563,46 @@ class TradeAdvisor:
         elif signal_summary["action"] == "观望" and judgment not in {"不合理", "偏激进"}:
             judgment = "观望"
 
-        if dividend_yield >= 4.5:
-            reasoning.append("股息率较高，若基本面稳定，可作为观察加分项。")
-
         if int(position_summary["invalid_sell_quantity"]) > 0:
             reasoning.append("存在超出持仓的卖出记录，请先核对交易流水。")
             judgment = "不合理"
             risk_controls.append("卖出数量应小于等于当前实际持仓。")
 
         if signal_summary["action"] == "偏卖出":
-            position_advice = "当前卖出信号占优，优先考虑分批止盈或减仓，避免把已有利润重新回吐。"
+            position_advice = (
+                f"当前卖出信号占优，优先考虑在 {price_plan['recommended_sell_price_range']} 区间分批止盈或减仓，"
+                "避免把已有利润重新回吐。"
+            )
         elif signal_summary["action"] == "偏买入":
-            position_advice = "当前买入信号占优，可考虑等回踩或分批低吸，但不建议一次性重仓追入。"
+            position_advice = (
+                f"当前买入信号占优，可重点盯住 {price_plan['recommended_buy_price_range']} 区间分批低吸，"
+                "但不建议一次性重仓追入。"
+            )
         else:
-            position_advice = "当前买卖信号并存，建议先观望，等待趋势或量化评分进一步拉开差距。"
+            position_advice = (
+                f"当前买卖信号并存，建议先观望，重点观察 {price_plan['watch_price_range']} 这组关键价位，"
+                "等待趋势或量化评分进一步拉开差距。"
+            )
 
         if not risk_controls:
             risk_controls.append("控制单笔风险，优先使用预设止损和分批执行。")
 
         return {
-            "summary": f"已结合买入/卖出规则完成综合判断，当前建议：{signal_summary['action']}。",
+            "summary": (
+                f"已结合买入/卖出规则与量化多因子完成综合判断，当前建议：{signal_summary['action']}；"
+                f"推荐买入价 {price_plan['recommended_buy_price_range']}，"
+                f"推荐卖出价 {price_plan['recommended_sell_price_range']}。"
+            ),
             "judgment": judgment,
             "reasoning": reasoning,
             "next_buy_points": next_buy_points,
             "next_sell_points": next_sell_points,
+            "watch_points": watch_points,
+            "recommended_buy_price_range": price_plan["recommended_buy_price_range"],
+            "recommended_sell_price_range": price_plan["recommended_sell_price_range"],
+            "watch_price_range": price_plan["watch_price_range"],
             "risk_controls": risk_controls,
             "position_advice": position_advice,
-            "confidence": 58,
+            "confidence": 63,
             "disclaimer": "该分析仅供复盘参考，不构成投资建议。",
         }

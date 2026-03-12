@@ -63,6 +63,9 @@
     <p><strong>结论：</strong>{{ latest_analysis['analysis']['summary'] }}</p>
     <p><strong>合理性判断：</strong>{{ latest_analysis['analysis']['judgment'] }}</p>
     <p><strong>仓位建议：</strong>{{ latest_analysis['analysis']['position_advice'] }}</p>
+    <p><strong>推荐买入价：</strong>{{ latest_analysis['analysis'].get('recommended_buy_price_range', '-') }}</p>
+    <p><strong>推荐卖出价：</strong>{{ latest_analysis['analysis'].get('recommended_sell_price_range', '-') }}</p>
+    <p><strong>观望关注价：</strong>{{ latest_analysis['analysis'].get('watch_price_range', '-') }}</p>
     <p><strong>置信度：</strong>{{ latest_analysis['analysis']['confidence'] }}</p>
     <p><strong>风险提示：</strong>{{ latest_analysis['analysis']['disclaimer'] }}</p>
     <h3>判断依据</h3>
@@ -80,6 +83,12 @@
     <h3>下一步卖点</h3>
     <ul>
         {% for item in latest_analysis['analysis']['next_sell_points'] %}
+        <li>{{ item }}</li>
+        {% endfor %}
+    </ul>
+    <h3>观望关注位</h3>
+    <ul>
+        {% for item in latest_analysis['analysis'].get('watch_points', []) %}
         <li>{{ item }}</li>
         {% endfor %}
     </ul>

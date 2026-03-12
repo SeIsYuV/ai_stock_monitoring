@@ -316,6 +316,8 @@ class StockMonitor:
             latest_price=effective_quote.latest_price,
             ma_250=calculate_simple_moving_average([item.close_price for item in daily_bars], 250),
             boll_mid=calculate_simple_moving_average([item.close_price for item in daily_bars], 20),
+            boll_lower=calculate_bollinger_lower_band([item.close_price for item in daily_bars]),
+            boll_upper=calculate_bollinger_upper_band([item.close_price for item in daily_bars]),
             ma_30w=calculate_simple_moving_average([item.close_price for item in weekly_bars], 30),
             ma_60w=calculate_simple_moving_average([item.close_price for item in weekly_bars], 60),
             dividend_yield=dividend_yield,
