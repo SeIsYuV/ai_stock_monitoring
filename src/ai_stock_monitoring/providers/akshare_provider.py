@@ -86,7 +86,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         return self._to_bars(frame.tail(limit))
 
     def get_trailing_dividend_yield(self, symbol: str, latest_price: float) -> float:
-        """Approximate trailing 12-month dividend yield from historical dividend records."""
+        """Compute dividend yield using last calendar year's total cash dividend per share / current price."""
         if latest_price <= 0:
             return 0.0
         detail = self._cached(
@@ -97,18 +97,19 @@ class AkshareMarketDataProvider(MarketDataProvider):
         if detail.empty:
             return 0.0
 
-        now_date = datetime.now(UTC).date()
-        trailing_start = now_date - timedelta(days=365)
+        target_year = datetime.now(UTC).date().year - 1
         working_frame = detail.copy()
         working_frame["除权除息日"] = pd.to_datetime(working_frame["除权除息日"], errors="coerce")
         working_frame["公告日期"] = pd.to_datetime(working_frame["公告日期"], errors="coerce")
         working_frame["派息"] = pd.to_numeric(working_frame["派息"], errors="coerce").fillna(0.0)
         effective_dates = working_frame["除权除息日"].fillna(working_frame["公告日期"])
         filtered = working_frame.loc[
-            (effective_dates.dt.date >= trailing_start)
+            (effective_dates.dt.year == target_year)
             & (working_frame["进度"] == "实施")
         ]
         total_cash_per_10 = float(filtered["派息"].sum())
+        if total_cash_per_10 <= 0:
+            return 0.0
         return round(total_cash_per_10 / 10 / latest_price * 100, 2)
 
     def get_trade_dates(self) -> list[date]:

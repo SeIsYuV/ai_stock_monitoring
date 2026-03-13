@@ -52,7 +52,10 @@ class MockMarketDataProvider(MarketDataProvider):
 
     def get_trailing_dividend_yield(self, symbol: str, latest_price: float) -> float:
         seed = sum(int(char) for char in symbol if char.isdigit())
-        return round(2.0 + (seed % 9) * 0.45, 2)
+        if latest_price <= 0:
+            return 0.0
+        last_year_dividend_per_share = round(0.18 + (seed % 8) * 0.06, 2)
+        return round(last_year_dividend_per_share / latest_price * 100, 2)
 
     def get_trade_dates(self) -> list[date]:
         today = datetime.now(UTC).date()

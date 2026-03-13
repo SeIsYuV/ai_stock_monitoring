@@ -295,6 +295,7 @@
             }
         }
 
+        let hasAutoReloaded = false;
         render();
         window.setInterval(function () {
             currentTime = new Date(currentTime.getTime() + 1000);
@@ -302,6 +303,12 @@
                 nextRefreshSeconds = Math.max(0, nextRefreshSeconds - 1);
             }
             render();
+            if (!hasAutoReloaded && nextRefreshSeconds === 0) {
+                hasAutoReloaded = true;
+                window.setTimeout(function () {
+                    window.location.reload();
+                }, 300);
+            }
         }, 1000);
     })();
 

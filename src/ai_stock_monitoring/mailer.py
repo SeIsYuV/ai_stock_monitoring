@@ -131,3 +131,42 @@ def build_login_unlock_email_body(username: str, verification_code: str, expires
         "如果这不是你本人操作，请尽快修改密码并检查邮箱配置。\n"
         "本系统仅为监控参考，不构成任何投资建议。"
     )
+
+
+
+def build_portfolio_review_email_body(payload: dict[str, Any]) -> str:
+    """Render an after-close portfolio review email for current holdings."""
+
+    portfolio_profile = payload["portfolio_profile"]
+    active_positions = portfolio_profile.get("active_positions", [])
+    lines = [
+        f"账号：{payload['owner_username']}",
+        f"交易日：{payload['trade_date']}",
+        f"收盘后持仓数：{len(active_positions)}",
+        "=" * 18,
+        f"组合建议：{portfolio_profile.get('comprehensive_advice', '-')}",
+        f"当前持仓比例：{portfolio_profile.get('holding_ratio', 0):.2f}%",
+        f"模型建议仓位：{portfolio_profile.get('recommended_holding_ratio', '-')}",
+        f"风险等级：{portfolio_profile.get('risk_level', '-')}",
+        f"持仓风格：{portfolio_profile.get('holding_style', '-')}",
+        "",
+        "【持仓逐只建议】",
+    ]
+    for item in active_positions:
+        lines.extend([
+            f"- {item.get('display_name', item.get('symbol', '-'))}（{item.get('symbol', '-') }）",
+            f"  最新价：{float(item.get('latest_price', 0.0)):.2f} ｜ 仓位：{float(item.get('weight_pct', 0.0)):.2f}% ｜ 动作：{item.get('action', '-')}",
+            f"  买点：{item.get('recommended_buy_price_range', '-')} ｜ 买入等级 {item.get('buy_recommendation_level', '-')}/10",
+            f"  卖点：{item.get('recommended_sell_price_range', '-')} ｜ 卖出等级 {item.get('sell_recommendation_level', '-')}/10",
+            f"  DCF：{item.get('advice_dcf_line', item.get('dcf_reason', '-'))}",
+        ])
+    professional_advice = portfolio_profile.get('professional_advice', [])
+    if professional_advice:
+        lines.extend(["", "【专业综合分析】"])
+        lines.extend(f"- {item}" for item in professional_advice)
+    risk_reasons = portfolio_profile.get('risk_reasons', [])
+    if risk_reasons:
+        lines.extend(["", "【风险提示】"])
+        lines.extend(f"- {item}" for item in risk_reasons)
+    lines.extend(["", "本系统仅为监控参考，不构成任何投资建议。"])
+    return "\n".join(lines)

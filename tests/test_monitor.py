@@ -11,6 +11,7 @@ from src.ai_stock_monitoring.config import AppSettings
 from src.ai_stock_monitoring.database import add_trade_record, get_alert_history, get_login_unlock_code, get_snapshot, get_user, initialize_database, list_recent_login_events, list_trade_records, upsert_snapshot
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
 from src.ai_stock_monitoring.monitor import (
+    SnapshotComputation,
     StockMonitor,
     build_quant_sell_signal,
     calculate_bollinger_lower_band,
@@ -834,7 +835,10 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("卖出信号更强", summary["action_reason"])
 
     def test_snapshot_timestamp_is_converted_to_shanghai_time(self) -> None:
-        self.assertEqual(_format_snapshot_timestamp("2026-03-12T10:42:00+00:00"), "18:42")
+        today_utc = datetime.now().astimezone().replace(hour=10, minute=42, second=0, microsecond=0)
+        expected = today_utc.astimezone().astimezone().strftime("%H:%M")
+        sample = today_utc.astimezone().isoformat()
+        self.assertEqual(_format_snapshot_timestamp(sample), expected)
 
     def test_quant_sell_signal_requires_probability_and_multiple_confirmations(self) -> None:
         monitor = StockMonitor(AppSettings(provider_name="mock"))
@@ -947,6 +951,145 @@ class MonitorTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(alerts), 1)
 
+
+    def test_sell_alerts_only_fire_for_held_positions(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            sell_snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=120.0,
+                ma_250=100.0,
+                ma_30w=110.0,
+                ma_60w=108.0,
+                prev_ma_30w=109.0,
+                prev_ma_60w=107.0,
+                boll_mid=110.0,
+                boll_lower=100.0,
+                boll_upper=115.0,
+                dividend_yield=2.0,
+                quant_probability=65.0,
+                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 80}], ensure_ascii=False),
+                trigger_state="BOLL上轨卖出",
+                trigger_detail="测试卖出提醒",
+                triggered_labels=("BOLL上轨卖出",),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
+            )
+            with TestClient(app) as client:
+                client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
+                client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
+                with patch.object(app.state.monitor, "build_snapshot", return_value=sell_snapshot):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:00:00+08:00"))
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:30:00+08:00"))
+                alerts = [
+                    row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
+                    if row["trigger_type"] == "BOLL上轨卖出"
+                ]
+                self.assertEqual(len(alerts), 0)
+
+                add_trade_record(database_file.name, "admin", "600519", "buy", 100.0, 100)
+                with patch.object(app.state.monitor, "build_snapshot", return_value=sell_snapshot):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-16T10:00:00+08:00"))
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-16T10:30:00+08:00"))
+                alerts = [
+                    row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
+                    if row["trigger_type"] == "BOLL上轨卖出"
+                ]
+                self.assertEqual(len(alerts), 1)
+
+    def test_buy_alerts_fire_when_new_buy_indicator_appears(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            first_snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=99.0,
+                ma_250=100.0,
+                ma_30w=110.0,
+                ma_60w=100.0,
+                prev_ma_30w=109.0,
+                prev_ma_60w=99.0,
+                boll_mid=98.0,
+                boll_lower=95.0,
+                boll_upper=110.0,
+                dividend_yield=5.0,
+                quant_probability=92.0,
+                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 92}, {"label": "周线共振", "score": 88}], ensure_ascii=False),
+                trigger_state="250日线、股息率",
+                trigger_detail="测试买入提醒-首个指标",
+                triggered_labels=("250日线", "股息率"),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
+            )
+            second_snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=97.0,
+                ma_250=100.0,
+                ma_30w=110.0,
+                ma_60w=100.0,
+                prev_ma_30w=109.0,
+                prev_ma_60w=99.0,
+                boll_mid=98.0,
+                boll_lower=95.0,
+                boll_upper=110.0,
+                dividend_yield=5.0,
+                quant_probability=93.0,
+                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 93}, {"label": "周线共振", "score": 89}], ensure_ascii=False),
+                trigger_state="250日线、BOLL中轨、股息率",
+                trigger_detail="测试买入提醒-新增指标",
+                triggered_labels=("250日线", "BOLL中轨", "股息率"),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-13T10:30:00+08:00"),
+            )
+            with TestClient(app) as client:
+                client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
+                client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
+                client.post("/settings/quant", data={"enabled": "1", "probability_threshold": "50"}, follow_redirects=False)
+                with patch.object(app.state.monitor, "build_snapshot", side_effect=[first_snapshot, second_snapshot]):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:00:00+08:00"))
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:30:00+08:00"))
+                alerts = [
+                    row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
+                    if row["trigger_type"] in {"250日线", "BOLL中轨"}
+                ]
+                alert_types = [row["trigger_type"] for row in alerts]
+                self.assertEqual(alert_types.count("250日线"), 1)
+                self.assertEqual(alert_types.count("BOLL中轨"), 1)
+
+    def test_post_close_holding_review_email_is_sent_once_per_day(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            with TestClient(app) as client:
+                client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
+                client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
+                client.post(
+                    "/settings/email",
+                    data={
+                        "recipient_email": "to@example.com",
+                        "smtp_server": "smtp.qq.com",
+                        "sender_email": "from@example.com",
+                        "sender_password": "secret",
+                    },
+                    follow_redirects=False,
+                )
+                add_trade_record(database_file.name, "admin", "600519", "buy", 100.0, 100)
+                with patch("src.ai_stock_monitoring.monitor.send_message") as mocked_send:
+                    mocked_send.return_value.success = True
+                    mocked_send.return_value.status = "发送成功"
+                    mocked_send.return_value.error = None
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T15:10:00+08:00"))
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T15:20:00+08:00"))
+                review_calls = [call for call in mocked_send.call_args_list if "收盘持仓复盘" in call.kwargs.get("subject", "")]
+                self.assertEqual(len(review_calls), 1)
+
+    def test_mock_dividend_yield_uses_last_year_dividend_per_share(self) -> None:
+        monitor = StockMonitor(AppSettings(provider_name="mock"))
+        latest_price = monitor.provider.get_quote("600519").latest_price
+        seed = sum(int(char) for char in "600519")
+        expected = round((0.18 + (seed % 8) * 0.06) / latest_price * 100, 2)
+        self.assertEqual(monitor.provider.get_trailing_dividend_yield("600519", latest_price), expected)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,8 @@ from typing import Any
 
 SELL_DIVIDEND_THRESHOLD = 3.5
 QUANT_SELL_PROBABILITY_THRESHOLD = 35.0
+BUY_TRIGGER_TYPES = {"250日线", "BOLL中轨", "BOLL下轨", "股息率", "30周/60周均线", "量化盈利概率"}
+SELL_TRIGGER_TYPES = {"BOLL上轨卖出", "低股息率卖出", "量化走弱卖出"}
 
 from .config import AppSettings
 from .database import (
@@ -29,18 +31,22 @@ from .database import (
     get_email_settings,
     get_job_state,
     get_monitored_stocks,
+    get_portfolio_settings,
     get_quant_settings,
     get_signal_state,
     list_pending_signal_states,
+    list_trade_records,
+    list_trade_records_for_symbol,
     set_job_state,
     upsert_signal_state,
     upsert_snapshot,
 )
-from .mailer import build_alert_email_body, send_message
+from .mailer import build_alert_email_body, build_portfolio_review_email_body, send_message
 from .market_hours import MarketStatus, TradeCalendar, get_market_status
 from .providers import load_provider
 from .providers.base import PriceBar, Quote
 from .quant import DEFAULT_QUANT_MODELS, build_quant_signal, normalize_selected_models, normalize_strategy_params
+from .trade_advisor import build_portfolio_profile, build_position_summary, build_stock_comprehensive_advice
 
 
 @dataclass(frozen=True)
@@ -436,8 +442,10 @@ class StockMonitor:
             if status.is_market_open:
                 self._deliver_pending_alerts(trade_date)
                 self._refresh_open_session(trade_date)
-            if status.is_post_close and self.trade_calendar.is_last_trading_day_of_week(trade_date):
-                self._prepare_weekly_cross_alerts(trade_date)
+            if status.is_post_close:
+                self._send_post_close_holding_reviews(trade_date)
+                if self.trade_calendar.is_last_trading_day_of_week(trade_date):
+                    self._prepare_weekly_cross_alerts(trade_date)
         except Exception as exc:  # pragma: no cover
             self.last_error_message = str(exc)
         finally:
@@ -445,12 +453,26 @@ class StockMonitor:
 
     def _refresh_open_session(self, trade_date: date) -> None:
         snapshot_cache: dict[tuple[str, tuple[str, ...], str], SnapshotComputation] = {}
+        owner_position_cache: dict[str, dict[str, dict[str, Any]]] = {}
+        owner_email_cache: dict[str, Any] = {}
+        owner_quant_cache: dict[str, dict[str, Any]] = {}
+        trade_marker = trade_date.isoformat()
         for stock in get_monitored_stocks(self.settings.db_path):
             owner_username = stock["owner_username"]
             symbol = stock["symbol"]
             try:
-                email_settings = get_email_settings(self.settings.db_path, owner_username)
-                quant_settings = self._resolve_owner_quant_config(owner_username)
+                email_settings = owner_email_cache.setdefault(
+                    owner_username,
+                    get_email_settings(self.settings.db_path, owner_username),
+                )
+                quant_settings = owner_quant_cache.setdefault(
+                    owner_username,
+                    self._resolve_owner_quant_config(owner_username),
+                )
+                owner_positions = owner_position_cache.setdefault(
+                    owner_username,
+                    self._resolve_owner_position_map(owner_username),
+                )
                 selected_models = quant_settings["selected_models"]
                 strategy_params = quant_settings["strategy_params"]
                 cache_key = (
@@ -485,13 +507,16 @@ class StockMonitor:
                     trigger_detail=snapshot.trigger_detail,
                     updated_at=snapshot.updated_at.isoformat(),
                 )
+                stock_advice = build_stock_comprehensive_advice(snapshot.__dict__)
+                buy_alert_enabled = stock_advice["action"] == "偏买入"
+                position_summary = owner_positions.get(symbol)
                 self._process_intraday_signal(
                     owner_username=owner_username,
                     symbol=symbol,
                     display_name=snapshot.display_name,
                     trigger_type="250日线",
-                    trade_marker=trade_date.isoformat(),
-                    condition_met=bool(snapshot.ma_250 and snapshot.latest_price <= snapshot.ma_250),
+                    trade_marker=trade_marker,
+                    condition_met=bool(snapshot.ma_250 and snapshot.latest_price <= snapshot.ma_250 and self._should_emit_buy_alert(snapshot, "250日线", stock_advice["action"])),
                     detail=snapshot.trigger_detail,
                     current_price=snapshot.latest_price,
                     indicator_values={
@@ -499,15 +524,15 @@ class StockMonitor:
                         "latest_price": snapshot.latest_price,
                     },
                     email_settings=email_settings,
-                    required_hits=2,
+                    required_hits=1,
                 )
                 self._process_intraday_signal(
                     owner_username=owner_username,
                     symbol=symbol,
                     display_name=snapshot.display_name,
                     trigger_type="BOLL中轨",
-                    trade_marker=trade_date.isoformat(),
-                    condition_met=bool(snapshot.boll_mid and snapshot.latest_price <= snapshot.boll_mid),
+                    trade_marker=trade_marker,
+                    condition_met=bool(snapshot.boll_mid and snapshot.latest_price <= snapshot.boll_mid and self._should_emit_buy_alert(snapshot, "BOLL中轨", stock_advice["action"])),
                     detail=snapshot.trigger_detail,
                     current_price=snapshot.latest_price,
                     indicator_values={
@@ -515,15 +540,15 @@ class StockMonitor:
                         "latest_price": snapshot.latest_price,
                     },
                     email_settings=email_settings,
-                    required_hits=2,
+                    required_hits=1,
                 )
                 self._process_intraday_signal(
                     owner_username=owner_username,
                     symbol=symbol,
                     display_name=snapshot.display_name,
                     trigger_type="BOLL下轨",
-                    trade_marker=trade_date.isoformat(),
-                    condition_met=bool(snapshot.boll_lower and snapshot.latest_price <= snapshot.boll_lower),
+                    trade_marker=trade_marker,
+                    condition_met=bool(snapshot.boll_lower and snapshot.latest_price <= snapshot.boll_lower and self._should_emit_buy_alert(snapshot, "BOLL下轨", stock_advice["action"])),
                     detail=snapshot.trigger_detail,
                     current_price=snapshot.latest_price,
                     indicator_values={
@@ -531,15 +556,15 @@ class StockMonitor:
                         "latest_price": snapshot.latest_price,
                     },
                     email_settings=email_settings,
-                    required_hits=2,
+                    required_hits=1,
                 )
                 self._process_intraday_signal(
                     owner_username=owner_username,
                     symbol=symbol,
                     display_name=snapshot.display_name,
                     trigger_type="BOLL上轨卖出",
-                    trade_marker=trade_date.isoformat(),
-                    condition_met=bool(snapshot.boll_upper and snapshot.latest_price >= snapshot.boll_upper),
+                    trade_marker=trade_marker,
+                    condition_met=bool(snapshot.boll_upper and snapshot.latest_price >= snapshot.boll_upper and self._should_emit_sell_alert(position_summary, "BOLL上轨卖出")),
                     detail=f"{snapshot.trigger_detail} | 卖出参考：价格突破 BOLL 上轨，可结合仓位分批止盈。",
                     current_price=snapshot.latest_price,
                     indicator_values={
@@ -556,8 +581,8 @@ class StockMonitor:
                         symbol=symbol,
                         display_name=snapshot.display_name,
                         trigger_type="量化盈利概率",
-                        trade_marker=trade_date.isoformat(),
-                        condition_met=bool(snapshot.quant_probability >= threshold),
+                        trade_marker=trade_marker,
+                        condition_met=bool(snapshot.quant_probability >= threshold and buy_alert_enabled and self._should_emit_buy_alert(snapshot, "量化盈利概率", stock_advice["action"])),
                         detail=f"{snapshot.trigger_detail} | 量化阈值 {threshold:.2f}%",
                         current_price=snapshot.latest_price,
                         indicator_values={
@@ -574,8 +599,8 @@ class StockMonitor:
                         symbol=symbol,
                         display_name=snapshot.display_name,
                         trigger_type="量化走弱卖出",
-                        trade_marker=trade_date.isoformat(),
-                        condition_met=quant_sell_signal.should_alert,
+                        trade_marker=trade_marker,
+                        condition_met=bool(quant_sell_signal.should_alert and self._should_emit_sell_alert(position_summary, "量化走弱卖出")),
                         detail=f"{snapshot.trigger_detail} | 卖出参考：{'；'.join(quant_sell_signal.reasons)}",
                         current_price=snapshot.latest_price,
                         indicator_values={
@@ -591,6 +616,113 @@ class StockMonitor:
                 self.last_error_message = None
             except Exception as exc:
                 self.last_error_message = f"{owner_username}/{symbol} 刷新失败：{exc}"
+
+    def _resolve_owner_position_map(self, owner_username: str) -> dict[str, dict[str, Any]]:
+        position_map: dict[str, dict[str, Any]] = {}
+        symbols = {str(row["symbol"]) for row in list_trade_records(self.settings.db_path, owner_username, None)}
+        for symbol in symbols:
+            trades = list_trade_records_for_symbol(self.settings.db_path, owner_username, symbol)
+            if not trades:
+                continue
+            position_summary = build_position_summary(trades)
+            if int(position_summary.get("position_quantity") or 0) > 0:
+                position_map[symbol] = position_summary
+        return position_map
+
+    @staticmethod
+    def _should_emit_buy_alert(snapshot: SnapshotComputation, trigger_type: str, action: str) -> bool:
+        if trigger_type not in BUY_TRIGGER_TYPES:
+            return False
+        if action != "偏买入":
+            return False
+        if trigger_type == "量化盈利概率":
+            return any(label in BUY_TRIGGER_TYPES - {"量化盈利概率"} for label in snapshot.triggered_labels)
+        return trigger_type in snapshot.triggered_labels
+
+    @staticmethod
+    def _should_emit_sell_alert(position_summary: dict[str, Any] | None, trigger_type: str) -> bool:
+        if trigger_type not in SELL_TRIGGER_TYPES:
+            return False
+        if not position_summary:
+            return False
+        return int(position_summary.get("position_quantity") or 0) > 0
+
+    def _send_post_close_holding_reviews(self, trade_date: date) -> None:
+        marker = trade_date.isoformat()
+        owners = sorted({row["owner_username"] for row in get_monitored_stocks(self.settings.db_path)})
+        for owner_username in owners:
+            job_state = get_job_state(self.settings.db_path, owner_username, "post_close_holding_review")
+            if job_state and job_state["last_run_marker"] == marker:
+                continue
+            position_map = self._resolve_owner_position_map(owner_username)
+            if not position_map:
+                set_job_state(self.settings.db_path, owner_username, "post_close_holding_review", marker)
+                continue
+            email_settings = get_email_settings(self.settings.db_path, owner_username)
+            quant_config = self._resolve_owner_quant_config(owner_username)
+            snapshots: list[dict[str, Any]] = []
+            for symbol in sorted(position_map):
+                snapshot = self.build_snapshot(
+                    symbol,
+                    selected_models=quant_config["selected_models"],
+                    strategy_params=quant_config["strategy_params"],
+                )
+                upsert_snapshot(
+                    db_path=self.settings.db_path,
+                    owner_username=owner_username,
+                    symbol=snapshot.symbol,
+                    display_name=snapshot.display_name,
+                    latest_price=snapshot.latest_price,
+                    ma_250=snapshot.ma_250,
+                    ma_30w=snapshot.ma_30w,
+                    ma_60w=snapshot.ma_60w,
+                    boll_mid=snapshot.boll_mid,
+                    boll_lower=snapshot.boll_lower,
+                    boll_upper=snapshot.boll_upper,
+                    dividend_yield=snapshot.dividend_yield,
+                    quant_probability=snapshot.quant_probability,
+                    quant_model_breakdown=snapshot.quant_model_breakdown,
+                    trigger_state=snapshot.trigger_state,
+                    trigger_detail=snapshot.trigger_detail,
+                    updated_at=snapshot.updated_at.isoformat(),
+                )
+                snapshots.append({
+                    "symbol": snapshot.symbol,
+                    "display_name": snapshot.display_name,
+                    "latest_price": snapshot.latest_price,
+                    "ma_250": snapshot.ma_250,
+                    "ma_30w": snapshot.ma_30w,
+                    "ma_60w": snapshot.ma_60w,
+                    "boll_mid": snapshot.boll_mid,
+                    "boll_lower": snapshot.boll_lower,
+                    "boll_upper": snapshot.boll_upper,
+                    "dividend_yield": snapshot.dividend_yield,
+                    "quant_probability": snapshot.quant_probability,
+                    "quant_model_breakdown": snapshot.quant_model_breakdown,
+                    "trigger_state": snapshot.trigger_state,
+                    "trigger_detail": snapshot.trigger_detail,
+                    "updated_at": snapshot.updated_at.isoformat(),
+                })
+            portfolio_settings = get_portfolio_settings(self.settings.db_path, owner_username)
+            portfolio_profile = build_portfolio_profile(
+                list_trade_records(self.settings.db_path, owner_username, None),
+                snapshots,
+                float(portfolio_settings["total_investment_amount"] or 0.0),
+            )
+            email_result = send_message(
+                email_settings,
+                subject=f"[收盘持仓复盘] {owner_username} {marker}",
+                body=build_portfolio_review_email_body(
+                    {
+                        "owner_username": owner_username,
+                        "trade_date": marker,
+                        "portfolio_profile": portfolio_profile,
+                    }
+                ),
+            )
+            if not email_result.success:
+                self.last_error_message = f"{owner_username} 收盘持仓复盘邮件发送失败：{email_result.error}"
+            set_job_state(self.settings.db_path, owner_username, "post_close_holding_review", marker)
 
     def _resolve_owner_quant_config(self, owner_username: str) -> dict[str, Any]:
         """Load one user's quant configuration and normalize it for downstream use."""
@@ -656,9 +788,11 @@ class StockMonitor:
     def _prepare_dividend_alerts(self, trade_date: date) -> None:
         marker = trade_date.isoformat()
         snapshot_cache: dict[tuple[str, tuple[str, ...], str], SnapshotComputation] = {}
+        owner_position_cache: dict[str, dict[str, dict[str, Any]]] = {}
         owners = sorted({row["owner_username"] for row in get_monitored_stocks(self.settings.db_path)})
         for owner_username in owners:
             quant_config = self._resolve_owner_quant_config(owner_username)
+            owner_positions = owner_position_cache.setdefault(owner_username, self._resolve_owner_position_map(owner_username))
             cache_suffix = json.dumps(quant_config["strategy_params"], ensure_ascii=False, sort_keys=True)
             job_state = get_job_state(self.settings.db_path, owner_username, "dividend_prep")
             if job_state and job_state["last_run_marker"] == marker:
@@ -673,8 +807,13 @@ class StockMonitor:
                         strategy_params=quant_config["strategy_params"],
                     )
                     snapshot_cache[cache_key] = snapshot
+                stock_advice = build_stock_comprehensive_advice(snapshot.__dict__)
                 high_dividend_state = get_signal_state(self.settings.db_path, owner_username, stock["symbol"], "股息率")
-                if snapshot.dividend_yield >= 4.5 and (high_dividend_state is None or high_dividend_state["last_event_marker"] != marker):
+                if (
+                    snapshot.dividend_yield >= 4.5
+                    and self._should_emit_buy_alert(snapshot, "股息率", stock_advice["action"])
+                    and (high_dividend_state is None or high_dividend_state["last_event_marker"] != marker)
+                ):
                     payload = self._build_pending_payload(
                         owner_username=owner_username,
                         symbol=snapshot.symbol,
@@ -701,7 +840,11 @@ class StockMonitor:
                         pending_payload=payload,
                     )
                 low_dividend_state = get_signal_state(self.settings.db_path, owner_username, stock["symbol"], "低股息率卖出")
-                if 0 < snapshot.dividend_yield < SELL_DIVIDEND_THRESHOLD and (low_dividend_state is None or low_dividend_state["last_event_marker"] != marker):
+                if (
+                    0 < snapshot.dividend_yield < SELL_DIVIDEND_THRESHOLD
+                    and self._should_emit_sell_alert(owner_positions.get(stock["symbol"]), "低股息率卖出")
+                    and (low_dividend_state is None or low_dividend_state["last_event_marker"] != marker)
+                ):
                     payload = self._build_pending_payload(
                         owner_username=owner_username,
                         symbol=snapshot.symbol,
@@ -753,8 +896,13 @@ class StockMonitor:
                         strategy_params=quant_config["strategy_params"],
                     )
                     snapshot_cache[cache_key] = snapshot
+                stock_advice = build_stock_comprehensive_advice(snapshot.__dict__)
                 state = get_signal_state(self.settings.db_path, owner_username, stock["symbol"], "30周/60周均线")
-                if snapshot.weekly_crossed and (state is None or state["last_event_marker"] != marker):
+                if (
+                    snapshot.weekly_crossed
+                    and self._should_emit_buy_alert(snapshot, "30周/60周均线", stock_advice["action"])
+                    and (state is None or state["last_event_marker"] != marker)
+                ):
                     payload = self._build_pending_payload(
                         owner_username=owner_username,
                         symbol=snapshot.symbol,
