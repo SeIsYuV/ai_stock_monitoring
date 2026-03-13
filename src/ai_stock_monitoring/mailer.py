@@ -145,6 +145,33 @@ def build_portfolio_review_email_body(payload: dict[str, Any]) -> str:
     professional_advice = portfolio_profile.get("professional_advice", [])
     risk_reasons = portfolio_profile.get("risk_reasons", [])
 
+    tomorrow_plan: list[str] = []
+    if priority_reduce_positions:
+        tomorrow_plan.append("明日开盘优先执行减仓计划，先处理偏卖出与高风险仓位。")
+    if priority_add_positions:
+        tomorrow_plan.append("若盘中回踩关键支撑，可优先对强势标的分批试探加仓。")
+    if not tomorrow_plan:
+        tomorrow_plan.append("明日以观察为主，先等待关键价位或量价确认后再行动。")
+
+    ranked_positions = sorted(
+        active_positions,
+        key=lambda item: (
+            max(int(item.get("buy_recommendation_level") or 0), int(item.get("sell_recommendation_level") or 0)),
+            float(item.get("weight_pct") or 0.0),
+        ),
+        reverse=True,
+    )
+    top_priority_positions = ranked_positions[:3]
+
+    red_flag_items: list[str] = []
+    for item in active_positions:
+        display_name = item.get("display_name", item.get("symbol", "-"))
+        if item.get("risk_level") == "高":
+            red_flag_items.append(f"{display_name} 风险等级偏高，需优先盯盘。")
+        if item.get("action") == "偏卖出" and float(item.get("weight_pct") or 0.0) >= 20:
+            red_flag_items.append(f"{display_name} 仓位较重且当前偏卖出，注意止盈/止损执行。")
+    red_flag_items.extend(risk_reasons)
+
     lines = [
         f"账号：{payload['owner_username']}",
         f"交易日：{payload['trade_date']}",
@@ -158,6 +185,9 @@ def build_portfolio_review_email_body(payload: dict[str, Any]) -> str:
         f"- 持仓风格：{portfolio_profile.get('holding_style', '-')}",
     ]
 
+    lines.extend(["", "【明日计划】"])
+    lines.extend(f"- {item}" for item in tomorrow_plan)
+
     if overall_adjustment_suggestions:
         lines.extend(["", "【总仓位调整】"])
         lines.extend(f"- {item}" for item in overall_adjustment_suggestions)
@@ -169,6 +199,13 @@ def build_portfolio_review_email_body(payload: dict[str, Any]) -> str:
     if priority_add_positions:
         lines.extend(["", "【优先加仓】"])
         lines.extend(f"- {item}" for item in priority_add_positions)
+
+    if top_priority_positions:
+        lines.extend(["", "【高优先级股票 TOP3】"])
+        for item in top_priority_positions:
+            lines.append(
+                f"- {item.get('display_name', item.get('symbol', '-'))}：动作 {item.get('action', '-')} ｜ 仓位 {float(item.get('weight_pct', 0.0)):.2f}% ｜ 买入 {item.get('buy_recommendation_level', '-')}/10 ｜ 卖出 {item.get('sell_recommendation_level', '-')}/10"
+            )
 
     lines.extend(["", "【持仓逐只建议】"])
     for item in active_positions:
@@ -196,9 +233,9 @@ def build_portfolio_review_email_body(payload: dict[str, Any]) -> str:
         lines.extend(["", "【专业综合分析】"])
         lines.extend(f"- {item}" for item in professional_advice)
 
-    if risk_reasons:
-        lines.extend(["", "【风险提示】"])
-        lines.extend(f"- {item}" for item in risk_reasons)
+    if red_flag_items:
+        lines.extend(["", "【风险红灯项】"])
+        lines.extend(f"- {item}" for item in dict.fromkeys(red_flag_items))
 
     lines.extend(["", "本系统仅为监控参考，不构成任何投资建议。"])
     return "\n".join(lines)

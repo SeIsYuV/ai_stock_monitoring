@@ -22,7 +22,13 @@ from typing import Any
 
 SELL_DIVIDEND_THRESHOLD = 3.5
 QUANT_SELL_PROBABILITY_THRESHOLD = 35.0
+BUY_ALERT_MIN_LEVEL = 7
+BUY_ALERT_MIN_QUANT_PROBABILITY = 60.0
+BUY_ALERT_STRONG_QUANT_PROBABILITY = 80.0
+BUY_ALERT_DIVIDEND_CONFIRMATION_QUANT = 78.0
+BUY_ALERT_WEEKLY_CONFIRMATION_QUANT = 70.0
 BUY_TRIGGER_TYPES = {"250日线", "BOLL中轨", "BOLL下轨", "股息率", "30周/60周均线", "量化盈利概率"}
+PRICE_SUPPORT_TRIGGER_TYPES = {"250日线", "BOLL中轨", "BOLL下轨"}
 SELL_TRIGGER_TYPES = {"BOLL上轨卖出", "低股息率卖出", "量化走弱卖出"}
 
 from .config import AppSettings
@@ -508,7 +514,6 @@ class StockMonitor:
                     updated_at=snapshot.updated_at.isoformat(),
                 )
                 stock_advice = build_stock_comprehensive_advice(snapshot.__dict__)
-                buy_alert_enabled = stock_advice["action"] == "偏买入"
                 position_summary = owner_positions.get(symbol)
                 self._process_intraday_signal(
                     owner_username=owner_username,
@@ -516,7 +521,7 @@ class StockMonitor:
                     display_name=snapshot.display_name,
                     trigger_type="250日线",
                     trade_marker=trade_marker,
-                    condition_met=bool(snapshot.ma_250 and snapshot.latest_price <= snapshot.ma_250 and self._should_emit_buy_alert(snapshot, "250日线", stock_advice["action"])),
+                    condition_met=bool(snapshot.ma_250 and snapshot.latest_price <= snapshot.ma_250 and self._should_emit_buy_alert(snapshot, "250日线", stock_advice)),
                     detail=snapshot.trigger_detail,
                     current_price=snapshot.latest_price,
                     indicator_values={
@@ -532,7 +537,7 @@ class StockMonitor:
                     display_name=snapshot.display_name,
                     trigger_type="BOLL中轨",
                     trade_marker=trade_marker,
-                    condition_met=bool(snapshot.boll_mid and snapshot.latest_price <= snapshot.boll_mid and self._should_emit_buy_alert(snapshot, "BOLL中轨", stock_advice["action"])),
+                    condition_met=bool(snapshot.boll_mid and snapshot.latest_price <= snapshot.boll_mid and self._should_emit_buy_alert(snapshot, "BOLL中轨", stock_advice)),
                     detail=snapshot.trigger_detail,
                     current_price=snapshot.latest_price,
                     indicator_values={
@@ -548,7 +553,7 @@ class StockMonitor:
                     display_name=snapshot.display_name,
                     trigger_type="BOLL下轨",
                     trade_marker=trade_marker,
-                    condition_met=bool(snapshot.boll_lower and snapshot.latest_price <= snapshot.boll_lower and self._should_emit_buy_alert(snapshot, "BOLL下轨", stock_advice["action"])),
+                    condition_met=bool(snapshot.boll_lower and snapshot.latest_price <= snapshot.boll_lower and self._should_emit_buy_alert(snapshot, "BOLL下轨", stock_advice)),
                     detail=snapshot.trigger_detail,
                     current_price=snapshot.latest_price,
                     indicator_values={
@@ -582,7 +587,7 @@ class StockMonitor:
                         display_name=snapshot.display_name,
                         trigger_type="量化盈利概率",
                         trade_marker=trade_marker,
-                        condition_met=bool(snapshot.quant_probability >= threshold and buy_alert_enabled and self._should_emit_buy_alert(snapshot, "量化盈利概率", stock_advice["action"])),
+                        condition_met=bool(snapshot.quant_probability >= threshold and self._should_emit_buy_alert(snapshot, "量化盈利概率", stock_advice)),
                         detail=f"{snapshot.trigger_detail} | 量化阈值 {threshold:.2f}%",
                         current_price=snapshot.latest_price,
                         indicator_values={
@@ -630,14 +635,56 @@ class StockMonitor:
         return position_map
 
     @staticmethod
-    def _should_emit_buy_alert(snapshot: SnapshotComputation, trigger_type: str, action: str) -> bool:
+    def _should_emit_buy_alert(
+        snapshot: SnapshotComputation,
+        trigger_type: str,
+        stock_advice: dict[str, Any],
+    ) -> bool:
         if trigger_type not in BUY_TRIGGER_TYPES:
             return False
-        if action != "偏买入":
+        if stock_advice.get("action") != "偏买入":
             return False
+
+        triggered_labels = set(snapshot.triggered_labels)
+        if trigger_type != "量化盈利概率" and trigger_type not in triggered_labels:
+            return False
+
+        buy_level = int(stock_advice.get("buy_recommendation_level") or 0)
+        quant_probability = float(snapshot.quant_probability or 0.0)
+        sell_signals = set(stock_advice.get("sell_signals") or ())
+        support_triggers = triggered_labels & PRICE_SUPPORT_TRIGGER_TYPES
+        has_dividend_support = "股息率" in triggered_labels
+        has_weekly_support = "30周/60周均线" in triggered_labels
+
+        if buy_level < BUY_ALERT_MIN_LEVEL:
+            return False
+        if quant_probability < BUY_ALERT_MIN_QUANT_PROBABILITY:
+            return False
+        if sell_signals:
+            return False
+
         if trigger_type == "量化盈利概率":
-            return any(label in BUY_TRIGGER_TYPES - {"量化盈利概率"} for label in snapshot.triggered_labels)
-        return trigger_type in snapshot.triggered_labels
+            return bool(len(support_triggers) >= 2 or has_dividend_support or has_weekly_support)
+        if trigger_type in PRICE_SUPPORT_TRIGGER_TYPES:
+            return (
+                len(support_triggers) >= 2
+                or has_dividend_support
+                or has_weekly_support
+                or quant_probability >= BUY_ALERT_STRONG_QUANT_PROBABILITY
+            )
+        if trigger_type == "股息率":
+            return bool(
+                support_triggers
+                or has_weekly_support
+                or quant_probability >= BUY_ALERT_DIVIDEND_CONFIRMATION_QUANT
+            )
+        if trigger_type == "30周/60周均线":
+            return bool(
+                support_triggers
+                or has_dividend_support
+                or quant_probability >= BUY_ALERT_WEEKLY_CONFIRMATION_QUANT
+            )
+        return False
 
     @staticmethod
     def _should_emit_sell_alert(position_summary: dict[str, Any] | None, trigger_type: str) -> bool:
@@ -811,7 +858,7 @@ class StockMonitor:
                 high_dividend_state = get_signal_state(self.settings.db_path, owner_username, stock["symbol"], "股息率")
                 if (
                     snapshot.dividend_yield >= 4.5
-                    and self._should_emit_buy_alert(snapshot, "股息率", stock_advice["action"])
+                    and self._should_emit_buy_alert(snapshot, "股息率", stock_advice)
                     and (high_dividend_state is None or high_dividend_state["last_event_marker"] != marker)
                 ):
                     payload = self._build_pending_payload(
@@ -900,7 +947,7 @@ class StockMonitor:
                 state = get_signal_state(self.settings.db_path, owner_username, stock["symbol"], "30周/60周均线")
                 if (
                     snapshot.weekly_crossed
-                    and self._should_emit_buy_alert(snapshot, "30周/60周均线", stock_advice["action"])
+                    and self._should_emit_buy_alert(snapshot, "30周/60周均线", stock_advice)
                     and (state is None or state["last_event_marker"] != marker)
                 ):
                     payload = self._build_pending_payload(

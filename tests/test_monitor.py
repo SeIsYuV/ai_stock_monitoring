@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from src.ai_stock_monitoring.app import _format_snapshot_timestamp, create_app
 from src.ai_stock_monitoring.config import AppSettings
 from src.ai_stock_monitoring.database import add_trade_record, get_alert_history, get_login_unlock_code, get_snapshot, get_user, initialize_database, list_recent_login_events, list_trade_records, upsert_snapshot
+from src.ai_stock_monitoring.mailer import build_portfolio_review_email_body
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
 from src.ai_stock_monitoring.monitor import (
     SnapshotComputation,
@@ -653,6 +654,27 @@ class MonitorTests(unittest.TestCase):
     def test_quant_settings_and_alerts_work(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
             app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            quant_snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=99.0,
+                ma_250=100.0,
+                ma_30w=110.0,
+                ma_60w=100.0,
+                prev_ma_30w=109.0,
+                prev_ma_60w=99.0,
+                boll_mid=100.0,
+                boll_lower=96.0,
+                boll_upper=110.0,
+                dividend_yield=5.0,
+                quant_probability=92.0,
+                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 92}, {"label": "周线共振", "score": 88}], ensure_ascii=False),
+                trigger_state="250日线、股息率",
+                trigger_detail="测试量化提醒-强确认",
+                triggered_labels=("250日线", "股息率"),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-12T10:00:00+08:00"),
+            )
             with TestClient(app) as client:
                 client.post(
                     "/login",
@@ -679,7 +701,8 @@ class MonitorTests(unittest.TestCase):
                     follow_redirects=False,
                 )
                 self.assertEqual(settings_response.status_code, 303)
-                app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T10:00:00+08:00"))
+                with patch.object(app.state.monitor, "build_snapshot", return_value=quant_snapshot):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T10:00:00+08:00"))
                 dashboard = client.get("/dashboard")
                 self.assertIn("量化盈利概率", dashboard.text)
                 history = client.get("/history")
@@ -905,6 +928,27 @@ class MonitorTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
             settings = AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=())
             app = create_app(settings)
+            quant_snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=99.0,
+                ma_250=100.0,
+                ma_30w=110.0,
+                ma_60w=100.0,
+                prev_ma_30w=109.0,
+                prev_ma_60w=99.0,
+                boll_mid=100.0,
+                boll_lower=96.0,
+                boll_upper=110.0,
+                dividend_yield=5.0,
+                quant_probability=92.0,
+                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 92}, {"label": "周线共振", "score": 88}], ensure_ascii=False),
+                trigger_state="250日线、股息率",
+                trigger_detail="测试量化提醒-同日去重",
+                triggered_labels=("250日线", "股息率"),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-12T10:00:00+08:00"),
+            )
             with TestClient(app) as client:
                 client.post(
                     "/login",
@@ -942,8 +986,9 @@ class MonitorTests(unittest.TestCase):
                 )
                 self.assertEqual(quant_response.status_code, 303)
 
-                app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T10:00:00+08:00"))
-                app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T14:00:00+08:00"))
+                with patch.object(app.state.monitor, "build_snapshot", return_value=quant_snapshot):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T10:00:00+08:00"))
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T14:00:00+08:00"))
 
                 alerts = [
                     row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
@@ -1058,6 +1103,78 @@ class MonitorTests(unittest.TestCase):
                 self.assertEqual(alert_types.count("250日线"), 1)
                 self.assertEqual(alert_types.count("BOLL中轨"), 1)
 
+    def test_buy_alerts_skip_single_technical_signal_without_confirmation(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=99.0,
+                ma_250=100.0,
+                ma_30w=110.0,
+                ma_60w=100.0,
+                prev_ma_30w=109.0,
+                prev_ma_60w=99.0,
+                boll_mid=95.0,
+                boll_lower=92.0,
+                boll_upper=110.0,
+                dividend_yield=2.5,
+                quant_probability=72.0,
+                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 72}, {"label": "周线共振", "score": 68}], ensure_ascii=False),
+                trigger_state="250日线",
+                trigger_detail="测试买入提醒-单一技术信号",
+                triggered_labels=("250日线",),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
+            )
+            with TestClient(app) as client:
+                client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
+                client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
+                client.post("/settings/quant", data={"enabled": "1", "probability_threshold": "50"}, follow_redirects=False)
+                with patch.object(app.state.monitor, "build_snapshot", return_value=snapshot):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:00:00+08:00"))
+                alerts = [
+                    row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
+                    if row["trigger_type"] in {"250日线", "量化盈利概率"}
+                ]
+                self.assertEqual(len(alerts), 0)
+
+    def test_buy_alerts_skip_when_quant_is_weak_or_sell_conflicts_exist(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=94.0,
+                ma_250=100.0,
+                ma_30w=110.0,
+                ma_60w=100.0,
+                prev_ma_30w=109.0,
+                prev_ma_60w=99.0,
+                boll_mid=98.0,
+                boll_lower=95.0,
+                boll_upper=110.0,
+                dividend_yield=5.0,
+                quant_probability=45.0,
+                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 45}, {"label": "周线共振", "score": 42}], ensure_ascii=False),
+                trigger_state="250日线、BOLL中轨、BOLL下轨、股息率",
+                trigger_detail="测试买入提醒-量化偏弱",
+                triggered_labels=("250日线", "BOLL中轨", "BOLL下轨", "股息率"),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
+            )
+            with TestClient(app) as client:
+                client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
+                client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
+                client.post("/settings/quant", data={"enabled": "1", "probability_threshold": "40"}, follow_redirects=False)
+                with patch.object(app.state.monitor, "build_snapshot", return_value=snapshot):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:00:00+08:00"))
+                alerts = [
+                    row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
+                    if row["trigger_type"] in {"250日线", "BOLL中轨", "BOLL下轨", "股息率", "量化盈利概率"}
+                ]
+                self.assertEqual(len(alerts), 0)
+
     def test_post_close_holding_review_email_is_sent_once_per_day(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
             app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
@@ -1083,6 +1200,80 @@ class MonitorTests(unittest.TestCase):
                     app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T15:20:00+08:00"))
                 review_calls = [call for call in mocked_send.call_args_list if "收盘持仓复盘" in call.kwargs.get("subject", "")]
                 self.assertEqual(len(review_calls), 1)
+
+    def test_portfolio_review_email_contains_report_sections(self) -> None:
+        body = build_portfolio_review_email_body(
+            {
+                "owner_username": "admin",
+                "trade_date": "2026-03-13",
+                "portfolio_profile": {
+                    "comprehensive_advice": "建议先控仓，再分批处理强弱仓位。",
+                    "holding_ratio": 62.5,
+                    "recommended_holding_ratio": "40% - 60%",
+                    "risk_level": "中",
+                    "holding_style": "均衡配置型",
+                    "overall_adjustment_suggestions": ["总仓位略高，先回到中性仓位。"],
+                    "priority_reduce_positions": ["优先减仓 贵州茅台"],
+                    "priority_add_positions": ["优先加仓 中国平安"],
+                    "professional_advice": ["短线先看强弱切换，中线继续跟踪估值安全边际。"],
+                    "risk_reasons": ["前排重仓股占比不低。"],
+                    "active_positions": [
+                        {
+                            "symbol": "600519",
+                            "display_name": "贵州茅台",
+                            "latest_price": 1450.0,
+                            "weight_pct": 28.0,
+                            "action": "偏卖出",
+                            "risk_level": "高",
+                            "recommended_buy_price_range": "1380.00 - 1405.00",
+                            "recommended_sell_price_range": "1475.00 - 1505.00",
+                            "buy_recommendation_level": 4,
+                            "sell_recommendation_level": 8,
+                            "watch_price_range": "1400.00 - 1470.00",
+                            "advice_dcf_line": "DCF：内在价值 1520.00，偏差 4.83%",
+                        },
+                        {
+                            "symbol": "601318",
+                            "display_name": "中国平安",
+                            "latest_price": 52.35,
+                            "weight_pct": 18.0,
+                            "action": "偏买入",
+                            "risk_level": "中",
+                            "recommended_buy_price_range": "50.00 - 51.20",
+                            "recommended_sell_price_range": "56.50 - 58.00",
+                            "buy_recommendation_level": 9,
+                            "sell_recommendation_level": 3,
+                            "watch_price_range": "50.80 - 53.50",
+                            "advice_dcf_line": "DCF：内在价值 57.20，偏差 9.27%",
+                        },
+                        {
+                            "symbol": "600036",
+                            "display_name": "招商银行",
+                            "latest_price": 41.86,
+                            "weight_pct": 14.0,
+                            "action": "中性",
+                            "risk_level": "低",
+                            "recommended_buy_price_range": "39.80 - 40.60",
+                            "recommended_sell_price_range": "44.80 - 46.00",
+                            "buy_recommendation_level": 6,
+                            "sell_recommendation_level": 5,
+                            "watch_price_range": "40.20 - 42.30",
+                            "advice_dcf_line": "DCF：内在价值 45.10，偏差 7.74%",
+                        }
+                    ],
+                },
+            }
+        )
+        self.assertIn("【组合总览】", body)
+        self.assertIn("【明日计划】", body)
+        self.assertIn("【优先减仓】", body)
+        self.assertIn("【优先加仓】", body)
+        self.assertIn("【高优先级股票 TOP3】", body)
+        self.assertIn("【明日关注位】", body)
+        self.assertIn("【风险红灯项】", body)
+        self.assertIn("中国平安：动作 偏买入 ｜ 仓位 18.00% ｜ 买入 9/10 ｜ 卖出 3/10", body)
+        self.assertIn("贵州茅台 风险等级偏高，需优先盯盘。", body)
+        self.assertIn("贵州茅台：关注 1400.00 - 1470.00", body)
 
     def test_mock_dividend_yield_uses_last_year_dividend_per_share(self) -> None:
         monitor = StockMonitor(AppSettings(provider_name="mock"))
