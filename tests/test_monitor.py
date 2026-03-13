@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from src.ai_stock_monitoring.app import _format_snapshot_timestamp, create_app
 from src.ai_stock_monitoring.config import AppSettings
 from src.ai_stock_monitoring.database import add_trade_record, get_alert_history, get_login_unlock_code, get_snapshot, get_user, initialize_database, list_recent_login_events, list_trade_records, upsert_snapshot
-from src.ai_stock_monitoring.mailer import build_portfolio_review_email_body
+from src.ai_stock_monitoring.mailer import build_alert_email_body, build_portfolio_review_email_body
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
 from src.ai_stock_monitoring.monitor import (
     SnapshotComputation,
@@ -150,6 +150,8 @@ class MonitorTests(unittest.TestCase):
         self.assertGreater(plan["suggested_stop_loss_price"], 0)
         self.assertTrue(plan["buy_price_plan"])
         self.assertTrue(plan["watch_price_plan"])
+        watch_left, watch_right = [float(item.strip()) for item in plan["watch_price_range"].split("-")]
+        self.assertLess(watch_right - watch_left, 0.2)
 
 
     def test_build_portfolio_profile_summarizes_holdings(self) -> None:
@@ -1468,6 +1470,28 @@ class MonitorTests(unittest.TestCase):
                 review_calls = [call for call in mocked_send.call_args_list if "收盘持仓复盘" in call.kwargs.get("subject", "")]
                 self.assertEqual(len(review_calls), 1)
 
+    def test_alert_email_body_contains_market_context(self) -> None:
+        body = build_alert_email_body(
+            {
+                "symbol": "600519",
+                "display_name": "贵州茅台",
+                "trigger_type": "250日线",
+                "current_price": 1450.0,
+                "detail": "测试提醒详情",
+                "triggered_at": "2026-03-13T10:00:00+08:00",
+                "market_environment": "偏弱",
+                "market_bias_score": -24,
+                "industry_name": "白酒",
+                "industry_environment": "偏弱",
+                "latest_volume_ratio": 0.78,
+                "earnings_phase": "财报窗口临近",
+            }
+        )
+        self.assertIn("环境因子：大盘 偏弱(-24)", body)
+        self.assertIn("行业 白酒 偏弱", body)
+        self.assertIn("量能比 0.78", body)
+        self.assertIn("财报节奏 财报窗口临近", body)
+
     def test_portfolio_review_email_contains_report_sections(self) -> None:
         body = build_portfolio_review_email_body(
             {
@@ -1497,6 +1521,12 @@ class MonitorTests(unittest.TestCase):
                             "buy_recommendation_level": 4,
                             "sell_recommendation_level": 8,
                             "watch_price_range": "1400.00 - 1470.00",
+                            "market_environment": "偏弱",
+                            "market_bias_score": -24.0,
+                            "industry_name": "白酒",
+                            "industry_environment": "偏弱",
+                            "latest_volume_ratio": 0.78,
+                            "earnings_phase": "财报窗口临近",
                             "advice_dcf_line": "DCF：内在价值 1520.00，偏差 4.83%",
                         },
                         {
@@ -1511,6 +1541,12 @@ class MonitorTests(unittest.TestCase):
                             "buy_recommendation_level": 9,
                             "sell_recommendation_level": 3,
                             "watch_price_range": "50.80 - 53.50",
+                            "market_environment": "中性",
+                            "market_bias_score": 2.0,
+                            "industry_name": "保险",
+                            "industry_environment": "偏强",
+                            "latest_volume_ratio": 1.18,
+                            "earnings_phase": "常规窗口",
                             "advice_dcf_line": "DCF：内在价值 57.20，偏差 9.27%",
                         },
                         {
@@ -1525,6 +1561,12 @@ class MonitorTests(unittest.TestCase):
                             "buy_recommendation_level": 6,
                             "sell_recommendation_level": 5,
                             "watch_price_range": "40.20 - 42.30",
+                            "market_environment": "中性",
+                            "market_bias_score": 1.0,
+                            "industry_name": "银行",
+                            "industry_environment": "中性",
+                            "latest_volume_ratio": 0.96,
+                            "earnings_phase": "常规窗口",
                             "advice_dcf_line": "DCF：内在价值 45.10，偏差 7.74%",
                         }
                     ],
@@ -1541,6 +1583,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("中国平安：动作 偏买入 ｜ 仓位 18.00% ｜ 买入 9/10 ｜ 卖出 3/10", body)
         self.assertIn("贵州茅台 风险等级偏高，需优先盯盘。", body)
         self.assertIn("贵州茅台：关注 1400.00 - 1470.00", body)
+        self.assertIn("环境：大盘 偏弱(-24) ｜ 行业 白酒 偏弱 ｜ 量能比 0.78 ｜ 财报节奏 财报窗口临近", body)
 
     def test_mock_dividend_yield_uses_last_year_dividend_per_share(self) -> None:
         monitor = StockMonitor(AppSettings(provider_name="mock"))

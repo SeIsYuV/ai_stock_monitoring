@@ -365,6 +365,57 @@ def _format_price_range(levels: list[float], padding_pct: float = 0.012) -> str:
 
 
 
+def _select_focus_levels(
+    levels: list[float],
+    reference_price: float,
+    *,
+    side: str,
+    tolerance_pct: float = 0.035,
+    max_pair_spread_pct: float = 0.02,
+) -> list[float]:
+    cleaned = _deduplicate_prices(levels)
+    if not cleaned:
+        return []
+    if reference_price <= 0:
+        return cleaned[:1]
+
+    if side == "buy":
+        candidates = [level for level in cleaned if level <= reference_price * (1 + tolerance_pct)] or cleaned[:]
+        candidates.sort(key=lambda level: (abs(reference_price - level), -level))
+    else:
+        candidates = [level for level in cleaned if level >= reference_price * (1 - tolerance_pct)] or cleaned[:]
+        candidates.sort(key=lambda level: (abs(reference_price - level), level))
+
+    focus = [candidates[0]]
+    for candidate in candidates[1:]:
+        if len(focus) >= 2:
+            break
+        spread_pct = abs(candidate - focus[0]) / max(reference_price, focus[0], 1)
+        if spread_pct <= max_pair_spread_pct:
+            focus.append(candidate)
+            break
+    return sorted(_deduplicate_prices(focus))
+
+
+
+def _format_focus_price_range(
+    levels: list[float],
+    reference_price: float,
+    *,
+    side: str,
+    single_padding_pct: float = 0.006,
+    pair_padding_pct: float = 0.004,
+) -> str:
+    focus_levels = _select_focus_levels(levels, reference_price, side=side)
+    if not focus_levels:
+        return "暂无明确价位"
+    if len(focus_levels) == 1:
+        value = focus_levels[0]
+        return f"{value * (1 - single_padding_pct):.2f} - {value * (1 + single_padding_pct):.2f}"
+    return f"{min(focus_levels) * (1 - pair_padding_pct):.2f} - {max(focus_levels) * (1 + pair_padding_pct):.2f}"
+
+
+
 def build_recommended_price_plan(
     snapshot: Mapping[str, Any],
     signal_summary: Mapping[str, Any],
@@ -395,16 +446,33 @@ def build_recommended_price_plan(
         )
     )
 
-    below_or_equal_supports = [level for level in support_levels if latest_price <= 0 or level <= latest_price * 1.03]
-    primary_buy_levels = below_or_equal_supports or support_levels[:2]
-    primary_sell_levels = [level for level in resistance_levels if level >= latest_price * 0.99] or resistance_levels[-2:]
+    below_or_equal_supports = [level for level in support_levels if latest_price <= 0 or level <= latest_price]
+    near_supports = below_or_equal_supports or [level for level in support_levels if level <= latest_price * 1.01] or support_levels[:1]
+    primary_buy_levels = _select_focus_levels(near_supports, latest_price, side="buy")
+    above_or_equal_resistances = [level for level in resistance_levels if level >= latest_price]
+    near_resistances = above_or_equal_resistances or [level for level in resistance_levels if level >= latest_price * 0.995] or resistance_levels[-1:]
+    primary_sell_levels = _select_focus_levels(near_resistances, latest_price, side="sell")
+
+    watch_candidates = _positive_price_levels(boll_lower, ma_250, boll_mid, boll_upper)
+    if action == "偏买入":
+        buy_watch_candidates = near_supports or watch_candidates
+        focus_watch_levels = _select_focus_levels(buy_watch_candidates, latest_price, side="buy", tolerance_pct=0.02, max_pair_spread_pct=0.012)
+    elif action == "偏卖出":
+        sell_watch_candidates = near_resistances or watch_candidates
+        focus_watch_levels = _select_focus_levels(sell_watch_candidates, latest_price, side="sell", tolerance_pct=0.02, max_pair_spread_pct=0.012)
+    else:
+        nearest_watch = sorted(
+            _deduplicate_prices(watch_candidates),
+            key=lambda level: (abs(latest_price - level), abs(level - latest_price) / max(latest_price, 1)),
+        )
+        focus_watch_levels = _select_focus_levels(nearest_watch[:2], latest_price, side="buy" if latest_price <= (boll_mid or latest_price) else "sell", tolerance_pct=0.025, max_pair_spread_pct=0.012)
 
     breakout_watch = max(_positive_price_levels(ma_250, boll_mid, latest_price), default=0.0)
     defense_watch = min(_positive_price_levels(boll_lower, ma_250, boll_mid), default=0.0)
 
-    buy_range = _format_price_range(primary_buy_levels)
-    sell_range = _format_price_range(primary_sell_levels)
-    watch_range = _format_price_range(_positive_price_levels(breakout_watch, defense_watch), padding_pct=0.0)
+    buy_range = _format_focus_price_range(primary_buy_levels, latest_price, side="buy")
+    sell_range = _format_focus_price_range(primary_sell_levels, latest_price, side="sell")
+    watch_range = _format_focus_price_range(focus_watch_levels, latest_price, side="buy" if action != "偏卖出" else "sell", single_padding_pct=0.005, pair_padding_pct=0.003)
     suggested_add_price = round(max(primary_buy_levels), 2) if primary_buy_levels else 0.0
     suggested_reduce_price = round(min(primary_sell_levels), 2) if primary_sell_levels else 0.0
     stop_loss_base = min(_positive_price_levels(boll_lower, ma_250, average_cost, boll_mid), default=0.0)
@@ -441,8 +509,8 @@ def build_recommended_price_plan(
         watch_price_plan.append(f"向上关注价：{breakout_watch:.2f}，站稳后再看是否形成新一轮上攻。")
     if defense_watch > 0:
         watch_price_plan.append(f"向下防守价：{defense_watch:.2f}，跌破后需重新评估仓位与节奏。")
-    if action == "观望" and breakout_watch > 0 and defense_watch > 0:
-        watch_price_plan.append(f"当前更适合观望，重点观察 {watch_range} 这组确认/防守价位。")
+    if action == "观望" and watch_range != "暂无明确价位":
+        watch_price_plan.append(f"当前更适合观望，重点观察 {watch_range} 这一组高价值确认位。")
     elif action == "偏买入":
         watch_price_plan.append("当前偏买入，但仍应等待回踩确认，不建议直接追涨。")
     elif action == "偏卖出":

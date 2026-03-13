@@ -16,6 +16,20 @@ class EmailDeliveryResult:
     error: str | None = None
 
 
+def _format_market_context_line(payload: dict[str, Any]) -> str:
+    market_environment = str(payload.get("market_environment") or "中性")
+    market_bias_score = float(payload.get("market_bias_score") or 0.0)
+    industry_name = str(payload.get("industry_name") or "-")
+    industry_environment = str(payload.get("industry_environment") or "中性")
+    latest_volume_ratio = float(payload.get("latest_volume_ratio") or 1.0)
+    earnings_phase = str(payload.get("earnings_phase") or "常规窗口")
+    return (
+        f"大盘 {market_environment}({market_bias_score:.0f}) ｜ "
+        f"行业 {industry_name} {industry_environment} ｜ "
+        f"量能比 {latest_volume_ratio:.2f} ｜ 财报节奏 {earnings_phase}"
+    )
+
+
 def send_message(email_settings: Any, subject: str, body: str) -> EmailDeliveryResult:
     """Send one SMTP email using the credentials configured in the Web UI."""
     if not email_settings["recipient_email"]:
@@ -43,14 +57,20 @@ def send_message(email_settings: Any, subject: str, body: str) -> EmailDeliveryR
 
 
 def build_alert_email_body(payload: dict[str, Any]) -> str:
-    return (
-        f"股票：{payload['symbol']} {payload['display_name']}\n"
-        f"触发类型：{payload['trigger_type']}\n"
-        f"当前价格：{payload['current_price']:.2f}\n"
-        f"指标详情：{payload['detail']}\n"
-        f"触发时间：{payload['triggered_at']}\n"
-        "\n本系统仅为监控参考，不构成任何投资建议。"
-    )
+    lines = [
+        f"股票：{payload['symbol']} {payload['display_name']}",
+        f"触发类型：{payload['trigger_type']}",
+        f"当前价格：{payload['current_price']:.2f}",
+    ]
+    if any(payload.get(key) is not None for key in ("market_environment", "industry_environment", "latest_volume_ratio", "earnings_phase")):
+        lines.append(f"环境因子：{_format_market_context_line(payload)}")
+    lines.extend([
+        f"指标详情：{payload['detail']}",
+        f"触发时间：{payload['triggered_at']}",
+        "",
+        "本系统仅为监控参考，不构成任何投资建议。",
+    ])
+    return "\n".join(lines)
 
 
 def build_test_email_body(username: str, recipient_email: str) -> str:
@@ -95,6 +115,7 @@ def build_trade_analysis_email_body(payload: dict[str, Any]) -> str:
         f"- 买点｜{advice_card.get('buy', analysis.get('recommended_buy_price_range', '暂无明确价位'))}",
         f"- 卖点｜{advice_card.get('sell', analysis.get('recommended_sell_price_range', '暂无明确价位'))}",
         f"- DCF｜{advice_card.get('dcf', dcf_line)}",
+        f"- 环境｜{_format_market_context_line(market_snapshot)}",
         f"- 观望｜{analysis.get('watch_price_range', '暂无明确价位')}",
         "",
         "【判断依据】",
@@ -215,6 +236,7 @@ def build_portfolio_review_email_body(payload: dict[str, Any]) -> str:
             f"  买点：{item.get('recommended_buy_price_range', '-')} ｜ 买入等级 {item.get('buy_recommendation_level', '-')}/10",
             f"  卖点：{item.get('recommended_sell_price_range', '-')} ｜ 卖出等级 {item.get('sell_recommendation_level', '-')}/10",
             f"  明日关注位：{item.get('watch_price_range', '-')}",
+            f"  环境：{_format_market_context_line(item)}",
             f"  DCF：{item.get('advice_dcf_line', item.get('dcf_reason', '-'))}",
         ])
 
