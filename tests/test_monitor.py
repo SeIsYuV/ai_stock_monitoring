@@ -78,6 +78,8 @@ class MonitorTests(unittest.TestCase):
                 self.assertTrue("买入｜" in dashboard_response.text or "卖出｜" in dashboard_response.text)
                 self.assertIn("买点", dashboard_response.text)
                 self.assertIn("卖点", dashboard_response.text)
+                self.assertIn("大盘", dashboard_response.text)
+                self.assertIn("量能比", dashboard_response.text)
                 self.assertIn("dashboard-current-time", dashboard_response.text)
                 self.assertIn("dashboard-refresh-countdown", dashboard_response.text)
 
@@ -276,6 +278,8 @@ class MonitorTests(unittest.TestCase):
                 response = client.get("/stocks/600519")
                 self.assertEqual(response.status_code, 200)
                 self.assertIn("DCF 代理内在价值", response.text)
+                self.assertIn("大盘环境", response.text)
+                self.assertIn("财报节奏", response.text)
 
     def test_trades_analysis_route_renders(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
@@ -1174,6 +1178,269 @@ class MonitorTests(unittest.TestCase):
                     if row["trigger_type"] in {"250日线", "BOLL中轨", "BOLL下轨", "股息率", "量化盈利概率"}
                 ]
                 self.assertEqual(len(alerts), 0)
+
+    def test_buy_alerts_skip_when_expected_upside_is_too_small(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=108.0,
+                ma_250=110.0,
+                ma_30w=115.0,
+                ma_60w=100.0,
+                prev_ma_30w=114.0,
+                prev_ma_60w=99.0,
+                boll_mid=109.0,
+                boll_lower=107.0,
+                boll_upper=111.0,
+                dividend_yield=5.0,
+                quant_probability=90.0,
+                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 90}, {"label": "周线共振", "score": 86}], ensure_ascii=False),
+                trigger_state="250日线、BOLL中轨、股息率",
+                trigger_detail="测试买入提醒-上涨空间不足",
+                triggered_labels=("250日线", "BOLL中轨", "股息率"),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
+            )
+            with TestClient(app) as client:
+                client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
+                client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
+                client.post("/settings/quant", data={"enabled": "1", "probability_threshold": "50"}, follow_redirects=False)
+                with patch.object(app.state.monitor, "build_snapshot", return_value=snapshot):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:00:00+08:00"))
+                alerts = [
+                    row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
+                    if row["trigger_type"] in {"250日线", "BOLL中轨", "股息率", "量化盈利概率"}
+                ]
+                self.assertEqual(len(alerts), 0)
+
+    def test_buy_alerts_skip_when_market_environment_is_weak(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=99.0,
+                ma_250=100.0,
+                ma_30w=110.0,
+                ma_60w=100.0,
+                prev_ma_30w=109.0,
+                prev_ma_60w=99.0,
+                boll_mid=100.0,
+                boll_lower=96.0,
+                boll_upper=110.0,
+                dividend_yield=5.0,
+                quant_probability=76.0,
+                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 76}, {"label": "周线共振", "score": 72}], ensure_ascii=False),
+                trigger_state="250日线、BOLL中轨、股息率",
+                trigger_detail="测试买入提醒-弱市过滤",
+                triggered_labels=("250日线", "BOLL中轨", "股息率"),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
+                market_environment="偏弱",
+                market_bias_score=-26.0,
+                industry_environment="偏弱",
+                industry_bias_score=-18.0,
+            )
+            with TestClient(app) as client:
+                client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
+                client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
+                client.post("/settings/quant", data={"enabled": "1", "probability_threshold": "50"}, follow_redirects=False)
+                with patch.object(app.state.monitor, "build_snapshot", return_value=snapshot):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:00:00+08:00"))
+                alerts = [
+                    row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
+                    if row["trigger_type"] in {"250日线", "BOLL中轨", "股息率", "量化盈利概率"}
+                ]
+                self.assertEqual(len(alerts), 0)
+
+    def test_buy_alerts_skip_when_volume_confirmation_is_missing(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=99.0,
+                ma_250=100.0,
+                ma_30w=110.0,
+                ma_60w=100.0,
+                prev_ma_30w=109.0,
+                prev_ma_60w=99.0,
+                boll_mid=100.0,
+                boll_lower=96.0,
+                boll_upper=110.0,
+                dividend_yield=5.0,
+                quant_probability=88.0,
+                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 88}, {"label": "周线共振", "score": 84}], ensure_ascii=False),
+                trigger_state="250日线、BOLL中轨、股息率",
+                trigger_detail="测试买入提醒-缩量过滤",
+                triggered_labels=("250日线", "BOLL中轨", "股息率"),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
+                latest_volume_ratio=0.62,
+            )
+            with TestClient(app) as client:
+                client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
+                client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
+                client.post("/settings/quant", data={"enabled": "1", "probability_threshold": "50"}, follow_redirects=False)
+                with patch.object(app.state.monitor, "build_snapshot", return_value=snapshot):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:00:00+08:00"))
+                alerts = [
+                    row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
+                    if row["trigger_type"] in {"250日线", "BOLL中轨", "股息率", "量化盈利概率"}
+                ]
+                self.assertEqual(len(alerts), 0)
+
+    def test_buy_alerts_skip_near_earnings_window_without_extra_strength(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=99.0,
+                ma_250=100.0,
+                ma_30w=110.0,
+                ma_60w=100.0,
+                prev_ma_30w=109.0,
+                prev_ma_60w=99.0,
+                boll_mid=100.0,
+                boll_lower=96.0,
+                boll_upper=110.0,
+                dividend_yield=5.0,
+                quant_probability=76.0,
+                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 76}, {"label": "周线共振", "score": 73}], ensure_ascii=False),
+                trigger_state="250日线、BOLL中轨、股息率",
+                trigger_detail="测试买入提醒-财报窗口过滤",
+                triggered_labels=("250日线", "BOLL中轨", "股息率"),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
+                earnings_phase="财报窗口临近",
+            )
+            with TestClient(app) as client:
+                client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
+                client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
+                client.post("/settings/quant", data={"enabled": "1", "probability_threshold": "50"}, follow_redirects=False)
+                with patch.object(app.state.monitor, "build_snapshot", return_value=snapshot):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:00:00+08:00"))
+                alerts = [
+                    row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
+                    if row["trigger_type"] in {"250日线", "BOLL中轨", "股息率", "量化盈利概率"}
+                ]
+                self.assertEqual(len(alerts), 0)
+
+    def test_sell_alerts_skip_shallow_upper_band_touch(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=115.4,
+                ma_250=100.0,
+                ma_30w=110.0,
+                ma_60w=108.0,
+                prev_ma_30w=109.0,
+                prev_ma_60w=107.0,
+                boll_mid=110.0,
+                boll_lower=100.0,
+                boll_upper=115.0,
+                dividend_yield=4.2,
+                quant_probability=72.0,
+                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 82}, {"label": "周线共振", "score": 76}], ensure_ascii=False),
+                trigger_state="BOLL上轨卖出",
+                trigger_detail="测试卖出提醒-轻微触上轨",
+                triggered_labels=("BOLL上轨卖出",),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
+            )
+            with TestClient(app) as client:
+                client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
+                client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
+                add_trade_record(database_file.name, "admin", "600519", "buy", 100.0, 100)
+                with patch.object(app.state.monitor, "build_snapshot", return_value=snapshot):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:00:00+08:00"))
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:30:00+08:00"))
+                alerts = [
+                    row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
+                    if row["trigger_type"] == "BOLL上轨卖出"
+                ]
+                self.assertEqual(len(alerts), 0)
+
+    def test_buy_alerts_skip_when_position_is_already_too_heavy(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=99.0,
+                ma_250=100.0,
+                ma_30w=110.0,
+                ma_60w=100.0,
+                prev_ma_30w=109.0,
+                prev_ma_60w=99.0,
+                boll_mid=100.0,
+                boll_lower=96.0,
+                boll_upper=110.0,
+                dividend_yield=5.0,
+                quant_probability=86.0,
+                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 86}, {"label": "周线共振", "score": 82}], ensure_ascii=False),
+                trigger_state="250日线、BOLL中轨、股息率",
+                trigger_detail="测试买入提醒-重仓抑制",
+                triggered_labels=("250日线", "BOLL中轨", "股息率"),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
+            )
+            with TestClient(app) as client:
+                client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
+                client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
+                client.post("/settings/portfolio", data={"total_investment_amount": "15000", "next_path": "/dashboard"}, follow_redirects=False)
+                add_trade_record(database_file.name, "admin", "600519", "buy", 100.0, 60)
+                client.post("/settings/quant", data={"enabled": "1", "probability_threshold": "50"}, follow_redirects=False)
+                with patch.object(app.state.monitor, "build_snapshot", return_value=snapshot):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:00:00+08:00"))
+                alerts = [
+                    row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
+                    if row["trigger_type"] in {"250日线", "BOLL中轨", "股息率", "量化盈利概率"}
+                ]
+                self.assertEqual(len(alerts), 0)
+
+    def test_sell_alerts_fire_earlier_for_heavy_positions(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=115.4,
+                ma_250=100.0,
+                ma_30w=110.0,
+                ma_60w=108.0,
+                prev_ma_30w=109.0,
+                prev_ma_60w=107.0,
+                boll_mid=110.0,
+                boll_lower=100.0,
+                boll_upper=115.0,
+                dividend_yield=4.2,
+                quant_probability=72.0,
+                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 82}, {"label": "周线共振", "score": 76}], ensure_ascii=False),
+                trigger_state="BOLL上轨卖出",
+                trigger_detail="测试卖出提醒-重仓提前止盈",
+                triggered_labels=("BOLL上轨卖出",),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
+            )
+            with TestClient(app) as client:
+                client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
+                client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
+                client.post("/settings/portfolio", data={"total_investment_amount": "20000", "next_path": "/dashboard"}, follow_redirects=False)
+                add_trade_record(database_file.name, "admin", "600519", "buy", 100.0, 70)
+                with patch.object(app.state.monitor, "build_snapshot", return_value=snapshot):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:00:00+08:00"))
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:30:00+08:00"))
+                alerts = [
+                    row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
+                    if row["trigger_type"] == "BOLL上轨卖出"
+                ]
+                self.assertEqual(len(alerts), 1)
 
     def test_post_close_holding_review_email_is_sent_once_per_day(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:

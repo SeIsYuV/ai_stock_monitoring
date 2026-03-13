@@ -12,7 +12,7 @@ from __future__ import annotations
 - `build_snapshot`：统一计算技术指标与量化综合评分
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 import json
 import math
@@ -27,6 +27,14 @@ BUY_ALERT_MIN_QUANT_PROBABILITY = 60.0
 BUY_ALERT_STRONG_QUANT_PROBABILITY = 80.0
 BUY_ALERT_DIVIDEND_CONFIRMATION_QUANT = 78.0
 BUY_ALERT_WEEKLY_CONFIRMATION_QUANT = 70.0
+BUY_ALERT_MIN_LEVEL_GAP = 2
+BUY_ALERT_MAX_MODEL_DISPERSION = 18.0
+BUY_ALERT_MIN_EXPECTED_UPSIDE_PCT = 4.0
+BUY_ALERT_MIN_DCF_GAP_PCT = -5.0
+SELL_ALERT_MIN_LEVEL = 5
+SELL_ALERT_STRONG_LEVEL = 7
+SELL_ALERT_BOLL_EXTENSION_RATIO = 1.02
+SELL_ALERT_LOW_DIVIDEND_MAX_QUANT = 55.0
 BUY_TRIGGER_TYPES = {"250日线", "BOLL中轨", "BOLL下轨", "股息率", "30周/60周均线", "量化盈利概率"}
 PRICE_SUPPORT_TRIGGER_TYPES = {"250日线", "BOLL中轨", "BOLL下轨"}
 SELL_TRIGGER_TYPES = {"BOLL上轨卖出", "低股息率卖出", "量化走弱卖出"}
@@ -83,6 +91,15 @@ class SnapshotComputation:
     triggered_labels: tuple[str, ...]
     weekly_crossed: bool
     updated_at: datetime
+    latest_volume_ratio: float = 1.0
+    market_environment: str = "中性"
+    market_bias_score: float = 0.0
+    industry_name: str = ""
+    industry_environment: str = "中性"
+    industry_bias_score: float = 0.0
+    earnings_phase: str = "常规窗口"
+    earnings_days_to_window: int = 999
+    position_concentration_pct: float = 0.0
 
 
 def validate_stock_symbol(symbol: str) -> bool:
@@ -131,6 +148,62 @@ def calculate_bollinger_upper_band(values: list[float], window: int = 20, std_mu
     upper_band = middle + std_multiplier * math.sqrt(variance)
     return round(upper_band, 2)
 
+
+
+
+def calculate_volume_ratio(daily_bars: list[PriceBar], short_window: int = 1, long_window: int = 20) -> float:
+    if len(daily_bars) < long_window:
+        return 1.0
+    recent_volumes = [float(item.volume or 0.0) for item in daily_bars[-short_window:]]
+    baseline_volumes = [float(item.volume or 0.0) for item in daily_bars[-long_window:]]
+    baseline = sum(baseline_volumes) / max(len(baseline_volumes), 1)
+    if baseline <= 0:
+        return 1.0
+    recent = sum(recent_volumes) / max(len(recent_volumes), 1)
+    return round(recent / baseline, 2)
+
+
+def classify_trend_environment(bars: list[PriceBar]) -> tuple[str, float]:
+    closes = [float(item.close_price) for item in bars if float(item.close_price or 0.0) > 0]
+    if len(closes) < 60:
+        return "中性", 0.0
+    latest_close = closes[-1]
+    ma_20 = calculate_simple_moving_average(closes, 20)
+    ma_60 = calculate_simple_moving_average(closes, 60)
+    score = 0.0
+    if latest_close > ma_20 > 0:
+        score += 18.0
+    elif latest_close < ma_20:
+        score -= 18.0
+    if ma_20 > ma_60 > 0:
+        score += 16.0
+    elif 0 < ma_20 < ma_60:
+        score -= 16.0
+    ten_day_base = closes[-11] if len(closes) >= 11 else closes[0]
+    if ten_day_base > 0:
+        ten_day_return_pct = (latest_close - ten_day_base) / ten_day_base * 100
+        score += max(-18.0, min(18.0, ten_day_return_pct * 2.0))
+    if latest_close > 0:
+        distance_pct = (latest_close - ma_60) / ma_60 * 100 if ma_60 > 0 else 0.0
+        score += max(-12.0, min(12.0, distance_pct / 2.0))
+    if score >= 18.0:
+        return "偏强", round(score, 2)
+    if score <= -18.0:
+        return "偏弱", round(score, 2)
+    return "中性", round(score, 2)
+
+
+def infer_earnings_phase(trade_date: date) -> tuple[str, int]:
+    candidate_days: list[int] = []
+    for year in (trade_date.year - 1, trade_date.year, trade_date.year + 1):
+        for month, day in ((4, 30), (8, 31), (10, 31)):
+            candidate_days.append(abs((date(year, month, day) - trade_date).days))
+    nearest_days = min(candidate_days) if candidate_days else 999
+    if nearest_days <= 7:
+        return "财报窗口进行中", nearest_days
+    if nearest_days <= 21:
+        return "财报窗口临近", nearest_days
+    return "常规窗口", nearest_days
 
 def build_quant_sell_signal(snapshot: SnapshotComputation) -> QuantSellSignal:
     """Use the current snapshot to decide whether a sell-side quant alert should fire."""
@@ -398,7 +471,7 @@ class StockMonitor:
             selected_models=normalize_selected_models(selected_models),
             strategy_params=normalize_strategy_params(strategy_params),
         )
-        return compute_snapshot_metrics(
+        base_snapshot = compute_snapshot_metrics(
             symbol=symbol,
             quote=effective_quote,
             daily_bars=daily_bars,
@@ -407,6 +480,79 @@ class StockMonitor:
             quant_probability=quant_signal.probability,
             quant_model_breakdown=quant_signal.breakdown_json,
         )
+        return replace(base_snapshot, **self._build_snapshot_context(symbol, daily_bars, base_snapshot.updated_at.date(), base_snapshot.trigger_detail))
+
+    @staticmethod
+    def _estimate_position_concentration_pct(
+        symbol: str,
+        latest_price: float,
+        position_summary: dict[str, Any] | None,
+        owner_positions: dict[str, dict[str, Any]],
+        total_investment_amount: float,
+    ) -> float:
+        if not position_summary:
+            return 0.0
+        quantity = int(position_summary.get("position_quantity") or 0)
+        if quantity <= 0:
+            return 0.0
+        current_market_value = max(0.0, latest_price) * quantity
+        if total_investment_amount > 0:
+            return round(current_market_value / total_investment_amount * 100, 2)
+        return 0.0
+
+    def _build_snapshot_context(
+        self,
+        symbol: str,
+        daily_bars: list[PriceBar],
+        trade_date: date,
+        base_trigger_detail: str,
+    ) -> dict[str, Any]:
+        latest_volume_ratio = calculate_volume_ratio(daily_bars)
+
+        market_scores: list[float] = []
+        for index_symbol in ("sh000001", "sz399001", "sz399006"):
+            try:
+                index_bars = self.provider.get_reference_index_daily_bars(index_symbol, limit=90)
+            except Exception:
+                index_bars = []
+            if not index_bars:
+                continue
+            _, score = classify_trend_environment(index_bars)
+            market_scores.append(score)
+        market_bias_score = round(sum(market_scores) / len(market_scores), 2) if market_scores else 0.0
+        if market_bias_score >= 18.0:
+            market_environment = "偏强"
+        elif market_bias_score <= -18.0:
+            market_environment = "偏弱"
+        else:
+            market_environment = "中性"
+
+        try:
+            profile = self.provider.get_symbol_profile(symbol) or {}
+        except Exception:
+            profile = {}
+        industry_name = str(profile.get("industry_name") or "")
+        try:
+            industry_bars = self.provider.get_industry_daily_bars(industry_name, limit=90) if industry_name else []
+        except Exception:
+            industry_bars = []
+        industry_environment, industry_bias_score = classify_trend_environment(industry_bars)
+        earnings_phase, earnings_days_to_window = infer_earnings_phase(trade_date)
+        trigger_detail = (
+            f"{base_trigger_detail} | 量能比 {latest_volume_ratio:.2f} | 大盘 {market_environment}({market_bias_score:.0f})"
+            f" | 行业 {industry_name or '-'} {industry_environment}({industry_bias_score:.0f}) | 财报节奏 {earnings_phase}"
+        )
+        return {
+            "latest_volume_ratio": latest_volume_ratio,
+            "market_environment": market_environment,
+            "market_bias_score": market_bias_score,
+            "industry_name": industry_name,
+            "industry_environment": industry_environment,
+            "industry_bias_score": industry_bias_score,
+            "earnings_phase": earnings_phase,
+            "earnings_days_to_window": earnings_days_to_window,
+            "trigger_detail": trigger_detail,
+        }
 
     def refresh_symbol_snapshot(self, owner_username: str, symbol: str) -> SnapshotComputation:
         quant_config = self._resolve_owner_quant_config(owner_username)
@@ -432,6 +578,14 @@ class StockMonitor:
             quant_model_breakdown=snapshot.quant_model_breakdown,
             trigger_state=snapshot.trigger_state,
             trigger_detail=snapshot.trigger_detail,
+            latest_volume_ratio=snapshot.latest_volume_ratio,
+            market_environment=snapshot.market_environment,
+            market_bias_score=snapshot.market_bias_score,
+            industry_name=snapshot.industry_name,
+            industry_environment=snapshot.industry_environment,
+            industry_bias_score=snapshot.industry_bias_score,
+            earnings_phase=snapshot.earnings_phase,
+            earnings_days_to_window=snapshot.earnings_days_to_window,
             updated_at=snapshot.updated_at.isoformat(),
         )
         self.last_refresh_at = datetime.now(UTC)
@@ -460,6 +614,7 @@ class StockMonitor:
     def _refresh_open_session(self, trade_date: date) -> None:
         snapshot_cache: dict[tuple[str, tuple[str, ...], str], SnapshotComputation] = {}
         owner_position_cache: dict[str, dict[str, dict[str, Any]]] = {}
+        owner_portfolio_base_cache: dict[str, float] = {}
         owner_email_cache: dict[str, Any] = {}
         owner_quant_cache: dict[str, dict[str, Any]] = {}
         trade_marker = trade_date.isoformat()
@@ -478,6 +633,10 @@ class StockMonitor:
                 owner_positions = owner_position_cache.setdefault(
                     owner_username,
                     self._resolve_owner_position_map(owner_username),
+                )
+                owner_total_investment = owner_portfolio_base_cache.setdefault(
+                    owner_username,
+                    float(get_portfolio_settings(self.settings.db_path, owner_username)["total_investment_amount"] or 0.0),
                 )
                 selected_models = quant_settings["selected_models"]
                 strategy_params = quant_settings["strategy_params"]
@@ -511,10 +670,27 @@ class StockMonitor:
                     quant_model_breakdown=snapshot.quant_model_breakdown,
                     trigger_state=snapshot.trigger_state,
                     trigger_detail=snapshot.trigger_detail,
+                    latest_volume_ratio=snapshot.latest_volume_ratio,
+                    market_environment=snapshot.market_environment,
+                    market_bias_score=snapshot.market_bias_score,
+                    industry_name=snapshot.industry_name,
+                    industry_environment=snapshot.industry_environment,
+                    industry_bias_score=snapshot.industry_bias_score,
+                    earnings_phase=snapshot.earnings_phase,
+                    earnings_days_to_window=snapshot.earnings_days_to_window,
                     updated_at=snapshot.updated_at.isoformat(),
                 )
-                stock_advice = build_stock_comprehensive_advice(snapshot.__dict__)
                 position_summary = owner_positions.get(symbol)
+                position_concentration_pct = self._estimate_position_concentration_pct(
+                    symbol,
+                    snapshot.latest_price,
+                    position_summary,
+                    owner_positions,
+                    owner_total_investment,
+                )
+                snapshot = replace(snapshot, position_concentration_pct=position_concentration_pct)
+                stock_advice = build_stock_comprehensive_advice(snapshot.__dict__)
+                stock_advice["position_concentration_pct"] = position_concentration_pct
                 self._process_intraday_signal(
                     owner_username=owner_username,
                     symbol=symbol,
@@ -569,7 +745,7 @@ class StockMonitor:
                     display_name=snapshot.display_name,
                     trigger_type="BOLL上轨卖出",
                     trade_marker=trade_marker,
-                    condition_met=bool(snapshot.boll_upper and snapshot.latest_price >= snapshot.boll_upper and self._should_emit_sell_alert(position_summary, "BOLL上轨卖出")),
+                    condition_met=bool(snapshot.boll_upper and snapshot.latest_price >= snapshot.boll_upper and self._should_emit_sell_alert(position_summary, snapshot, "BOLL上轨卖出", stock_advice)),
                     detail=f"{snapshot.trigger_detail} | 卖出参考：价格突破 BOLL 上轨，可结合仓位分批止盈。",
                     current_price=snapshot.latest_price,
                     indicator_values={
@@ -605,7 +781,7 @@ class StockMonitor:
                         display_name=snapshot.display_name,
                         trigger_type="量化走弱卖出",
                         trade_marker=trade_marker,
-                        condition_met=bool(quant_sell_signal.should_alert and self._should_emit_sell_alert(position_summary, "量化走弱卖出")),
+                        condition_met=bool(quant_sell_signal.should_alert and self._should_emit_sell_alert(position_summary, snapshot, "量化走弱卖出", stock_advice)),
                         detail=f"{snapshot.trigger_detail} | 卖出参考：{'；'.join(quant_sell_signal.reasons)}",
                         current_price=snapshot.latest_price,
                         indicator_values={
@@ -635,6 +811,13 @@ class StockMonitor:
         return position_map
 
     @staticmethod
+    def _buy_expected_upside_pct(current_price: float, stock_advice: dict[str, Any]) -> float:
+        suggested_reduce_price = float(stock_advice.get("suggested_reduce_price") or 0.0)
+        if current_price <= 0 or suggested_reduce_price <= current_price:
+            return 0.0
+        return (suggested_reduce_price - current_price) / current_price * 100
+
+    @staticmethod
     def _should_emit_buy_alert(
         snapshot: SnapshotComputation,
         trigger_type: str,
@@ -650,17 +833,52 @@ class StockMonitor:
             return False
 
         buy_level = int(stock_advice.get("buy_recommendation_level") or 0)
+        sell_level = int(stock_advice.get("sell_recommendation_level") or 0)
         quant_probability = float(snapshot.quant_probability or 0.0)
         sell_signals = set(stock_advice.get("sell_signals") or ())
         support_triggers = triggered_labels & PRICE_SUPPORT_TRIGGER_TYPES
         has_dividend_support = "股息率" in triggered_labels
         has_weekly_support = "30周/60周均线" in triggered_labels
+        top_model_dispersion = float(stock_advice.get("top_model_dispersion") or 0.0)
+        expected_upside_pct = StockMonitor._buy_expected_upside_pct(snapshot.latest_price, stock_advice)
+        market_environment = str(snapshot.market_environment or "中性")
+        industry_environment = str(snapshot.industry_environment or "中性")
+        latest_volume_ratio = float(snapshot.latest_volume_ratio or 1.0)
+        earnings_phase = str(snapshot.earnings_phase or "常规窗口")
+        position_concentration_pct = float(stock_advice.get("position_concentration_pct") or snapshot.position_concentration_pct or 0.0)
+        dcf_gap_pct_raw = stock_advice.get("dcf_valuation_gap_pct")
+        try:
+            dcf_gap_pct = float(dcf_gap_pct_raw) if dcf_gap_pct_raw is not None else None
+        except (TypeError, ValueError):
+            dcf_gap_pct = None
 
         if buy_level < BUY_ALERT_MIN_LEVEL:
+            return False
+        if buy_level - sell_level < BUY_ALERT_MIN_LEVEL_GAP:
             return False
         if quant_probability < BUY_ALERT_MIN_QUANT_PROBABILITY:
             return False
         if sell_signals:
+            return False
+        if top_model_dispersion > BUY_ALERT_MAX_MODEL_DISPERSION:
+            return False
+        if expected_upside_pct < BUY_ALERT_MIN_EXPECTED_UPSIDE_PCT:
+            return False
+        if dcf_gap_pct is not None and dcf_gap_pct < BUY_ALERT_MIN_DCF_GAP_PCT:
+            return False
+        if latest_volume_ratio < 0.85:
+            return False
+        if market_environment == "偏弱" and quant_probability < BUY_ALERT_DIVIDEND_CONFIRMATION_QUANT:
+            return False
+        if market_environment == "偏弱" and industry_environment == "偏弱":
+            return False
+        if industry_environment == "偏弱" and quant_probability < BUY_ALERT_STRONG_QUANT_PROBABILITY:
+            return False
+        if earnings_phase != "常规窗口" and quant_probability < BUY_ALERT_STRONG_QUANT_PROBABILITY:
+            return False
+        if position_concentration_pct >= 30 and quant_probability < 88:
+            return False
+        if position_concentration_pct >= 45:
             return False
 
         if trigger_type == "量化盈利概率":
@@ -687,12 +905,58 @@ class StockMonitor:
         return False
 
     @staticmethod
-    def _should_emit_sell_alert(position_summary: dict[str, Any] | None, trigger_type: str) -> bool:
+    def _should_emit_sell_alert(
+        position_summary: dict[str, Any] | None,
+        snapshot: SnapshotComputation,
+        trigger_type: str,
+        stock_advice: dict[str, Any],
+    ) -> bool:
         if trigger_type not in SELL_TRIGGER_TYPES:
             return False
-        if not position_summary:
+        if not position_summary or int(position_summary.get("position_quantity") or 0) <= 0:
             return False
-        return int(position_summary.get("position_quantity") or 0) > 0
+
+        action = str(stock_advice.get("action") or "观望")
+        buy_level = int(stock_advice.get("buy_recommendation_level") or 0)
+        sell_level = int(stock_advice.get("sell_recommendation_level") or 0)
+        sell_signals = set(stock_advice.get("sell_signals") or ())
+        quant_probability = float(snapshot.quant_probability or 0.0)
+        position_concentration_pct = float(stock_advice.get("position_concentration_pct") or snapshot.position_concentration_pct or 0.0)
+
+        if trigger_type == "BOLL上轨卖出":
+            extension_ratio = snapshot.latest_price / snapshot.boll_upper if snapshot.boll_upper > 0 else 1.0
+            required_extension = SELL_ALERT_BOLL_EXTENSION_RATIO - (0.01 if position_concentration_pct >= 30 else 0.0)
+            return (
+                trigger_type in snapshot.triggered_labels
+                and (
+                    extension_ratio >= required_extension
+                    or action == "偏卖出"
+                    or sell_level >= SELL_ALERT_STRONG_LEVEL
+                    or "量化走弱卖出" in sell_signals
+                    or position_concentration_pct >= 35
+                )
+            )
+        if trigger_type == "低股息率卖出":
+            return (
+                trigger_type in snapshot.triggered_labels
+                and (
+                    action == "偏卖出"
+                    or sell_level >= SELL_ALERT_STRONG_LEVEL
+                    or quant_probability <= SELL_ALERT_LOW_DIVIDEND_MAX_QUANT
+                    or position_concentration_pct >= 35
+                )
+            )
+        if trigger_type == "量化走弱卖出":
+            return (
+                sell_level >= SELL_ALERT_MIN_LEVEL
+                and (
+                    action == "偏卖出"
+                    or sell_level >= max(SELL_ALERT_STRONG_LEVEL - 1, buy_level)
+                    or len(sell_signals) >= 2
+                    or position_concentration_pct >= 30
+                )
+            )
+        return False
 
     def _send_post_close_holding_reviews(self, trade_date: date) -> None:
         marker = trade_date.isoformat()
@@ -731,6 +995,14 @@ class StockMonitor:
                     quant_model_breakdown=snapshot.quant_model_breakdown,
                     trigger_state=snapshot.trigger_state,
                     trigger_detail=snapshot.trigger_detail,
+                    latest_volume_ratio=snapshot.latest_volume_ratio,
+                    market_environment=snapshot.market_environment,
+                    market_bias_score=snapshot.market_bias_score,
+                    industry_name=snapshot.industry_name,
+                    industry_environment=snapshot.industry_environment,
+                    industry_bias_score=snapshot.industry_bias_score,
+                    earnings_phase=snapshot.earnings_phase,
+                    earnings_days_to_window=snapshot.earnings_days_to_window,
                     updated_at=snapshot.updated_at.isoformat(),
                 )
                 snapshots.append({
@@ -748,6 +1020,14 @@ class StockMonitor:
                     "quant_model_breakdown": snapshot.quant_model_breakdown,
                     "trigger_state": snapshot.trigger_state,
                     "trigger_detail": snapshot.trigger_detail,
+                    "latest_volume_ratio": snapshot.latest_volume_ratio,
+                    "market_environment": snapshot.market_environment,
+                    "market_bias_score": snapshot.market_bias_score,
+                    "industry_name": snapshot.industry_name,
+                    "industry_environment": snapshot.industry_environment,
+                    "industry_bias_score": snapshot.industry_bias_score,
+                    "earnings_phase": snapshot.earnings_phase,
+                    "earnings_days_to_window": snapshot.earnings_days_to_window,
                     "updated_at": snapshot.updated_at.isoformat(),
                 })
             portfolio_settings = get_portfolio_settings(self.settings.db_path, owner_username)
@@ -836,6 +1116,7 @@ class StockMonitor:
         marker = trade_date.isoformat()
         snapshot_cache: dict[tuple[str, tuple[str, ...], str], SnapshotComputation] = {}
         owner_position_cache: dict[str, dict[str, dict[str, Any]]] = {}
+        owner_portfolio_base_cache: dict[str, float] = {}
         owners = sorted({row["owner_username"] for row in get_monitored_stocks(self.settings.db_path)})
         for owner_username in owners:
             quant_config = self._resolve_owner_quant_config(owner_username)
@@ -889,7 +1170,7 @@ class StockMonitor:
                 low_dividend_state = get_signal_state(self.settings.db_path, owner_username, stock["symbol"], "低股息率卖出")
                 if (
                     0 < snapshot.dividend_yield < SELL_DIVIDEND_THRESHOLD
-                    and self._should_emit_sell_alert(owner_positions.get(stock["symbol"]), "低股息率卖出")
+                    and self._should_emit_sell_alert(owner_positions.get(stock["symbol"]), snapshot, "低股息率卖出", stock_advice)
                     and (low_dividend_state is None or low_dividend_state["last_event_marker"] != marker)
                 ):
                     payload = self._build_pending_payload(

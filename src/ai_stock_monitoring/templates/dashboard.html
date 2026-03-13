@@ -113,6 +113,7 @@
                 <td class="stock-cell">
                     <a class="inline-link" href="/stocks/{{ item['symbol'] }}">{{ item['symbol'] }}</a>
                     <div class="muted stock-name">{{ format_stock_display_name(item['display_name'])|safe }}</div>
+                    <div class="muted">大盘 {{ item.get('market_environment', '中性') }} ｜ 行业 {{ item.get('industry_name') or '-' }}</div>
                 </td>
                 <td>{{ '%.2f'|format(item['latest_price']) if item['latest_price'] is not none else '-' }}</td>
                 <td>{{ '%.2f'|format(item['ma_250']) if item['ma_250'] is not none else '-' }}</td>
@@ -169,6 +170,15 @@
                             <span class="signal-badge signal-neutral">暂无信号</span>
                         </div>
                         {% endif %}
+                        <div class="signal-group context-group">
+                            <strong class="signal-group-title">环境因子</strong>
+                            <div class="context-summary">
+                                <span class="signal-badge signal-{{ 'buy' if item.get('market_environment') == '偏强' else 'sell' if item.get('market_environment') == '偏弱' else 'neutral' }}">大盘 {{ item.get('market_environment', '中性') }}</span>
+                                <span class="signal-badge signal-{{ 'buy' if item.get('industry_environment') == '偏强' else 'sell' if item.get('industry_environment') == '偏弱' else 'neutral' }}">行业 {{ item.get('industry_environment', '中性') }}</span>
+                                <span class="signal-badge signal-{{ 'buy' if item.get('latest_volume_ratio', 1) >= 1.15 else 'sell' if item.get('latest_volume_ratio', 1) < 0.85 else 'neutral' }}">量能比 {{ '%.2f'|format(item.get('latest_volume_ratio', 1)) }}</span>
+                                <span class="signal-badge signal-{{ 'sell' if item.get('earnings_phase') != '常规窗口' else 'neutral' }}">{{ item.get('earnings_phase', '常规窗口') }}</span>
+                            </div>
+                        </div>
                     </div>
                     {% if item['trigger_state'] and item['trigger_state'] != '正常' %}
                     <div class="muted signal-detail">原始状态：{{ item['trigger_state'] }}</div>
@@ -212,6 +222,7 @@
                             </span>
                         </div>
                         <div><strong>DCF</strong><span>{{ item['advice_dcf_line'] }}</span></div>
+                        <div><strong>环境</strong><span>大盘 {{ item.get('market_environment', '中性') }} ｜ 行业 {{ item.get('industry_environment', '中性') }} ｜ 量能比 {{ '%.2f'|format(item.get('latest_volume_ratio', 1)) }} ｜ {{ item.get('earnings_phase', '常规窗口') }}</span></div>
                     </div>
                 </td>
                 <td class="meta-cell">

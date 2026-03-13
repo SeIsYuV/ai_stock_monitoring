@@ -8,6 +8,7 @@ from .base import MarketDataProvider, PriceBar, Quote
 
 class MockMarketDataProvider(MarketDataProvider):
     provider_name = "mock"
+    _INDUSTRIES = ("白酒", "银行", "新能源", "医药", "消费电子")
 
     def get_quote(self, symbol: str) -> Quote:
         digits = [int(char) for char in symbol if char.isdigit()]
@@ -32,6 +33,7 @@ class MockMarketDataProvider(MarketDataProvider):
                 high_price=round(base * 1.01, 2),
                 low_price=round(base * 0.98, 2),
                 close_price=round(base + (offset % 7 - 3) * 0.12, 2),
+                volume=round(8_000_000 + ((offset + sum(int(char) for char in symbol if char.isdigit())) % 11) * 650_000, 2),
             )
             for offset in reversed(range(limit))
         ]
@@ -46,6 +48,7 @@ class MockMarketDataProvider(MarketDataProvider):
                 high_price=round(base * 1.02, 2),
                 low_price=round(base * 0.96, 2),
                 close_price=round(base + (offset % 5 - 2) * 0.35, 2),
+                volume=round(42_000_000 + ((offset + sum(int(char) for char in symbol if char.isdigit())) % 9) * 1_200_000, 2),
             )
             for offset in reversed(range(limit))
         ]
@@ -67,3 +70,41 @@ class MockMarketDataProvider(MarketDataProvider):
                 dates.append(current)
             current += timedelta(days=1)
         return dates
+
+    def get_reference_index_daily_bars(self, index_symbol: str, limit: int = 120) -> list[PriceBar]:
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        seed = sum(ord(char) for char in index_symbol)
+        base = 3200 + (seed % 600)
+        slope = ((seed % 5) - 1) * 4.5
+        return [
+            PriceBar(
+                traded_on=today - timedelta(days=offset),
+                open_price=round(base + slope * (limit - offset - 1) - 12, 2),
+                high_price=round(base + slope * (limit - offset - 1) + 24, 2),
+                low_price=round(base + slope * (limit - offset - 1) - 28, 2),
+                close_price=round(base + slope * (limit - offset - 1) + ((offset % 6) - 2) * 3.2, 2),
+                volume=round(180_000_000 + ((offset + seed) % 13) * 8_500_000, 2),
+            )
+            for offset in reversed(range(limit))
+        ]
+
+    def get_symbol_profile(self, symbol: str) -> dict[str, str]:
+        seed = sum(int(char) for char in symbol if char.isdigit())
+        return {"industry_name": self._INDUSTRIES[seed % len(self._INDUSTRIES)]}
+
+    def get_industry_daily_bars(self, industry_name: str, limit: int = 120) -> list[PriceBar]:
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        seed = sum(ord(char) for char in industry_name)
+        base = 980 + (seed % 220)
+        slope = ((seed % 7) - 2) * 1.6
+        return [
+            PriceBar(
+                traded_on=today - timedelta(days=offset),
+                open_price=round(base + slope * (limit - offset - 1) - 4, 2),
+                high_price=round(base + slope * (limit - offset - 1) + 8, 2),
+                low_price=round(base + slope * (limit - offset - 1) - 10, 2),
+                close_price=round(base + slope * (limit - offset - 1) + ((offset % 5) - 2) * 1.4, 2),
+                volume=round(55_000_000 + ((offset + seed) % 10) * 2_600_000, 2),
+            )
+            for offset in reversed(range(limit))
+        ]

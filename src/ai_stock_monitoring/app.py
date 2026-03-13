@@ -811,6 +811,14 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 "quant_model_breakdown": snapshot.quant_model_breakdown,
                 "trigger_state": snapshot.trigger_state,
                 "trigger_detail": snapshot.trigger_detail,
+                "latest_volume_ratio": snapshot.latest_volume_ratio,
+                "market_environment": snapshot.market_environment,
+                "market_bias_score": snapshot.market_bias_score,
+                "industry_name": snapshot.industry_name,
+                "industry_environment": snapshot.industry_environment,
+                "industry_bias_score": snapshot.industry_bias_score,
+                "earnings_phase": snapshot.earnings_phase,
+                "earnings_days_to_window": snapshot.earnings_days_to_window,
                 "updated_at": snapshot.updated_at.isoformat(),
             }
         except Exception:
@@ -1318,7 +1326,9 @@ async def _load_dashboard_snapshots(app: FastAPI, owner_username: str) -> list[o
     refresh_symbols = [
         item["symbol"]
         for item in snapshots
-        if item["latest_price"] is None or not float(item["boll_upper"] or 0)
+        if item["latest_price"] is None
+        or not float(item["boll_upper"] or 0)
+        or "量能比" not in str(item["trigger_detail"] or "")
     ]
     if not refresh_symbols:
         return snapshots

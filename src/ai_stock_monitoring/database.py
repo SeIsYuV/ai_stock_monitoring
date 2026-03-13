@@ -93,6 +93,14 @@ def initialize_database(settings: AppSettings) -> None:
                 quant_model_breakdown TEXT NOT NULL DEFAULT '',
                 trigger_state TEXT NOT NULL,
                 trigger_detail TEXT NOT NULL,
+                latest_volume_ratio REAL NOT NULL DEFAULT 1,
+                market_environment TEXT NOT NULL DEFAULT '中性',
+                market_bias_score REAL NOT NULL DEFAULT 0,
+                industry_name TEXT NOT NULL DEFAULT '',
+                industry_environment TEXT NOT NULL DEFAULT '中性',
+                industry_bias_score REAL NOT NULL DEFAULT 0,
+                earnings_phase TEXT NOT NULL DEFAULT '常规窗口',
+                earnings_days_to_window INTEGER NOT NULL DEFAULT 999,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (owner_username, symbol)
             );
@@ -397,6 +405,38 @@ def _ensure_schema_migrations(connection: sqlite3.Connection) -> None:
     if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "boll_upper"):
         connection.execute(
             "ALTER TABLE user_stock_snapshot ADD COLUMN boll_upper REAL NOT NULL DEFAULT 0"
+        )
+    if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "latest_volume_ratio"):
+        connection.execute(
+            "ALTER TABLE user_stock_snapshot ADD COLUMN latest_volume_ratio REAL NOT NULL DEFAULT 1"
+        )
+    if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "market_environment"):
+        connection.execute(
+            "ALTER TABLE user_stock_snapshot ADD COLUMN market_environment TEXT NOT NULL DEFAULT '中性'"
+        )
+    if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "market_bias_score"):
+        connection.execute(
+            "ALTER TABLE user_stock_snapshot ADD COLUMN market_bias_score REAL NOT NULL DEFAULT 0"
+        )
+    if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "industry_name"):
+        connection.execute(
+            "ALTER TABLE user_stock_snapshot ADD COLUMN industry_name TEXT NOT NULL DEFAULT ''"
+        )
+    if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "industry_environment"):
+        connection.execute(
+            "ALTER TABLE user_stock_snapshot ADD COLUMN industry_environment TEXT NOT NULL DEFAULT '中性'"
+        )
+    if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "industry_bias_score"):
+        connection.execute(
+            "ALTER TABLE user_stock_snapshot ADD COLUMN industry_bias_score REAL NOT NULL DEFAULT 0"
+        )
+    if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "earnings_phase"):
+        connection.execute(
+            "ALTER TABLE user_stock_snapshot ADD COLUMN earnings_phase TEXT NOT NULL DEFAULT '常规窗口'"
+        )
+    if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "earnings_days_to_window"):
+        connection.execute(
+            "ALTER TABLE user_stock_snapshot ADD COLUMN earnings_days_to_window INTEGER NOT NULL DEFAULT 999"
         )
     if _table_exists(connection, "user_quant_settings"):
         connection.execute(
@@ -835,6 +875,14 @@ def get_snapshots(db_path: str, owner_username: str) -> list[sqlite3.Row]:
                        ss.quant_model_breakdown,
                        ss.trigger_state,
                        ss.trigger_detail,
+                       ss.latest_volume_ratio,
+                       ss.market_environment,
+                       ss.market_bias_score,
+                       ss.industry_name,
+                       ss.industry_environment,
+                       ss.industry_bias_score,
+                       ss.earnings_phase,
+                       ss.earnings_days_to_window,
                        ss.updated_at
                 FROM user_monitored_stock ms
                 LEFT JOIN user_stock_snapshot ss
@@ -872,7 +920,15 @@ def upsert_snapshot(
     quant_model_breakdown: str,
     trigger_state: str,
     trigger_detail: str,
-    updated_at: str,
+    latest_volume_ratio: float = 1.0,
+    market_environment: str = "中性",
+    market_bias_score: float = 0.0,
+    industry_name: str = "",
+    industry_environment: str = "中性",
+    industry_bias_score: float = 0.0,
+    earnings_phase: str = "常规窗口",
+    earnings_days_to_window: int = 999,
+    updated_at: str = "",
 ) -> None:
     with get_connection(db_path) as connection:
         connection.execute(
@@ -880,9 +936,10 @@ def upsert_snapshot(
             INSERT INTO user_stock_snapshot (
                 owner_username, symbol, display_name, latest_price, ma_250, ma_30w, ma_60w,
                 boll_mid, boll_lower, boll_upper, dividend_yield, quant_probability, quant_model_breakdown,
-                trigger_state, trigger_detail, updated_at
+                trigger_state, trigger_detail, latest_volume_ratio, market_environment, market_bias_score,
+                industry_name, industry_environment, industry_bias_score, earnings_phase, earnings_days_to_window, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(owner_username, symbol) DO UPDATE SET
                 display_name = excluded.display_name,
                 latest_price = excluded.latest_price,
@@ -897,6 +954,14 @@ def upsert_snapshot(
                 quant_model_breakdown = excluded.quant_model_breakdown,
                 trigger_state = excluded.trigger_state,
                 trigger_detail = excluded.trigger_detail,
+                latest_volume_ratio = excluded.latest_volume_ratio,
+                market_environment = excluded.market_environment,
+                market_bias_score = excluded.market_bias_score,
+                industry_name = excluded.industry_name,
+                industry_environment = excluded.industry_environment,
+                industry_bias_score = excluded.industry_bias_score,
+                earnings_phase = excluded.earnings_phase,
+                earnings_days_to_window = excluded.earnings_days_to_window,
                 updated_at = excluded.updated_at
             """,
             (
@@ -915,6 +980,14 @@ def upsert_snapshot(
                 quant_model_breakdown,
                 trigger_state,
                 trigger_detail,
+                latest_volume_ratio,
+                market_environment,
+                market_bias_score,
+                industry_name,
+                industry_environment,
+                industry_bias_score,
+                earnings_phase,
+                earnings_days_to_window,
                 updated_at,
             ),
         )

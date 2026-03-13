@@ -13,6 +13,12 @@
         <div>中轨 {{ '%.2f'|format(snapshot['boll_mid']) if snapshot['boll_mid'] is not none else '-' }} 元</div>
         <div>下轨 {{ '%.2f'|format(snapshot['boll_lower']) if snapshot['boll_lower'] is not none else '-' }} 元</div>
     </div>
+    <div class="metric-grid" style="margin-top: 12px;">
+        <div class="metric-card"><strong>大盘环境</strong><span class="muted">{{ snapshot.get('market_environment', '中性') }}（{{ '%.0f'|format(snapshot.get('market_bias_score', 0)) }}）</span></div>
+        <div class="metric-card"><strong>行业强弱</strong><span class="muted">{{ snapshot.get('industry_name') or '-' }} ｜ {{ snapshot.get('industry_environment', '中性') }}</span></div>
+        <div class="metric-card"><strong>量能比</strong><span class="muted">{{ '%.2f'|format(snapshot.get('latest_volume_ratio', 1)) }}</span></div>
+        <div class="metric-card"><strong>财报节奏</strong><span class="muted">{{ snapshot.get('earnings_phase', '常规窗口') }}</span></div>
+    </div>
     <p>{{ snapshot['trigger_detail'] }}</p>
     {% endif %}
 </section>

@@ -92,6 +92,12 @@ def build_market_action_summary(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     display_buy_signals = list(buy_signals)
     display_sell_signals = list(sell_signals)
     quant_probability = float(snapshot.get("quant_probability") or 0.0)
+    market_environment = str(snapshot.get("market_environment") or "中性")
+    market_bias_score = float(snapshot.get("market_bias_score") or 0.0)
+    industry_environment = str(snapshot.get("industry_environment") or "中性")
+    industry_bias_score = float(snapshot.get("industry_bias_score") or 0.0)
+    latest_volume_ratio = float(snapshot.get("latest_volume_ratio") or 1.0)
+    earnings_phase = str(snapshot.get("earnings_phase") or "常规窗口")
     if quant_probability >= 85:
         buy_score += 3
         if "量化盈利概率" not in display_buy_signals:
@@ -108,6 +114,34 @@ def build_market_action_summary(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         sell_score += 2
         if "量化走弱卖出" not in display_sell_signals:
             display_sell_signals.append("量化走弱卖出")
+
+    if market_environment == "偏强":
+        buy_score += 1
+    elif market_environment == "偏弱":
+        sell_score += 2
+        if "大盘环境偏弱" not in display_sell_signals:
+            display_sell_signals.append("大盘环境偏弱")
+
+    if industry_environment == "偏强":
+        buy_score += 1
+    elif industry_environment == "偏弱":
+        sell_score += 1
+        if "行业强弱偏弱" not in display_sell_signals:
+            display_sell_signals.append("行业强弱偏弱")
+
+    if latest_volume_ratio >= 1.15 and buy_signals:
+        buy_score += 1
+        if "成交量放大确认" not in display_buy_signals:
+            display_buy_signals.append("成交量放大确认")
+    elif latest_volume_ratio < 0.8 and buy_signals:
+        sell_score += 1
+        if "成交量不足" not in display_sell_signals:
+            display_sell_signals.append("成交量不足")
+
+    if earnings_phase != "常规窗口":
+        sell_score += 1
+        if "财报窗口风险" not in display_sell_signals:
+            display_sell_signals.append("财报窗口风险")
 
     dominant_model_label = "量化模型"
     dominant_model_score = 0.0
@@ -154,6 +188,12 @@ def build_market_action_summary(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         "dominant_model_score": round(dominant_model_score, 2),
         "buy_score": buy_score,
         "sell_score": sell_score,
+        "market_environment": market_environment,
+        "market_bias_score": round(market_bias_score, 2),
+        "industry_environment": industry_environment,
+        "industry_bias_score": round(industry_bias_score, 2),
+        "latest_volume_ratio": round(latest_volume_ratio, 2),
+        "earnings_phase": earnings_phase,
     }
 
 
@@ -192,6 +232,12 @@ def _build_recommendation_levels(
         dcf_gap_pct = float(dcf_gap) if dcf_gap is not None else None
     except (TypeError, ValueError):
         dcf_gap_pct = None
+    latest_volume_ratio = float(snapshot.get("latest_volume_ratio") or 1.0)
+    market_environment = str(snapshot.get("market_environment") or "中性")
+    market_bias_score = float(snapshot.get("market_bias_score") or 0.0)
+    industry_environment = str(snapshot.get("industry_environment") or "中性")
+    industry_bias_score = float(snapshot.get("industry_bias_score") or 0.0)
+    earnings_phase = str(snapshot.get("earnings_phase") or "常规窗口")
 
     ranked_models = sorted(
         _load_quant_models(snapshot),
@@ -245,6 +291,31 @@ def _build_recommendation_levels(
             sell_level_raw += min(1.0, abs(dcf_gap_pct) / 18.0)
             buy_level_raw -= min(0.6, abs(dcf_gap_pct) / 30.0)
 
+    if latest_volume_ratio >= 1.15:
+        buy_level_raw += 0.5
+    elif latest_volume_ratio < 0.8:
+        buy_level_raw -= 0.6
+        sell_level_raw += 0.4
+
+    if market_environment == "偏强":
+        buy_level_raw += min(0.8, 0.2 + max(0.0, market_bias_score) / 40.0)
+    elif market_environment == "偏弱":
+        buy_level_raw -= min(1.2, 0.4 + abs(market_bias_score) / 35.0)
+        sell_level_raw += min(1.0, 0.3 + abs(market_bias_score) / 40.0)
+
+    if industry_environment == "偏强":
+        buy_level_raw += min(0.6, 0.15 + max(0.0, industry_bias_score) / 50.0)
+    elif industry_environment == "偏弱":
+        buy_level_raw -= min(0.8, 0.2 + abs(industry_bias_score) / 45.0)
+        sell_level_raw += min(0.7, 0.15 + abs(industry_bias_score) / 55.0)
+
+    if earnings_phase == "财报窗口进行中":
+        buy_level_raw -= 0.8
+        sell_level_raw += 0.5
+    elif earnings_phase == "财报窗口临近":
+        buy_level_raw -= 0.4
+        sell_level_raw += 0.2
+
     action = str(action_summary.get("action") or "观望")
     if action == "偏买入":
         buy_level_raw += 0.8
@@ -261,7 +332,7 @@ def _build_recommendation_levels(
         "buy_recommendation_level_label": _level_label(buy_level),
         "sell_recommendation_level_label": _level_label(sell_level),
         "recommendation_level_method": (
-            "参考多模型量化项目常见框架，综合四模型均分、一致性、显式买卖信号、趋势位置与 DCF 安全边际后得到 10 级评分。"
+            "参考多模型量化项目常见框架，综合四模型均分、一致性、显式买卖信号、趋势位置、成交量、大盘环境、行业强弱、财报节奏与 DCF 安全边际后得到 10 级评分。"
         ),
         "top_model_average_score": round(top_average, 2),
         "top_model_dispersion": round(dispersion, 2),
@@ -407,6 +478,14 @@ def _neutral_snapshot_from_position(symbol: str, position_summary: Mapping[str, 
     payload.setdefault("trigger_state", "正常")
     payload.setdefault("trigger_detail", "")
     payload.setdefault("updated_at", "")
+    payload.setdefault("latest_volume_ratio", 1.0)
+    payload.setdefault("market_environment", "中性")
+    payload.setdefault("market_bias_score", 0.0)
+    payload.setdefault("industry_name", "")
+    payload.setdefault("industry_environment", "中性")
+    payload.setdefault("industry_bias_score", 0.0)
+    payload.setdefault("earnings_phase", "常规窗口")
+    payload.setdefault("earnings_days_to_window", 999)
     return payload
 
 
@@ -498,6 +577,12 @@ def build_stock_comprehensive_advice(
         dcf_summary = str(resolved_snapshot.get("dcf_reason") or "DCF 估值数据暂不充分")
 
     action = str(action_summary.get("action") or "观望")
+    market_context_line = (
+        f"大盘{action_summary.get('market_environment', '中性')}"
+        f" / 行业{action_summary.get('industry_environment', '中性')}"
+        f" / 量能比 {float(action_summary.get('latest_volume_ratio') or 1.0):.2f}"
+        f" / 财报节奏 {action_summary.get('earnings_phase', '常规窗口')}"
+    )
     if action == "偏买入":
         decision_summary = "当前结论偏买入，适合等回踩支撑后分批介入"
     elif action == "偏卖出":
@@ -505,7 +590,7 @@ def build_stock_comprehensive_advice(
     else:
         decision_summary = "当前买卖信号仍在拉锯，建议先等确认位给出方向"
 
-    conclusion_line = f"{action}｜{model_consensus_text}；{decision_summary}。"
+    conclusion_line = f"{action}｜{model_consensus_text}；{market_context_line}；{decision_summary}。"
     buy_line = (
         f"买点：{price_plan['recommended_buy_price_range']}｜"
         f"买入等级 {recommendation_levels['buy_recommendation_level']}/10"
@@ -572,6 +657,12 @@ def build_stock_comprehensive_advice(
         "dcf_valuation_gap_pct": resolved_snapshot.get("dcf_valuation_gap_pct"),
         "dcf_label": resolved_snapshot.get("dcf_label"),
         "dcf_reason": resolved_snapshot.get("dcf_reason"),
+        "market_environment": action_summary.get("market_environment", "中性"),
+        "market_bias_score": action_summary.get("market_bias_score", 0.0),
+        "industry_environment": action_summary.get("industry_environment", "中性"),
+        "industry_bias_score": action_summary.get("industry_bias_score", 0.0),
+        "latest_volume_ratio": action_summary.get("latest_volume_ratio", 1.0),
+        "earnings_phase": action_summary.get("earnings_phase", "常规窗口"),
     }
 
 

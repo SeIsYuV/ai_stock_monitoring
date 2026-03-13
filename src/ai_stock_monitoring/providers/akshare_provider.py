@@ -35,15 +35,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
 
     def get_quote(self, symbol: str) -> Quote:
         """Load the latest quote and display name for one symbol."""
-        info = self._cached(
-            key=("quote", symbol),
-            ttl_seconds=20,
-            builder=lambda: ak.stock_individual_info_em(symbol=symbol),
-        )
-        item_map = {
-            str(row["item"]): row["value"]
-            for _, row in info.iterrows()
-        }
+        item_map = self._load_symbol_item_map(symbol)
         latest_price = _to_float(item_map.get("最新") or item_map.get("最新价"))
         name = str(item_map.get("股票简称") or symbol)
         return Quote(
@@ -121,6 +113,70 @@ class AkshareMarketDataProvider(MarketDataProvider):
         trade_dates = pd.to_datetime(frame["trade_date"], errors="coerce").dropna()
         return [item.date() for item in trade_dates.to_list()]
 
+
+    def get_reference_index_daily_bars(self, index_symbol: str, limit: int = 120) -> list[PriceBar]:
+        start_date = (datetime.now(UTC).date() - timedelta(days=260)).strftime("%Y%m%d")
+        try:
+            frame = self._cached(
+                key=("index_daily", index_symbol),
+                ttl_seconds=300,
+                builder=lambda: ak.stock_zh_index_daily_em(symbol=index_symbol),
+            )
+        except Exception:
+            return []
+        if frame is None or frame.empty:
+            return []
+        working = frame.copy().tail(limit)
+        renamed = working.rename(columns={
+            "date": "日期",
+            "open": "开盘",
+            "high": "最高",
+            "low": "最低",
+            "close": "收盘",
+            "volume": "成交量",
+        })
+        if "日期" not in renamed.columns:
+            return []
+        return self._to_bars(renamed.tail(limit))
+
+    def get_symbol_profile(self, symbol: str) -> dict[str, Any]:
+        item_map = self._load_symbol_item_map(symbol)
+        industry_name = str(item_map.get("行业") or item_map.get("所属行业") or "")
+        return {"industry_name": industry_name}
+
+    def get_industry_daily_bars(self, industry_name: str, limit: int = 120) -> list[PriceBar]:
+        if not industry_name:
+            return []
+        start_date = (datetime.now(UTC).date() - timedelta(days=260)).strftime("%Y%m%d")
+        try:
+            frame = self._cached(
+                key=("industry_daily", industry_name),
+                ttl_seconds=1800,
+                builder=lambda: ak.stock_board_industry_hist_em(
+                    symbol=industry_name,
+                    start_date=start_date,
+                    end_date="20500101",
+                    period="日k",
+                    adjust="",
+                ),
+            )
+        except Exception:
+            return []
+        if frame is None or frame.empty:
+            return []
+        return self._to_bars(frame.tail(limit))
+
+    def _load_symbol_item_map(self, symbol: str) -> dict[str, Any]:
+        info = self._cached(
+            key=("quote", symbol),
+            ttl_seconds=20,
+            builder=lambda: ak.stock_individual_info_em(symbol=symbol),
+        )
+        return {
+            str(row["item"]): row["value"]
+            for _, row in info.iterrows()
+        }
+
     def _cached(
         self,
         key: tuple[str, str],
@@ -151,6 +207,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
                     high_price=_to_float(row["最高"]),
                     low_price=_to_float(row["最低"]),
                     close_price=_to_float(row["收盘"]),
+                    volume=_to_float(row.get("成交量", 0.0)),
                 )
             )
         return bars

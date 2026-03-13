@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,7 @@ class PriceBar:
     high_price: float
     low_price: float
     close_price: float
+    volume: float = 0.0
 
 
 class MarketDataProvider:
@@ -41,3 +43,12 @@ class MarketDataProvider:
 
     def get_trade_dates(self) -> list[date]:
         raise NotImplementedError
+
+    def get_reference_index_daily_bars(self, index_symbol: str, limit: int = 120) -> list[PriceBar]:
+        return []
+
+    def get_symbol_profile(self, symbol: str) -> dict[str, Any]:
+        return {"industry_name": ""}
+
+    def get_industry_daily_bars(self, industry_name: str, limit: int = 120) -> list[PriceBar]:
+        return []
