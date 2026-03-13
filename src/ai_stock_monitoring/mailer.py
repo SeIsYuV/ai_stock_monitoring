@@ -139,34 +139,66 @@ def build_portfolio_review_email_body(payload: dict[str, Any]) -> str:
 
     portfolio_profile = payload["portfolio_profile"]
     active_positions = portfolio_profile.get("active_positions", [])
+    priority_reduce_positions = portfolio_profile.get("priority_reduce_positions", [])
+    priority_add_positions = portfolio_profile.get("priority_add_positions", [])
+    overall_adjustment_suggestions = portfolio_profile.get("overall_adjustment_suggestions", [])
+    professional_advice = portfolio_profile.get("professional_advice", [])
+    risk_reasons = portfolio_profile.get("risk_reasons", [])
+
     lines = [
         f"账号：{payload['owner_username']}",
         f"交易日：{payload['trade_date']}",
         f"收盘后持仓数：{len(active_positions)}",
         "=" * 18,
-        f"组合建议：{portfolio_profile.get('comprehensive_advice', '-')}",
-        f"当前持仓比例：{portfolio_profile.get('holding_ratio', 0):.2f}%",
-        f"模型建议仓位：{portfolio_profile.get('recommended_holding_ratio', '-')}",
-        f"风险等级：{portfolio_profile.get('risk_level', '-')}",
-        f"持仓风格：{portfolio_profile.get('holding_style', '-')}",
-        "",
-        "【持仓逐只建议】",
+        "【组合总览】",
+        f"- 组合建议：{portfolio_profile.get('comprehensive_advice', '-')}",
+        f"- 当前持仓比例：{portfolio_profile.get('holding_ratio', 0):.2f}%",
+        f"- 模型建议仓位：{portfolio_profile.get('recommended_holding_ratio', '-')}",
+        f"- 风险等级：{portfolio_profile.get('risk_level', '-')}",
+        f"- 持仓风格：{portfolio_profile.get('holding_style', '-')}",
     ]
+
+    if overall_adjustment_suggestions:
+        lines.extend(["", "【总仓位调整】"])
+        lines.extend(f"- {item}" for item in overall_adjustment_suggestions)
+
+    if priority_reduce_positions:
+        lines.extend(["", "【优先减仓】"])
+        lines.extend(f"- {item}" for item in priority_reduce_positions)
+
+    if priority_add_positions:
+        lines.extend(["", "【优先加仓】"])
+        lines.extend(f"- {item}" for item in priority_add_positions)
+
+    lines.extend(["", "【持仓逐只建议】"])
     for item in active_positions:
         lines.extend([
-            f"- {item.get('display_name', item.get('symbol', '-'))}（{item.get('symbol', '-') }）",
+            f"- {item.get('display_name', item.get('symbol', '-'))}（{item.get('symbol', '-')}）",
             f"  最新价：{float(item.get('latest_price', 0.0)):.2f} ｜ 仓位：{float(item.get('weight_pct', 0.0)):.2f}% ｜ 动作：{item.get('action', '-')}",
             f"  买点：{item.get('recommended_buy_price_range', '-')} ｜ 买入等级 {item.get('buy_recommendation_level', '-')}/10",
             f"  卖点：{item.get('recommended_sell_price_range', '-')} ｜ 卖出等级 {item.get('sell_recommendation_level', '-')}/10",
+            f"  明日关注位：{item.get('watch_price_range', '-')}",
             f"  DCF：{item.get('advice_dcf_line', item.get('dcf_reason', '-'))}",
         ])
-    professional_advice = portfolio_profile.get('professional_advice', [])
+
+    tomorrow_watch_lines = []
+    for item in active_positions:
+        watch_range = str(item.get('watch_price_range') or '').strip()
+        if watch_range and watch_range != '暂无明确价位':
+            tomorrow_watch_lines.append(
+                f"{item.get('display_name', item.get('symbol', '-'))}：关注 {watch_range}"
+            )
+    if tomorrow_watch_lines:
+        lines.extend(["", "【明日关注位】"])
+        lines.extend(f"- {item}" for item in tomorrow_watch_lines)
+
     if professional_advice:
         lines.extend(["", "【专业综合分析】"])
         lines.extend(f"- {item}" for item in professional_advice)
-    risk_reasons = portfolio_profile.get('risk_reasons', [])
+
     if risk_reasons:
         lines.extend(["", "【风险提示】"])
         lines.extend(f"- {item}" for item in risk_reasons)
+
     lines.extend(["", "本系统仅为监控参考，不构成任何投资建议。"])
     return "\n".join(lines)
