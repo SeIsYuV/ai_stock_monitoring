@@ -189,7 +189,12 @@ class AkshareMarketDataProvider(MarketDataProvider):
         cached_item = self._cache.get(key)
         if cached_item and cached_item[0] > now:
             return cached_item[1]
-        value = builder()
+        try:
+            value = builder()
+        except Exception:
+            if cached_item is not None:
+                return cached_item[1]
+            raise
         self._cache[key] = (now + timedelta(seconds=ttl_seconds), value)
         return value
 

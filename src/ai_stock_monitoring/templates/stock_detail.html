@@ -8,7 +8,7 @@
     <p>量化综合盈利概率：{{ '%.2f%%'|format(snapshot['quant_probability']) if snapshot['quant_probability'] is not none else '-' }}</p>
     <p>DCF 代理内在价值：{{ '%.2f'|format(snapshot['dcf_intrinsic_value']) if snapshot['dcf_intrinsic_value'] is not none else '暂无估值' }}{% if snapshot['dcf_valuation_gap_pct'] is not none %} ｜ 估值偏差 {{ '%.2f%%'|format(snapshot['dcf_valuation_gap_pct']) }}{% elif snapshot['dcf_reason'] %} ｜ {{ snapshot['dcf_reason'] }}{% endif %}</p>
     <div>
-        <strong>BOLL 上 / 中 / 下轨：</strong>
+        <strong>周 BOLL 上 / 中 / 下轨：</strong>
         <div>上轨 {{ '%.2f'|format(snapshot['boll_upper']) if snapshot['boll_upper'] is not none else '-' }} 元</div>
         <div>中轨 {{ '%.2f'|format(snapshot['boll_mid']) if snapshot['boll_mid'] is not none else '-' }} 元</div>
         <div>下轨 {{ '%.2f'|format(snapshot['boll_lower']) if snapshot['boll_lower'] is not none else '-' }} 元</div>
@@ -27,7 +27,7 @@
     <div class="toolbar-row" style="margin-bottom: 16px;">
         <div>
             <h2 style="margin-bottom: 6px;">图表分析</h2>
-            <p class="hint-text" style="margin-bottom: 0;">支持日 / 周 / 月 K 线切换，以及 BOLL 轨道图；鼠标悬停可查看详细数值。</p>
+            <p class="hint-text" style="margin-bottom: 0;">支持日 / 周 / 月 K 线切换，以及 BOLL 轨道图；顶部监控提醒使用周级别 BOLL，这里的轨道图继续用于观察细节波动。</p>
         </div>
         <div class="chart-tabs" role="tablist" aria-label="图表切换">
             <button type="button" class="secondary active" data-chart-tab="daily-pane">日 K</button>

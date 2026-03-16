@@ -35,9 +35,12 @@ SELL_ALERT_MIN_LEVEL = 5
 SELL_ALERT_STRONG_LEVEL = 7
 SELL_ALERT_BOLL_EXTENSION_RATIO = 1.02
 SELL_ALERT_LOW_DIVIDEND_MAX_QUANT = 55.0
-BUY_TRIGGER_TYPES = {"250日线", "BOLL中轨", "BOLL下轨", "股息率", "30周/60周均线", "量化盈利概率"}
+WEEKLY_SUPPORT_TRIGGER_TYPES = {"30周/60周均线", "30周线上穿60周线", "有效突破60周线"}
+BUY_TRIGGER_TYPES = {"250日线", "BOLL中轨", "BOLL下轨", "股息率", "30周/60周均线", "30周线上穿60周线", "有效突破60周线", "量化盈利概率"}
 PRICE_SUPPORT_TRIGGER_TYPES = {"250日线", "BOLL中轨", "BOLL下轨"}
 SELL_TRIGGER_TYPES = {"BOLL上轨卖出", "低股息率卖出", "量化走弱卖出"}
+WEEKLY_BREAKOUT_MIN_CLOSE_RATIO = 1.01
+WEEKLY_BREAKOUT_MIN_LOW_RATIO = 0.995
 
 from .config import AppSettings
 from .database import (
@@ -47,6 +50,7 @@ from .database import (
     get_monitored_stocks,
     get_portfolio_settings,
     get_quant_settings,
+    get_snapshot,
     get_signal_state,
     list_pending_signal_states,
     list_trade_records,
@@ -100,6 +104,11 @@ class SnapshotComputation:
     earnings_phase: str = "常规窗口"
     earnings_days_to_window: int = 999
     position_concentration_pct: float = 0.0
+    weekly_bullish_crossed: bool = False
+    weekly_bearish_crossed: bool = False
+    weekly_close: float = 0.0
+    prev_weekly_close: float = 0.0
+    weekly_breakout_above_ma60w: bool = False
 
 
 def validate_stock_symbol(symbol: str) -> bool:
@@ -232,11 +241,44 @@ def has_weekly_crossed(
     current_ma_30w: float,
     current_ma_60w: float,
 ) -> bool:
+    return get_weekly_cross_direction(prev_ma_30w, prev_ma_60w, current_ma_30w, current_ma_60w) is not None
+
+
+def get_weekly_cross_direction(
+    prev_ma_30w: float,
+    prev_ma_60w: float,
+    current_ma_30w: float,
+    current_ma_60w: float,
+) -> str | None:
     if not all([prev_ma_30w, prev_ma_60w, current_ma_30w, current_ma_60w]):
-        return False
+        return None
     prev_diff = prev_ma_30w - prev_ma_60w
     current_diff = current_ma_30w - current_ma_60w
-    return prev_diff == 0 or current_diff == 0 or prev_diff * current_diff < 0
+    if (prev_diff <= 0 < current_diff) or (prev_diff < 0 <= current_diff):
+        return "bullish"
+    if (prev_diff >= 0 > current_diff) or (prev_diff > 0 >= current_diff):
+        return "bearish"
+    return None
+
+
+def has_effective_breakout_above_ma60w(
+    weekly_bars: list[PriceBar],
+    current_ma_60w: float,
+    prev_ma_60w: float,
+    min_close_ratio: float = WEEKLY_BREAKOUT_MIN_CLOSE_RATIO,
+    min_low_ratio: float = WEEKLY_BREAKOUT_MIN_LOW_RATIO,
+) -> bool:
+    if len(weekly_bars) < 2 or not current_ma_60w or not prev_ma_60w:
+        return False
+    latest_week = weekly_bars[-1]
+    previous_week = weekly_bars[-2]
+    if previous_week.close_price > prev_ma_60w:
+        return False
+    if latest_week.close_price < current_ma_60w * min_close_ratio:
+        return False
+    if latest_week.low_price < current_ma_60w * min_low_ratio:
+        return False
+    return True
 
 
 def compute_snapshot_metrics(
@@ -252,14 +294,20 @@ def compute_snapshot_metrics(
     weekly_closes = [item.close_price for item in weekly_bars]
 
     ma_250 = calculate_simple_moving_average(daily_closes, 250)
-    boll_mid = calculate_simple_moving_average(daily_closes, 20)
-    boll_lower = calculate_bollinger_lower_band(daily_closes, 20)
-    boll_upper = calculate_bollinger_upper_band(daily_closes, 20)
+    boll_mid = calculate_simple_moving_average(weekly_closes, 20)
+    boll_lower = calculate_bollinger_lower_band(weekly_closes, 20)
+    boll_upper = calculate_bollinger_upper_band(weekly_closes, 20)
     ma_30w = calculate_simple_moving_average(weekly_closes, 30)
     ma_60w = calculate_simple_moving_average(weekly_closes, 60)
     prev_ma_30w = calculate_simple_moving_average(weekly_closes[:-1], 30)
     prev_ma_60w = calculate_simple_moving_average(weekly_closes[:-1], 60)
-    weekly_crossed = has_weekly_crossed(prev_ma_30w, prev_ma_60w, ma_30w, ma_60w)
+    weekly_cross_direction = get_weekly_cross_direction(prev_ma_30w, prev_ma_60w, ma_30w, ma_60w)
+    weekly_crossed = weekly_cross_direction is not None
+    weekly_bullish_crossed = weekly_cross_direction == "bullish"
+    weekly_bearish_crossed = weekly_cross_direction == "bearish"
+    weekly_close = weekly_closes[-1] if weekly_closes else quote.latest_price
+    prev_weekly_close = weekly_closes[-2] if len(weekly_closes) >= 2 else weekly_close
+    weekly_breakout_above_ma60w = has_effective_breakout_above_ma60w(weekly_bars, ma_60w, prev_ma_60w)
 
     triggered_labels: list[str] = []
     if ma_250 and quote.latest_price <= ma_250:
@@ -274,14 +322,18 @@ def compute_snapshot_metrics(
         triggered_labels.append("股息率")
     if 0 < dividend_yield < SELL_DIVIDEND_THRESHOLD:
         triggered_labels.append("低股息率卖出")
-    if weekly_crossed:
-        triggered_labels.append("30周/60周均线")
+    if weekly_bullish_crossed:
+        triggered_labels.append("30周线上穿60周线")
+    if weekly_bearish_crossed:
+        triggered_labels.append("30周线下穿60周线")
+    if weekly_breakout_above_ma60w:
+        triggered_labels.append("有效突破60周线")
 
     trigger_state = "、".join(triggered_labels) if triggered_labels else "正常"
     trigger_detail = (
-        f"现价 {quote.latest_price:.2f} | 250日线 {ma_250:.2f} | "
+        f"现价 {quote.latest_price:.2f} | 周收盘 {weekly_close:.2f} | 250日线 {ma_250:.2f} | "
         f"30周/60周 {ma_30w:.2f}/{ma_60w:.2f} | "
-        f"BOLL上/中/下轨 {boll_upper:.2f}/{boll_mid:.2f}/{boll_lower:.2f} | 股息率 {dividend_yield:.2f}% | "
+        f"周BOLL上/中/下轨 {boll_upper:.2f}/{boll_mid:.2f}/{boll_lower:.2f} | 股息率 {dividend_yield:.2f}% | "
         f"量化综合盈利概率 {quant_probability:.2f}%"
     )
     return SnapshotComputation(
@@ -304,6 +356,11 @@ def compute_snapshot_metrics(
         triggered_labels=tuple(triggered_labels),
         weekly_crossed=weekly_crossed,
         updated_at=quote.updated_at,
+        weekly_bullish_crossed=weekly_bullish_crossed,
+        weekly_bearish_crossed=weekly_bearish_crossed,
+        weekly_close=weekly_close,
+        prev_weekly_close=prev_weekly_close,
+        weekly_breakout_above_ma60w=weekly_breakout_above_ma60w,
     )
 
 
@@ -438,9 +495,14 @@ class StockMonitor:
         就退回到最近一个日线收盘价，这样新增股票后在非交易时段也能立刻看到最近可用数据。
         """
 
-        quote = self.provider.get_quote(symbol)
         daily_bars = self.provider.get_daily_bars(symbol)
         weekly_bars = self.provider.get_weekly_bars(symbol)
+        quote_error: Exception | None = None
+        try:
+            quote = self.provider.get_quote(symbol)
+        except Exception as exc:
+            quote_error = exc
+            quote = self._build_quote_from_recent_bars(symbol, daily_bars, weekly_bars)
 
         effective_quote = quote
         if quote.latest_price <= 0 and daily_bars:
@@ -449,12 +511,10 @@ class StockMonitor:
                 symbol=quote.symbol,
                 name=quote.name,
                 latest_price=latest_daily_bar.close_price,
-                updated_at=datetime.combine(
-                    latest_daily_bar.traded_on,
-                    datetime.min.time(),
-                    tzinfo=quote.updated_at.tzinfo,
-                ),
+                updated_at=datetime.now(UTC),
             )
+        if quote_error is not None:
+            self.last_error_message = f"{symbol} 实时报价获取失败，已回退到最近K线价格：{quote_error}"
 
         dividend_yield = self.provider.get_trailing_dividend_yield(symbol, effective_quote.latest_price)
         quant_signal = build_quant_signal(
@@ -481,6 +541,21 @@ class StockMonitor:
             quant_model_breakdown=quant_signal.breakdown_json,
         )
         return replace(base_snapshot, **self._build_snapshot_context(symbol, daily_bars, base_snapshot.updated_at.date(), base_snapshot.trigger_detail))
+
+    @staticmethod
+    def _build_quote_from_recent_bars(
+        symbol: str,
+        daily_bars: list[PriceBar],
+        weekly_bars: list[PriceBar],
+    ) -> Quote:
+        fallback_bar = daily_bars[-1] if daily_bars else weekly_bars[-1] if weekly_bars else None
+        fallback_price = float(fallback_bar.close_price) if fallback_bar else 0.0
+        return Quote(
+            symbol=symbol,
+            name=symbol,
+            latest_price=fallback_price,
+            updated_at=datetime.now(UTC),
+        )
 
     @staticmethod
     def _estimate_position_concentration_pct(
@@ -556,11 +631,19 @@ class StockMonitor:
 
     def refresh_symbol_snapshot(self, owner_username: str, symbol: str) -> SnapshotComputation:
         quant_config = self._resolve_owner_quant_config(owner_username)
-        snapshot = self.build_snapshot(
-            symbol,
-            selected_models=quant_config["selected_models"],
-            strategy_params=quant_config["strategy_params"],
-        )
+        try:
+            snapshot = self.build_snapshot(
+                symbol,
+                selected_models=quant_config["selected_models"],
+                strategy_params=quant_config["strategy_params"],
+            )
+        except Exception as exc:
+            fallback_row = get_snapshot(self.settings.db_path, owner_username, symbol)
+            if fallback_row is None:
+                raise
+            self.last_error_message = f"{owner_username}/{symbol} 刷新失败，已保留最近快照：{exc}"
+            self.last_refresh_at = datetime.now(UTC)
+            return self._snapshot_from_row(fallback_row)
         upsert_snapshot(
             db_path=self.settings.db_path,
             owner_username=owner_username,
@@ -590,6 +673,44 @@ class StockMonitor:
         )
         self.last_refresh_at = datetime.now(UTC)
         return snapshot
+
+    @staticmethod
+    def _snapshot_from_row(row: Any) -> SnapshotComputation:
+        updated_at_raw = row["updated_at"] if row["updated_at"] else datetime.now(UTC).isoformat()
+        trigger_state = str(row["trigger_state"] or "正常")
+        triggered_labels = tuple(item for item in trigger_state.split("、") if item and item != "正常")
+        return SnapshotComputation(
+            symbol=str(row["symbol"]),
+            display_name=str(row["display_name"] or row["symbol"]),
+            latest_price=float(row["latest_price"] or 0.0),
+            ma_250=float(row["ma_250"] or 0.0),
+            ma_30w=float(row["ma_30w"] or 0.0),
+            ma_60w=float(row["ma_60w"] or 0.0),
+            prev_ma_30w=float(row["ma_30w"] or 0.0),
+            prev_ma_60w=float(row["ma_60w"] or 0.0),
+            boll_mid=float(row["boll_mid"] or 0.0),
+            boll_lower=float(row["boll_lower"] or 0.0),
+            boll_upper=float(row["boll_upper"] or 0.0),
+            dividend_yield=float(row["dividend_yield"] or 0.0),
+            quant_probability=float(row["quant_probability"] or 0.0),
+            quant_model_breakdown=str(row["quant_model_breakdown"] or "[]"),
+            trigger_state=trigger_state,
+            trigger_detail=str(row["trigger_detail"] or ""),
+            triggered_labels=triggered_labels,
+            weekly_crossed=any(item in {"30周/60周均线", "30周线上穿60周线", "30周线下穿60周线"} for item in triggered_labels),
+            updated_at=datetime.fromisoformat(updated_at_raw),
+            latest_volume_ratio=float(row["latest_volume_ratio"] or 1.0),
+            market_environment=str(row["market_environment"] or "中性"),
+            market_bias_score=float(row["market_bias_score"] or 0.0),
+            industry_name=str(row["industry_name"] or ""),
+            industry_environment=str(row["industry_environment"] or "中性"),
+            industry_bias_score=float(row["industry_bias_score"] or 0.0),
+            earnings_phase=str(row["earnings_phase"] or "常规窗口"),
+            earnings_days_to_window=int(row["earnings_days_to_window"] or 999),
+            weekly_bullish_crossed="30周线上穿60周线" in triggered_labels,
+            weekly_bearish_crossed="30周线下穿60周线" in triggered_labels,
+            weekly_breakout_above_ma60w="有效突破60周线" in triggered_labels,
+        )
 
     def run_cycle(self, now: datetime | None = None) -> None:
         if not self._lock.acquire(blocking=False):
@@ -714,7 +835,7 @@ class StockMonitor:
                     trigger_type="BOLL中轨",
                     trade_marker=trade_marker,
                     condition_met=bool(snapshot.boll_mid and snapshot.latest_price <= snapshot.boll_mid and self._should_emit_buy_alert(snapshot, "BOLL中轨", stock_advice)),
-                    detail=snapshot.trigger_detail,
+                    detail=f"{snapshot.trigger_detail} | 周线BOLL：盘中现价回落至周BOLL中轨下方。",
                     current_price=snapshot.latest_price,
                     indicator_values={
                         "boll_mid": snapshot.boll_mid,
@@ -730,7 +851,7 @@ class StockMonitor:
                     trigger_type="BOLL下轨",
                     trade_marker=trade_marker,
                     condition_met=bool(snapshot.boll_lower and snapshot.latest_price <= snapshot.boll_lower and self._should_emit_buy_alert(snapshot, "BOLL下轨", stock_advice)),
-                    detail=snapshot.trigger_detail,
+                    detail=f"{snapshot.trigger_detail} | 周线BOLL：盘中现价触及周BOLL下轨。",
                     current_price=snapshot.latest_price,
                     indicator_values={
                         "boll_lower": snapshot.boll_lower,
@@ -746,7 +867,7 @@ class StockMonitor:
                     trigger_type="BOLL上轨卖出",
                     trade_marker=trade_marker,
                     condition_met=bool(snapshot.boll_upper and snapshot.latest_price >= snapshot.boll_upper and self._should_emit_sell_alert(position_summary, snapshot, "BOLL上轨卖出", stock_advice)),
-                    detail=f"{snapshot.trigger_detail} | 卖出参考：价格突破 BOLL 上轨，可结合仓位分批止盈。",
+                    detail=f"{snapshot.trigger_detail} | 周线BOLL：盘中价格突破周BOLL上轨，可结合仓位分批止盈。",
                     current_price=snapshot.latest_price,
                     indicator_values={
                         "boll_upper": snapshot.boll_upper,
@@ -838,7 +959,7 @@ class StockMonitor:
         sell_signals = set(stock_advice.get("sell_signals") or ())
         support_triggers = triggered_labels & PRICE_SUPPORT_TRIGGER_TYPES
         has_dividend_support = "股息率" in triggered_labels
-        has_weekly_support = "30周/60周均线" in triggered_labels
+        has_weekly_support = bool(triggered_labels & WEEKLY_SUPPORT_TRIGGER_TYPES)
         top_model_dispersion = float(stock_advice.get("top_model_dispersion") or 0.0)
         expected_upside_pct = StockMonitor._buy_expected_upside_pct(snapshot.latest_price, stock_advice)
         market_environment = str(snapshot.market_environment or "中性")
@@ -896,7 +1017,7 @@ class StockMonitor:
                 or has_weekly_support
                 or quant_probability >= BUY_ALERT_DIVIDEND_CONFIRMATION_QUANT
             )
-        if trigger_type == "30周/60周均线":
+        if trigger_type in WEEKLY_SUPPORT_TRIGGER_TYPES:
             return bool(
                 support_triggers
                 or has_dividend_support
@@ -970,66 +1091,21 @@ class StockMonitor:
                 set_job_state(self.settings.db_path, owner_username, "post_close_holding_review", marker)
                 continue
             email_settings = get_email_settings(self.settings.db_path, owner_username)
-            quant_config = self._resolve_owner_quant_config(owner_username)
             snapshots: list[dict[str, Any]] = []
             for symbol in sorted(position_map):
-                snapshot = self.build_snapshot(
-                    symbol,
-                    selected_models=quant_config["selected_models"],
-                    strategy_params=quant_config["strategy_params"],
-                )
-                upsert_snapshot(
-                    db_path=self.settings.db_path,
-                    owner_username=owner_username,
-                    symbol=snapshot.symbol,
-                    display_name=snapshot.display_name,
-                    latest_price=snapshot.latest_price,
-                    ma_250=snapshot.ma_250,
-                    ma_30w=snapshot.ma_30w,
-                    ma_60w=snapshot.ma_60w,
-                    boll_mid=snapshot.boll_mid,
-                    boll_lower=snapshot.boll_lower,
-                    boll_upper=snapshot.boll_upper,
-                    dividend_yield=snapshot.dividend_yield,
-                    quant_probability=snapshot.quant_probability,
-                    quant_model_breakdown=snapshot.quant_model_breakdown,
-                    trigger_state=snapshot.trigger_state,
-                    trigger_detail=snapshot.trigger_detail,
-                    latest_volume_ratio=snapshot.latest_volume_ratio,
-                    market_environment=snapshot.market_environment,
-                    market_bias_score=snapshot.market_bias_score,
-                    industry_name=snapshot.industry_name,
-                    industry_environment=snapshot.industry_environment,
-                    industry_bias_score=snapshot.industry_bias_score,
-                    earnings_phase=snapshot.earnings_phase,
-                    earnings_days_to_window=snapshot.earnings_days_to_window,
-                    updated_at=snapshot.updated_at.isoformat(),
-                )
-                snapshots.append({
-                    "symbol": snapshot.symbol,
-                    "display_name": snapshot.display_name,
-                    "latest_price": snapshot.latest_price,
-                    "ma_250": snapshot.ma_250,
-                    "ma_30w": snapshot.ma_30w,
-                    "ma_60w": snapshot.ma_60w,
-                    "boll_mid": snapshot.boll_mid,
-                    "boll_lower": snapshot.boll_lower,
-                    "boll_upper": snapshot.boll_upper,
-                    "dividend_yield": snapshot.dividend_yield,
-                    "quant_probability": snapshot.quant_probability,
-                    "quant_model_breakdown": snapshot.quant_model_breakdown,
-                    "trigger_state": snapshot.trigger_state,
-                    "trigger_detail": snapshot.trigger_detail,
-                    "latest_volume_ratio": snapshot.latest_volume_ratio,
-                    "market_environment": snapshot.market_environment,
-                    "market_bias_score": snapshot.market_bias_score,
-                    "industry_name": snapshot.industry_name,
-                    "industry_environment": snapshot.industry_environment,
-                    "industry_bias_score": snapshot.industry_bias_score,
-                    "earnings_phase": snapshot.earnings_phase,
-                    "earnings_days_to_window": snapshot.earnings_days_to_window,
-                    "updated_at": snapshot.updated_at.isoformat(),
-                })
+                try:
+                    snapshot = self.refresh_symbol_snapshot(owner_username, symbol)
+                except Exception as exc:
+                    fallback_row = get_snapshot(self.settings.db_path, owner_username, symbol)
+                    if fallback_row is None:
+                        self.last_error_message = f"{owner_username}/{symbol} 收盘复盘快照刷新失败：{exc}"
+                        continue
+                    snapshot = self._snapshot_from_row(fallback_row)
+                    self.last_error_message = f"{owner_username}/{symbol} 收盘复盘沿用最近快照：{exc}"
+                snapshots.append(self._snapshot_payload(snapshot))
+            if not snapshots:
+                set_job_state(self.settings.db_path, owner_username, "post_close_holding_review", marker)
+                continue
             portfolio_settings = get_portfolio_settings(self.settings.db_path, owner_username)
             portfolio_profile = build_portfolio_profile(
                 list_trade_records(self.settings.db_path, owner_username, None),
@@ -1050,6 +1126,34 @@ class StockMonitor:
             if not email_result.success:
                 self.last_error_message = f"{owner_username} 收盘持仓复盘邮件发送失败：{email_result.error}"
             set_job_state(self.settings.db_path, owner_username, "post_close_holding_review", marker)
+
+    @staticmethod
+    def _snapshot_payload(snapshot: SnapshotComputation) -> dict[str, Any]:
+        return {
+            "symbol": snapshot.symbol,
+            "display_name": snapshot.display_name,
+            "latest_price": snapshot.latest_price,
+            "ma_250": snapshot.ma_250,
+            "ma_30w": snapshot.ma_30w,
+            "ma_60w": snapshot.ma_60w,
+            "boll_mid": snapshot.boll_mid,
+            "boll_lower": snapshot.boll_lower,
+            "boll_upper": snapshot.boll_upper,
+            "dividend_yield": snapshot.dividend_yield,
+            "quant_probability": snapshot.quant_probability,
+            "quant_model_breakdown": snapshot.quant_model_breakdown,
+            "trigger_state": snapshot.trigger_state,
+            "trigger_detail": snapshot.trigger_detail,
+            "latest_volume_ratio": snapshot.latest_volume_ratio,
+            "market_environment": snapshot.market_environment,
+            "market_bias_score": snapshot.market_bias_score,
+            "industry_name": snapshot.industry_name,
+            "industry_environment": snapshot.industry_environment,
+            "industry_bias_score": snapshot.industry_bias_score,
+            "earnings_phase": snapshot.earnings_phase,
+            "earnings_days_to_window": snapshot.earnings_days_to_window,
+            "updated_at": snapshot.updated_at.isoformat(),
+        }
 
     def _resolve_owner_quant_config(self, owner_username: str) -> dict[str, Any]:
         """Load one user's quant configuration and normalize it for downstream use."""
@@ -1207,9 +1311,16 @@ class StockMonitor:
         if next_trade_day is None:
             return
         snapshot_cache: dict[tuple[str, tuple[str, ...], str], SnapshotComputation] = {}
+        owner_position_cache: dict[str, dict[str, dict[str, Any]]] = {}
+        owner_portfolio_base_cache: dict[str, float] = {}
         owners = sorted({row["owner_username"] for row in get_monitored_stocks(self.settings.db_path)})
         for owner_username in owners:
             quant_config = self._resolve_owner_quant_config(owner_username)
+            owner_positions = owner_position_cache.setdefault(owner_username, self._resolve_owner_position_map(owner_username))
+            owner_total_investment = owner_portfolio_base_cache.setdefault(
+                owner_username,
+                float(get_portfolio_settings(self.settings.db_path, owner_username)["total_investment_amount"] or 0.0),
+            )
             cache_suffix = json.dumps(quant_config["strategy_params"], ensure_ascii=False, sort_keys=True)
             job_state = get_job_state(self.settings.db_path, owner_username, "weekly_cross_prep")
             if job_state and job_state["last_run_marker"] == marker:
@@ -1224,39 +1335,95 @@ class StockMonitor:
                         strategy_params=quant_config["strategy_params"],
                     )
                     snapshot_cache[cache_key] = snapshot
+                position_summary = owner_positions.get(stock["symbol"])
+                position_concentration_pct = self._estimate_position_concentration_pct(
+                    stock["symbol"],
+                    snapshot.latest_price,
+                    position_summary,
+                    owner_positions,
+                    owner_total_investment,
+                )
+                snapshot = replace(snapshot, position_concentration_pct=position_concentration_pct)
                 stock_advice = build_stock_comprehensive_advice(snapshot.__dict__)
-                state = get_signal_state(self.settings.db_path, owner_username, stock["symbol"], "30周/60周均线")
-                if (
-                    snapshot.weekly_crossed
-                    and self._should_emit_buy_alert(snapshot, "30周/60周均线", stock_advice)
-                    and (state is None or state["last_event_marker"] != marker)
-                ):
-                    payload = self._build_pending_payload(
-                        owner_username=owner_username,
-                        symbol=snapshot.symbol,
-                        display_name=snapshot.display_name,
-                        trigger_type="30周/60周均线",
-                        current_price=snapshot.latest_price,
-                        detail=snapshot.trigger_detail,
-                        indicator_values={
-                            "ma_30w": snapshot.ma_30w,
-                            "ma_60w": snapshot.ma_60w,
-                        },
-                        event_marker=marker,
-                    )
-                    upsert_signal_state(
-                        db_path=self.settings.db_path,
-                        owner_username=owner_username,
-                        symbol=snapshot.symbol,
-                        trigger_type="30周/60周均线",
-                        consecutive_hits=1,
-                        last_condition_met=True,
-                        last_event_marker=state["last_event_marker"] if state else None,
-                        pending_delivery=True,
-                        deliver_on=next_trade_day.isoformat(),
-                        pending_payload=payload,
-                    )
+                stock_advice["position_concentration_pct"] = position_concentration_pct
+                deliver_on = next_trade_day.isoformat()
+                self._queue_weekly_pending_alert(
+                    owner_username=owner_username,
+                    snapshot=snapshot,
+                    trigger_type="30周线上穿60周线",
+                    marker=marker,
+                    deliver_on=deliver_on,
+                    condition_met=snapshot.weekly_bullish_crossed,
+                    indicator_values={"ma_30w": snapshot.ma_30w, "ma_60w": snapshot.ma_60w},
+                    detail=f"{snapshot.trigger_detail} | 周线信号：30周线本周上穿60周线。",
+                )
+                self._queue_weekly_pending_alert(
+                    owner_username=owner_username,
+                    snapshot=snapshot,
+                    trigger_type="30周线下穿60周线",
+                    marker=marker,
+                    deliver_on=deliver_on,
+                    condition_met=snapshot.weekly_bearish_crossed,
+                    indicator_values={"ma_30w": snapshot.ma_30w, "ma_60w": snapshot.ma_60w},
+                    detail=f"{snapshot.trigger_detail} | 周线信号：30周线本周下穿60周线。",
+                )
+                self._queue_weekly_pending_alert(
+                    owner_username=owner_username,
+                    snapshot=snapshot,
+                    trigger_type="有效突破60周线",
+                    marker=marker,
+                    deliver_on=deliver_on,
+                    condition_met=snapshot.weekly_breakout_above_ma60w,
+                    indicator_values={
+                        "weekly_close": snapshot.weekly_close,
+                        "ma_60w": snapshot.ma_60w,
+                        "breakout_close_ratio": WEEKLY_BREAKOUT_MIN_CLOSE_RATIO,
+                    },
+                    detail=(
+                        f"{snapshot.trigger_detail} | 周线信号：周收盘有效突破60周线，"
+                        "且本周低点基本站稳在60周线上方。"
+                    ),
+                )
             set_job_state(self.settings.db_path, owner_username, "weekly_cross_prep", marker)
+
+    def _queue_weekly_pending_alert(
+        self,
+        owner_username: str,
+        snapshot: SnapshotComputation,
+        trigger_type: str,
+        marker: str,
+        deliver_on: str,
+        condition_met: bool,
+        indicator_values: dict[str, float | str],
+        detail: str,
+    ) -> None:
+        if not condition_met:
+            return
+        state = get_signal_state(self.settings.db_path, owner_username, snapshot.symbol, trigger_type)
+        if state is not None and state["last_event_marker"] == marker:
+            return
+        payload = self._build_pending_payload(
+            owner_username=owner_username,
+            symbol=snapshot.symbol,
+            display_name=snapshot.display_name,
+            trigger_type=trigger_type,
+            current_price=snapshot.latest_price,
+            detail=detail,
+            indicator_values=indicator_values,
+            event_marker=marker,
+        )
+        upsert_signal_state(
+            db_path=self.settings.db_path,
+            owner_username=owner_username,
+            symbol=snapshot.symbol,
+            trigger_type=trigger_type,
+            consecutive_hits=1,
+            last_condition_met=True,
+            last_event_marker=state["last_event_marker"] if state else None,
+            pending_delivery=True,
+            deliver_on=deliver_on,
+            pending_payload=payload,
+        )
 
     def _deliver_pending_alerts(self, trade_date: date) -> None:
         for state in list_pending_signal_states(self.settings.db_path, trade_date.isoformat()):

@@ -27,11 +27,14 @@ BUY_SIGNAL_WEIGHTS: dict[str, int] = {
     "BOLL下轨": 2,
     "股息率": 2,
     "30周/60周均线": 3,
+    "30周线上穿60周线": 3,
+    "有效突破60周线": 3,
     "量化盈利概率": 4,
 }
 
 SELL_SIGNAL_WEIGHTS: dict[str, int] = {
     "BOLL上轨卖出": 2,
+    "30周线下穿60周线": 3,
     "低股息率卖出": 2,
     "量化走弱卖出": 4,
 }
@@ -51,6 +54,9 @@ SIGNAL_CATEGORY_MAPPING: dict[str, str] = {
     "BOLL下轨": "technical",
     "BOLL上轨卖出": "technical",
     "30周/60周均线": "technical",
+    "30周线上穿60周线": "technical",
+    "30周线下穿60周线": "technical",
+    "有效突破60周线": "technical",
     "股息率": "dividend",
     "低股息率卖出": "dividend",
     "量化盈利概率": "quant",

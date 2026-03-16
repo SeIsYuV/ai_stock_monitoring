@@ -18,11 +18,14 @@ from src.ai_stock_monitoring.monitor import (
     calculate_bollinger_lower_band,
     calculate_bollinger_upper_band,
     calculate_simple_moving_average,
+    get_weekly_cross_direction,
+    has_effective_breakout_above_ma60w,
     has_weekly_crossed,
     parse_stock_symbols,
     validate_stock_symbol,
 )
 from src.ai_stock_monitoring.quant import build_quant_signal
+from src.ai_stock_monitoring.providers.base import PriceBar
 from src.ai_stock_monitoring.security import verify_password
 from src.ai_stock_monitoring.trade_advisor import build_market_action_summary, build_portfolio_profile, build_position_summary, build_recommended_price_plan, build_stock_comprehensive_advice
 
@@ -41,6 +44,20 @@ class MonitorTests(unittest.TestCase):
     def test_moving_average_and_cross(self) -> None:
         self.assertEqual(calculate_simple_moving_average([1, 2, 3, 4], 2), 3.5)
         self.assertTrue(has_weekly_crossed(11.0, 10.0, 9.5, 10.0))
+        self.assertEqual(get_weekly_cross_direction(9.5, 10.0, 10.5, 10.0), "bullish")
+        self.assertEqual(get_weekly_cross_direction(10.5, 10.0, 9.5, 10.0), "bearish")
+
+    def test_effective_breakout_above_ma60w_requires_close_and_low_confirmation(self) -> None:
+        weekly_bars = [
+            PriceBar(date(2026, 3, 6), 99.0, 101.0, 98.0, 100.0),
+            PriceBar(date(2026, 3, 13), 100.5, 104.0, 101.5, 103.0),
+        ]
+        self.assertTrue(has_effective_breakout_above_ma60w(weekly_bars, current_ma_60w=101.0, prev_ma_60w=100.5))
+        weak_breakout = [
+            weekly_bars[0],
+            PriceBar(date(2026, 3, 13), 100.5, 104.0, 99.8, 101.2),
+        ]
+        self.assertFalse(has_effective_breakout_above_ma60w(weak_breakout, current_ma_60w=101.0, prev_ma_60w=100.5))
 
     def test_market_status_uses_trade_calendar(self) -> None:
         status = get_market_status(
@@ -446,7 +463,7 @@ class MonitorTests(unittest.TestCase):
                 )
                 dashboard_response = client.get("/dashboard")
                 self.assertEqual(dashboard_response.status_code, 200)
-                self.assertIn("BOLL上/中/下轨", dashboard_response.text)
+                self.assertIn("周BOLL上/中/下轨", dashboard_response.text)
 
                 chart_payload = app.state.monitor.build_chart_payload("600519")
                 self.assertIn("bollUpper", chart_payload)
@@ -467,7 +484,7 @@ class MonitorTests(unittest.TestCase):
                 )
                 dashboard_response = client.get("/dashboard")
                 self.assertEqual(dashboard_response.status_code, 200)
-                self.assertIn("BOLL上/中/下轨", dashboard_response.text)
+                self.assertIn("周BOLL上/中/下轨", dashboard_response.text)
 
                 chart_payload = app.state.monitor.build_chart_payload("600519")
                 self.assertIn("bollLower", chart_payload)
@@ -492,6 +509,21 @@ class MonitorTests(unittest.TestCase):
 
                 refresh_response = client.post("/dashboard/refresh", follow_redirects=False)
                 self.assertEqual(refresh_response.status_code, 303)
+
+    def test_dashboard_manual_refresh_keeps_last_snapshot_when_provider_fails(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            with TestClient(app) as client:
+                client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
+                client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
+                original_snapshot = app.state.monitor.refresh_symbol_snapshot("admin", "600519")
+                with patch.object(app.state.monitor, "build_snapshot", side_effect=RuntimeError("Connection aborted")):
+                    refresh_response = client.post("/dashboard/refresh", follow_redirects=False)
+                self.assertEqual(refresh_response.status_code, 303)
+                retained_snapshot = get_snapshot(database_file.name, "admin", "600519")
+                self.assertIsNotNone(retained_snapshot)
+                assert retained_snapshot is not None
+                self.assertEqual(float(retained_snapshot["latest_price"]), original_snapshot.latest_price)
 
     def test_dashboard_backfills_zero_boll_upper_snapshot(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
@@ -1025,6 +1057,7 @@ class MonitorTests(unittest.TestCase):
                 trigger_detail="测试卖出提醒",
                 triggered_labels=("BOLL上轨卖出",),
                 weekly_crossed=False,
+                weekly_close=120.0,
                 updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
             )
             with TestClient(app) as client:
@@ -1049,65 +1082,48 @@ class MonitorTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(alerts), 1)
 
-    def test_buy_alerts_fire_when_new_buy_indicator_appears(self) -> None:
+    def test_weekly_buy_signals_are_delivered_next_trading_day(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
             app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
-            first_snapshot = SnapshotComputation(
-                symbol="600519",
-                display_name="贵州茅台",
-                latest_price=99.0,
-                ma_250=100.0,
-                ma_30w=110.0,
-                ma_60w=100.0,
-                prev_ma_30w=109.0,
-                prev_ma_60w=99.0,
-                boll_mid=98.0,
-                boll_lower=95.0,
-                boll_upper=110.0,
-                dividend_yield=5.0,
-                quant_probability=92.0,
-                quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 92}, {"label": "周线共振", "score": 88}], ensure_ascii=False),
-                trigger_state="250日线、股息率",
-                trigger_detail="测试买入提醒-首个指标",
-                triggered_labels=("250日线", "股息率"),
-                weekly_crossed=False,
-                updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
-            )
-            second_snapshot = SnapshotComputation(
+            weekly_snapshot = SnapshotComputation(
                 symbol="600519",
                 display_name="贵州茅台",
                 latest_price=97.0,
                 ma_250=100.0,
-                ma_30w=110.0,
+                ma_30w=101.0,
                 ma_60w=100.0,
-                prev_ma_30w=109.0,
-                prev_ma_60w=99.0,
+                prev_ma_30w=99.0,
+                prev_ma_60w=100.0,
                 boll_mid=98.0,
                 boll_lower=95.0,
                 boll_upper=110.0,
                 dividend_yield=5.0,
                 quant_probability=93.0,
                 quant_model_breakdown=json.dumps([{"label": "趋势跟随", "score": 93}, {"label": "周线共振", "score": 89}], ensure_ascii=False),
-                trigger_state="250日线、BOLL中轨、股息率",
-                trigger_detail="测试买入提醒-新增指标",
-                triggered_labels=("250日线", "BOLL中轨", "股息率"),
-                weekly_crossed=False,
-                updated_at=datetime.fromisoformat("2026-03-13T10:30:00+08:00"),
+                trigger_state="250日线、30周线上穿60周线、有效突破60周线",
+                trigger_detail="测试周线提醒",
+                triggered_labels=("250日线", "30周线上穿60周线", "有效突破60周线"),
+                weekly_crossed=True,
+                weekly_bullish_crossed=True,
+                weekly_breakout_above_ma60w=True,
+                weekly_close=103.0,
+                prev_weekly_close=99.0,
+                updated_at=datetime.fromisoformat("2026-03-13T15:00:00+08:00"),
             )
             with TestClient(app) as client:
                 client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
                 client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
                 client.post("/settings/quant", data={"enabled": "1", "probability_threshold": "50"}, follow_redirects=False)
-                with patch.object(app.state.monitor, "build_snapshot", side_effect=[first_snapshot, second_snapshot]):
-                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:00:00+08:00"))
-                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T10:30:00+08:00"))
+                with patch.object(app.state.monitor, "build_snapshot", return_value=weekly_snapshot):
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-13T15:10:00+08:00"))
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-16T10:00:00+08:00"))
                 alerts = [
                     row for row in get_alert_history(database_file.name, "admin", symbol="600519", days=365)
-                    if row["trigger_type"] in {"250日线", "BOLL中轨"}
+                    if row["trigger_type"] in {"30周线上穿60周线", "有效突破60周线"}
                 ]
                 alert_types = [row["trigger_type"] for row in alerts]
-                self.assertEqual(alert_types.count("250日线"), 1)
-                self.assertEqual(alert_types.count("BOLL中轨"), 1)
+                self.assertEqual(alert_types.count("30周线上穿60周线"), 1)
+                self.assertEqual(alert_types.count("有效突破60周线"), 1)
 
     def test_buy_alerts_skip_single_technical_signal_without_confirmation(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
@@ -1353,6 +1369,7 @@ class MonitorTests(unittest.TestCase):
                 trigger_detail="测试卖出提醒-轻微触上轨",
                 triggered_labels=("BOLL上轨卖出",),
                 weekly_crossed=False,
+                weekly_close=115.4,
                 updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
             )
             with TestClient(app) as client:
@@ -1428,6 +1445,7 @@ class MonitorTests(unittest.TestCase):
                 trigger_detail="测试卖出提醒-重仓提前止盈",
                 triggered_labels=("BOLL上轨卖出",),
                 weekly_crossed=False,
+                weekly_close=115.4,
                 updated_at=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
             )
             with TestClient(app) as client:
