@@ -159,11 +159,70 @@ def _render_positions_table(active_positions: list[dict[str, Any]]) -> str:
     )
 
 
+def _alert_direction(trigger_type: str) -> str:
+    if trigger_type in {"BOLL上轨卖出", "低股息率卖出", "量化走弱卖出", "30周线下穿60周线"}:
+        return "sell"
+    return "buy"
+
+
+def _format_deviation(current_value: float, reference_value: float) -> str:
+    if not reference_value:
+        return "-"
+    deviation_pct = (current_value - reference_value) / reference_value * 100
+    return f"{deviation_pct:+.2f}%"
+
+
+def _build_alert_metric_summary(payload: dict[str, Any]) -> dict[str, str]:
+    trigger_type = str(payload.get("trigger_type") or "")
+    indicator_values = dict(payload.get("indicator_values") or {})
+    current_price = float(payload.get("current_price") or 0.0)
+
+    if trigger_type == "250日线":
+        threshold = float(indicator_values.get("ma_250") or 0.0)
+        return {"threshold_label": "250日线", "threshold_value": f"{threshold:.2f}", "deviation_label": "现价偏离", "deviation_value": _format_deviation(current_price, threshold)}
+    if trigger_type == "BOLL中轨":
+        threshold = float(indicator_values.get("boll_mid") or 0.0)
+        return {"threshold_label": "周BOLL中轨", "threshold_value": f"{threshold:.2f}", "deviation_label": "现价偏离", "deviation_value": _format_deviation(current_price, threshold)}
+    if trigger_type == "BOLL下轨":
+        threshold = float(indicator_values.get("boll_lower") or 0.0)
+        return {"threshold_label": "周BOLL下轨", "threshold_value": f"{threshold:.2f}", "deviation_label": "现价偏离", "deviation_value": _format_deviation(current_price, threshold)}
+    if trigger_type == "BOLL上轨卖出":
+        threshold = float(indicator_values.get("boll_upper") or 0.0)
+        return {"threshold_label": "周BOLL上轨", "threshold_value": f"{threshold:.2f}", "deviation_label": "现价偏离", "deviation_value": _format_deviation(current_price, threshold)}
+    if trigger_type in {"30周线上穿60周线", "30周线下穿60周线"}:
+        ma_30w = float(indicator_values.get("ma_30w") or 0.0)
+        ma_60w = float(indicator_values.get("ma_60w") or 0.0)
+        return {"threshold_label": "30周/60周", "threshold_value": f"{ma_30w:.2f} / {ma_60w:.2f}", "deviation_label": "均线差值", "deviation_value": _format_deviation(ma_30w, ma_60w)}
+    if trigger_type == "有效突破60周线":
+        weekly_close = float(indicator_values.get("weekly_close") or current_price)
+        ma_60w = float(indicator_values.get("ma_60w") or 0.0)
+        return {"threshold_label": "60周线", "threshold_value": f"{ma_60w:.2f}", "deviation_label": "周价偏离", "deviation_value": _format_deviation(weekly_close, ma_60w)}
+    if trigger_type == "量化盈利概率":
+        probability = float(indicator_values.get("quant_probability") or 0.0)
+        threshold = float(indicator_values.get("probability_threshold") or 0.0)
+        return {"threshold_label": "量化阈值", "threshold_value": f"{threshold:.2f}%", "deviation_label": "当前概率", "deviation_value": f"{probability:.2f}%"}
+    if trigger_type == "量化走弱卖出":
+        probability = float(indicator_values.get("quant_probability") or 0.0)
+        threshold = float(indicator_values.get("sell_probability_threshold") or 0.0)
+        return {"threshold_label": "走弱阈值", "threshold_value": f"{threshold:.2f}%", "deviation_label": "当前概率", "deviation_value": f"{probability:.2f}%"}
+    if trigger_type == "股息率":
+        dividend_yield = float(indicator_values.get("dividend_yield") or 0.0)
+        return {"threshold_label": "股息率门槛", "threshold_value": "4.50%", "deviation_label": "当前股息率", "deviation_value": f"{dividend_yield:.2f}%"}
+    if trigger_type == "低股息率卖出":
+        dividend_yield = float(indicator_values.get("dividend_yield") or 0.0)
+        threshold = float(indicator_values.get("sell_dividend_threshold") or 0.0)
+        return {"threshold_label": "低股息率阈值", "threshold_value": f"{threshold:.2f}%", "deviation_label": "当前股息率", "deviation_value": f"{dividend_yield:.2f}%"}
+    return {"threshold_label": "关键阈值", "threshold_value": "-", "deviation_label": "偏离幅度", "deviation_value": "-"}
+
+
 def build_alert_email_body(payload: dict[str, Any]) -> str:
+    metric_summary = _build_alert_metric_summary(payload)
     lines = [
         f"股票：{payload['symbol']} {payload['display_name']}",
         f"触发类型：{payload['trigger_type']}",
         f"当前价格：{payload['current_price']:.2f}",
+        f"{metric_summary['threshold_label']}：{metric_summary['threshold_value']}",
+        f"{metric_summary['deviation_label']}：{metric_summary['deviation_value']}",
     ]
     if any(payload.get(key) is not None for key in ("market_environment", "industry_environment", "latest_volume_ratio", "earnings_phase")):
         lines.append(f"环境因子：{_format_market_context_line(payload)}")
@@ -191,6 +250,11 @@ def build_alert_email_body(payload: dict[str, Any]) -> str:
 def build_alert_email_html_body(payload: dict[str, Any]) -> str:
     decision_reason_lines = list(payload.get("decision_reason_lines") or ())
     trigger_interpretation = str(payload.get("trigger_interpretation") or "")
+    metric_summary = _build_alert_metric_summary(payload)
+    direction = _alert_direction(str(payload.get("trigger_type") or ""))
+    accent = "#1d4ed8" if direction == "buy" else "#b91c1c"
+    badge_bg = "#dbeafe" if direction == "buy" else "#fee2e2"
+    badge_fg = "#1d4ed8" if direction == "buy" else "#b91c1c"
     sections = [
         _render_email_section(
             "提醒摘要",
@@ -199,6 +263,8 @@ def build_alert_email_html_body(payload: dict[str, Any]) -> str:
                     ("股票", f"{payload['symbol']} {payload['display_name']}"),
                     ("触发类型", str(payload["trigger_type"])),
                     ("当前价格", f"{float(payload['current_price']):.2f}"),
+                    (metric_summary["threshold_label"], metric_summary["threshold_value"]),
+                    (metric_summary["deviation_label"], metric_summary["deviation_value"]),
                     ("触发时间", str(payload["triggered_at"])),
                 ]
             ),
@@ -207,6 +273,7 @@ def build_alert_email_html_body(payload: dict[str, Any]) -> str:
             "本次触发原因",
             "".join(
                 [
+                    f"<div style=\"display:inline-block;margin-bottom:10px;padding:6px 12px;border-radius:999px;background:{badge_bg};color:{badge_fg};font-size:12px;font-weight:700;\">{'买入侧观察' if direction == 'buy' else '卖出侧风控'}</div>",
                     f"<div style=\"font-size:14px;line-height:1.8;color:#334155;\">{_escape_html(payload['detail'])}</div>",
                     (
                         f"<div style=\"margin-top:10px;padding:12px 14px;border-radius:12px;background:#fff7ed;color:#9a3412;font-size:14px;line-height:1.8;\">{_escape_html(trigger_interpretation)}</div>"
@@ -236,7 +303,7 @@ def build_alert_email_html_body(payload: dict[str, Any]) -> str:
         title=f"{payload['symbol']} {payload['display_name']} 提醒",
         subtitle=f"本次触发类型：{payload['trigger_type']}",
         sections_html="".join(sections),
-        accent="#1d4ed8" if "卖出" not in str(payload.get("trigger_type") or "") else "#b91c1c",
+        accent=accent,
     )
 
 

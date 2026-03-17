@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from src.ai_stock_monitoring.app import _format_snapshot_timestamp, create_app
 from src.ai_stock_monitoring.config import AppSettings
 from src.ai_stock_monitoring.database import add_trade_record, get_alert_history, get_login_unlock_code, get_snapshot, get_user, initialize_database, list_recent_login_events, list_trade_records, upsert_snapshot
-from src.ai_stock_monitoring.mailer import build_alert_email_body, build_portfolio_review_email_body
+from src.ai_stock_monitoring.mailer import build_alert_email_body, build_alert_email_html_body, build_portfolio_review_email_body
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
 from src.ai_stock_monitoring.monitor import (
     SnapshotComputation,
@@ -1500,6 +1500,7 @@ class MonitorTests(unittest.TestCase):
                 "trigger_type": "250日线",
                 "current_price": 1450.0,
                 "detail": "测试提醒详情",
+                "indicator_values": {"ma_250": 1440.0},
                 "triggered_at": "2026-03-13T10:00:00+08:00",
                 "market_environment": "偏弱",
                 "market_bias_score": -24,
@@ -1509,10 +1510,29 @@ class MonitorTests(unittest.TestCase):
                 "earnings_phase": "财报窗口临近",
             }
         )
+        self.assertIn("250日线：1440.00", body)
+        self.assertIn("现价偏离：+0.69%", body)
         self.assertIn("环境因子：大盘 偏弱(-24)", body)
         self.assertIn("行业 白酒 偏弱", body)
         self.assertIn("量能比 0.78", body)
         self.assertIn("财报节奏 财报窗口临近", body)
+
+    def test_alert_email_html_body_contains_threshold_cards(self) -> None:
+        body = build_alert_email_html_body(
+            {
+                "symbol": "600519",
+                "display_name": "贵州茅台",
+                "trigger_type": "BOLL上轨卖出",
+                "current_price": 1450.0,
+                "detail": "测试提醒详情",
+                "indicator_values": {"boll_upper": 1430.0},
+                "triggered_at": "2026-03-13T10:00:00+08:00",
+                "trigger_interpretation": "这是一条局部止盈或风控提醒。",
+            }
+        )
+        self.assertIn("周BOLL上轨", body)
+        self.assertIn("+1.40%", body)
+        self.assertIn("卖出侧风控", body)
 
     def test_portfolio_review_email_contains_report_sections(self) -> None:
         body = build_portfolio_review_email_body(
