@@ -66,7 +66,13 @@ from .database import (
     delete_trade_record,
     delete_trade_records_for_symbol,
 )
-from .mailer import build_login_unlock_email_body, build_test_email_body, build_trade_analysis_email_body, send_message
+from .mailer import (
+    build_login_unlock_email_body,
+    build_test_email_body,
+    build_trade_analysis_email_body,
+    build_trade_analysis_email_html_body,
+    send_message,
+)
 from .monitor import StockMonitor, parse_stock_symbols
 from .quant import available_quant_models, normalize_selected_models, normalize_strategy_params
 from .security import hash_password, password_hash_needs_rehash, verify_password
@@ -1267,6 +1273,7 @@ def _send_trade_analysis_email_if_configured(db_path: str, owner_username: str, 
         email_settings,
         subject=f"[交易复盘] {symbol} {latest_analysis['analysis']['judgment']}",
         body=build_trade_analysis_email_body(latest_analysis),
+        html_body=build_trade_analysis_email_html_body(latest_analysis),
     )
     if result.success:
         return "复盘结果邮件已发送"

@@ -215,6 +215,10 @@ class MonitorTests(unittest.TestCase):
         self.assertGreater(profile["active_positions"][0]["suggested_add_price"], 0)
         self.assertGreater(profile["active_positions"][0]["suggested_reduce_price"], 0)
         self.assertGreater(profile["active_positions"][0]["suggested_stop_loss_price"], 0)
+        self.assertIn("buy_recommendation_level", profile["active_positions"][0])
+        self.assertIn("sell_recommendation_level", profile["active_positions"][0])
+        self.assertIn("recommended_buy_price_range", profile["active_positions"][0])
+        self.assertIn("recommended_sell_price_range", profile["active_positions"][0])
         self.assertTrue(profile["overall_adjustment_suggestions"])
         self.assertIn(profile["risk_level"], {"低", "中", "高"})
         self.assertTrue(profile["comprehensive_advice"])
@@ -1539,6 +1543,11 @@ class MonitorTests(unittest.TestCase):
                             "buy_recommendation_level": 4,
                             "sell_recommendation_level": 8,
                             "watch_price_range": "1400.00 - 1470.00",
+                            "decision_summary": "当前结论偏卖出，但现价还没到理想减仓区，若反弹到 1475.00 - 1505.00 更适合分批减仓。",
+                            "action_reason": "卖出信号更强（卖出 8 分 / 买入 4 分），当前最强量化模型为 趋势跟随（82.00 分）。",
+                            "buy_signal_summary": "买入侧信号：股息率",
+                            "sell_signal_summary": "卖出侧信号：BOLL上轨卖出、量化走弱卖出",
+                            "decision_reason_lines": ["核心思路是借反弹优化卖点，而不是继续追买。"],
                             "market_environment": "偏弱",
                             "market_bias_score": -24.0,
                             "industry_name": "白酒",
@@ -1601,6 +1610,10 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("中国平安：动作 偏买入 ｜ 仓位 18.00% ｜ 买入 9/10 ｜ 卖出 3/10", body)
         self.assertIn("贵州茅台 风险等级偏高，需优先盯盘。", body)
         self.assertIn("贵州茅台：关注 1400.00 - 1470.00", body)
+        self.assertIn("结论：当前结论偏卖出", body)
+        self.assertIn("原因：卖出信号更强", body)
+        self.assertIn("买入侧信号：股息率", body)
+        self.assertIn("卖出侧信号：BOLL上轨卖出、量化走弱卖出", body)
         self.assertIn("环境：大盘 偏弱(-24) ｜ 行业 白酒 偏弱 ｜ 量能比 0.78 ｜ 财报节奏 财报窗口临近", body)
 
     def test_mock_dividend_yield_uses_last_year_dividend_per_share(self) -> None:

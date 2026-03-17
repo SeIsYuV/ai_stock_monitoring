@@ -622,6 +622,112 @@ def _build_quant_model_consensus(snapshot: Mapping[str, Any], limit: int = 4) ->
     return title, f"{title}{consensus}（{details}）"
 
 
+def _format_signal_summary(signals: Sequence[str], prefix: str) -> str:
+    cleaned = [str(item) for item in signals if str(item).strip()]
+    if not cleaned:
+        return f"{prefix}暂无显著信号"
+    return f"{prefix}{'、'.join(cleaned)}"
+
+
+def _build_watch_reason_lines(
+    snapshot: Mapping[str, Any],
+    action_summary: Mapping[str, Any],
+    price_plan: Mapping[str, Any],
+) -> list[str]:
+    reasons: list[str] = []
+    buy_score = float(action_summary.get("buy_score") or 0.0)
+    sell_score = float(action_summary.get("sell_score") or 0.0)
+    latest_volume_ratio = float(snapshot.get("latest_volume_ratio") or 1.0)
+    market_environment = str(snapshot.get("market_environment") or "中性")
+    industry_environment = str(snapshot.get("industry_environment") or "中性")
+    earnings_phase = str(snapshot.get("earnings_phase") or "常规窗口")
+    quant_probability = float(snapshot.get("quant_probability") or 0.0)
+    watch_range = str(price_plan.get("watch_price_range") or "暂无明确价位")
+    buy_signals = list(action_summary.get("buy_signals") or ())
+    sell_signals = list(action_summary.get("sell_signals") or ())
+
+    if abs(buy_score - sell_score) <= 2:
+        if buy_signals and sell_signals:
+            reasons.append("买入与卖出信号同时存在，多空仍在拉锯。")
+        else:
+            reasons.append("当前信号优势还不够明显，暂未形成单边结论。")
+    if latest_volume_ratio < 0.85:
+        reasons.append("成交量偏弱，缺少放量确认。")
+    if market_environment == "偏弱" and industry_environment == "偏弱":
+        reasons.append("大盘和行业都偏弱，外部环境仍在拖累。")
+    elif market_environment == "偏弱":
+        reasons.append("大盘环境偏弱，追价性价比不高。")
+    elif industry_environment == "偏弱":
+        reasons.append("所属行业暂未转强，先别急着放大仓位。")
+    if earnings_phase != "常规窗口":
+        reasons.append(f"{earnings_phase}，先防范事件波动。")
+    if quant_probability < 60:
+        reasons.append(f"量化综合盈利概率仅 {quant_probability:.2f}%，胜率优势不够突出。")
+    if watch_range != "暂无明确价位":
+        reasons.append(f"关键确认位集中在 {watch_range}。")
+    return reasons[:4]
+
+
+def _build_decision_summary(
+    snapshot: Mapping[str, Any],
+    action_summary: Mapping[str, Any],
+    price_plan: Mapping[str, Any],
+) -> tuple[str, list[str]]:
+    action = str(action_summary.get("action") or "观望")
+    latest_price = float(snapshot.get("latest_price") or 0.0)
+    buy_range = str(price_plan.get("recommended_buy_price_range") or "暂无明确价位")
+    sell_range = str(price_plan.get("recommended_sell_price_range") or "暂无明确价位")
+    watch_range = str(price_plan.get("watch_price_range") or "暂无明确价位")
+    suggested_add_price = float(price_plan.get("suggested_add_price") or 0.0)
+    suggested_reduce_price = float(price_plan.get("suggested_reduce_price") or 0.0)
+    suggested_stop_loss_price = float(price_plan.get("suggested_stop_loss_price") or 0.0)
+
+    if action == "偏买入":
+        if suggested_add_price > 0 and latest_price <= suggested_add_price * 1.02:
+            return (
+                f"当前结论偏买入，现价已接近试仓区，可围绕 {buy_range} 分批布局。",
+                [
+                    "更适合分批试仓，不建议一次性重仓。",
+                    f"若跌破 {suggested_stop_loss_price:.2f} 附近的防守位，需要重新评估节奏。" if suggested_stop_loss_price > 0 else "仍需保留止损纪律，避免左侧硬扛。",
+                ],
+            )
+        if buy_range != "暂无明确价位":
+            return (
+                f"当前结论偏买入，但更稳妥的节奏是等回踩 {buy_range} 再分批介入。",
+                ["当前不建议脱离支撑位追高，先等更好的风险收益比。"] if watch_range == "暂无明确价位" else [f"盘中重点看 {watch_range} 一带是否完成确认。"] ,
+            )
+        return ("当前结论偏买入，但支撑位还不够清晰，宜小仓位试探。", [])
+
+    if action == "偏卖出":
+        if suggested_reduce_price > 0 and latest_price >= suggested_reduce_price * 0.99:
+            return (
+                f"当前结论偏卖出，现价已接近减仓区，可按 {sell_range} 分批兑现。",
+                [
+                    "这代表优先处理仓位和风险，不代表必须一次性清仓。",
+                    f"若后续直接跌破 {suggested_stop_loss_price:.2f} 附近的防守位，应先控风险。" if suggested_stop_loss_price > 0 else "若没有像样反弹，应优先控制回撤。",
+                ],
+            )
+        if sell_range != "暂无明确价位":
+            follow_line = (
+                f"若先跌破 {suggested_stop_loss_price:.2f} 附近的防守位，则不必等反弹，先控风险。"
+                if suggested_stop_loss_price > 0
+                else "若后续没有反弹确认，应优先控制回撤。"
+            )
+            return (
+                f"当前结论偏卖出，但现价还没到理想减仓区，若反弹到 {sell_range} 更适合分批减仓。",
+                ["核心思路是借反弹优化卖点，而不是继续追买。", follow_line],
+            )
+        return ("当前结论偏卖出，优先降低弱势仓位和过重仓位。", [])
+
+    watch_reasons = _build_watch_reason_lines(snapshot, action_summary, price_plan)
+    if watch_range != "暂无明确价位":
+        return (
+            f"当前以观望为主，先等 {watch_range} 这一带给出方向。",
+            watch_reasons,
+        )
+    return ("当前以观望为主，买卖信号尚未形成足够一致的优势。", watch_reasons)
+
+
 def build_stock_comprehensive_advice(
     snapshot: Mapping[str, Any],
     position_summary: Mapping[str, Any] | None = None,
@@ -651,20 +757,20 @@ def build_stock_comprehensive_advice(
         dcf_summary = str(resolved_snapshot.get("dcf_reason") or "DCF 估值数据暂不充分")
 
     action = str(action_summary.get("action") or "观望")
+    decision_summary, decision_reason_lines = _build_decision_summary(
+        resolved_snapshot,
+        action_summary,
+        price_plan,
+    )
+    buy_signal_summary = _format_signal_summary(action_summary.get("buy_signals") or (), "买入侧信号：")
+    sell_signal_summary = _format_signal_summary(action_summary.get("sell_signals") or (), "卖出侧信号：")
     market_context_line = (
         f"大盘{action_summary.get('market_environment', '中性')}"
         f" / 行业{action_summary.get('industry_environment', '中性')}"
         f" / 量能比 {float(action_summary.get('latest_volume_ratio') or 1.0):.2f}"
         f" / 财报节奏 {action_summary.get('earnings_phase', '常规窗口')}"
     )
-    if action == "偏买入":
-        decision_summary = "当前结论偏买入，适合等回踩支撑后分批介入"
-    elif action == "偏卖出":
-        decision_summary = "当前结论偏卖出，反弹至压力带更适合分批减仓"
-    else:
-        decision_summary = "当前买卖信号仍在拉锯，建议先等确认位给出方向"
-
-    conclusion_line = f"{action}｜{model_consensus_text}；{market_context_line}；{decision_summary}。"
+    conclusion_line = f"{action}｜{model_consensus_text}；{market_context_line}；{decision_summary}"
     buy_line = (
         f"买点：{price_plan['recommended_buy_price_range']}｜"
         f"买入等级 {recommendation_levels['buy_recommendation_level']}/10"
@@ -688,6 +794,10 @@ def build_stock_comprehensive_advice(
     dcf_line = f"DCF：{dcf_summary}"
     comprehensive_advice = "\n".join((
         f"结论：{conclusion_line}",
+        f"原因：{action_summary['action_reason']}",
+        buy_signal_summary,
+        sell_signal_summary,
+        *[f"观察：{item}" for item in decision_reason_lines],
         buy_line,
         sell_line,
         dcf_line,
@@ -719,6 +829,10 @@ def build_stock_comprehensive_advice(
         "advice_buy_line": buy_line,
         "advice_sell_line": sell_line,
         "advice_dcf_line": dcf_line,
+        "decision_summary": decision_summary,
+        "decision_reason_lines": decision_reason_lines,
+        "buy_signal_summary": buy_signal_summary,
+        "sell_signal_summary": sell_signal_summary,
         "model_consensus": model_consensus_text,
         "buy_recommendation_level": recommendation_levels["buy_recommendation_level"],
         "sell_recommendation_level": recommendation_levels["sell_recommendation_level"],
@@ -1011,15 +1125,25 @@ def build_portfolio_profile(
         item["dcf_valuation_gap_pct"] = display_advice["dcf_valuation_gap_pct"]
         item["dcf_label"] = display_advice["dcf_label"]
         item["dcf_reason"] = display_advice["dcf_reason"]
+        item["recommended_buy_price_range"] = display_advice["recommended_buy_price_range"]
+        item["recommended_sell_price_range"] = display_advice["recommended_sell_price_range"]
         item["add_price_range"] = display_advice["recommended_buy_price_range"]
         item["reduce_price_range"] = display_advice["recommended_sell_price_range"]
         item["watch_price_range"] = display_advice["watch_price_range"]
         item["suggested_add_price"] = display_advice["suggested_add_price"]
         item["suggested_reduce_price"] = display_advice["suggested_reduce_price"]
         item["suggested_stop_loss_price"] = display_advice["suggested_stop_loss_price"]
+        item["buy_recommendation_level"] = display_advice["buy_recommendation_level"]
+        item["sell_recommendation_level"] = display_advice["sell_recommendation_level"]
+        item["buy_recommendation_level_label"] = display_advice["buy_recommendation_level_label"]
+        item["sell_recommendation_level_label"] = display_advice["sell_recommendation_level_label"]
         item["comprehensive_advice"] = display_advice["comprehensive_advice"]
         item["comprehensive_advice_title"] = display_advice["comprehensive_advice_title"]
         item["model_consensus"] = display_advice["model_consensus"]
+        item["decision_summary"] = display_advice["decision_summary"]
+        item["decision_reason_lines"] = display_advice["decision_reason_lines"]
+        item["buy_signal_summary"] = display_advice["buy_signal_summary"]
+        item["sell_signal_summary"] = display_advice["sell_signal_summary"]
         item.update(risk_info)
 
     holding_items.sort(key=lambda entry: (-entry["weight_pct"], entry["symbol"]))

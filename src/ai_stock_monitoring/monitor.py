@@ -59,7 +59,13 @@ from .database import (
     upsert_signal_state,
     upsert_snapshot,
 )
-from .mailer import build_alert_email_body, build_portfolio_review_email_body, send_message
+from .mailer import (
+    build_alert_email_body,
+    build_alert_email_html_body,
+    build_portfolio_review_email_body,
+    build_portfolio_review_email_html_body,
+    send_message,
+)
 from .market_hours import MarketStatus, TradeCalendar, get_market_status
 from .providers import load_provider
 from .providers.base import PriceBar, Quote
@@ -1122,6 +1128,13 @@ class StockMonitor:
                         "portfolio_profile": portfolio_profile,
                     }
                 ),
+                html_body=build_portfolio_review_email_html_body(
+                    {
+                        "owner_username": owner_username,
+                        "trade_date": marker,
+                        "portfolio_profile": portfolio_profile,
+                    }
+                ),
             )
             if not email_result.success:
                 self.last_error_message = f"{owner_username} 收盘持仓复盘邮件发送失败：{email_result.error}"
@@ -1477,10 +1490,32 @@ class StockMonitor:
             "indicator_values": indicator_values,
             "triggered_at": triggered_at,
         }
+        snapshot_row = get_snapshot(self.settings.db_path, owner_username, symbol)
+        if snapshot_row is not None:
+            snapshot_payload = dict(snapshot_row)
+            stock_advice = build_stock_comprehensive_advice(snapshot_payload)
+            payload.update(
+                {
+                    "market_environment": stock_advice.get("market_environment"),
+                    "market_bias_score": stock_advice.get("market_bias_score"),
+                    "industry_name": snapshot_payload.get("industry_name"),
+                    "industry_environment": stock_advice.get("industry_environment"),
+                    "latest_volume_ratio": stock_advice.get("latest_volume_ratio"),
+                    "earnings_phase": stock_advice.get("earnings_phase"),
+                    "action": stock_advice.get("action"),
+                    "action_reason": stock_advice.get("action_reason"),
+                    "decision_summary": stock_advice.get("decision_summary"),
+                    "decision_reason_lines": stock_advice.get("decision_reason_lines"),
+                    "buy_signal_summary": stock_advice.get("buy_signal_summary"),
+                    "sell_signal_summary": stock_advice.get("sell_signal_summary"),
+                    "trigger_interpretation": self._build_trigger_interpretation(trigger_type, stock_advice),
+                }
+            )
         email_result = send_message(
             email_settings,
             subject=f"[{trigger_type}] {symbol} {display_name}",
             body=build_alert_email_body(payload),
+            html_body=build_alert_email_html_body(payload),
         )
         add_alert_history(
             db_path=self.settings.db_path,
@@ -1494,6 +1529,19 @@ class StockMonitor:
             email_error=email_result.error,
             triggered_at=triggered_at,
         )
+
+    @staticmethod
+    def _build_trigger_interpretation(trigger_type: str, stock_advice: dict[str, Any]) -> str:
+        action = str(stock_advice.get("action") or "观望")
+        trigger_is_sell = "卖出" in trigger_type or trigger_type == "30周线下穿60周线"
+        trigger_is_buy = not trigger_is_sell
+        if trigger_is_sell and action == "偏买入":
+            return "这是一条局部止盈或风控提醒：虽然整体买入信号仍有优势，但当前价格/仓位已触发减仓条件，更适合先做分批兑现。"
+        if trigger_is_buy and action == "偏卖出":
+            return "这是一条局部支撑或回踩提醒：它说明出现了可观察的买点线索，但整体仓位建议仍偏谨慎，不等于可以立即重仓抄底。"
+        if action == "观望":
+            return "这次提醒更适合作为观察信号使用，需要结合量能、环境和关键价位确认后再执行。"
+        return "这次提醒与当前总体结论方向基本一致，可按计划分批执行，不建议情绪化一次性操作。"
 
     @staticmethod
     def _build_pending_payload(
