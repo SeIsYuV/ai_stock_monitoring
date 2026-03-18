@@ -671,7 +671,12 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         refresh_failed_symbols: list[str] = []
         for item in snapshots:
             try:
-                await asyncio.to_thread(app.state.monitor.refresh_symbol_snapshot, current_user["username"], item["symbol"])
+                await asyncio.to_thread(
+                    app.state.monitor.refresh_symbol_snapshot,
+                    current_user["username"],
+                    item["symbol"],
+                    True,
+                )
             except Exception:
                 refresh_failed_symbols.append(item["symbol"])
         if refresh_failed_symbols:
@@ -695,7 +700,12 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         for symbol in valid_symbols:
             add_monitored_stock(resolved_settings.db_path, owner_username, symbol)
             try:
-                await asyncio.to_thread(app.state.monitor.refresh_symbol_snapshot, owner_username, symbol)
+                await asyncio.to_thread(
+                    app.state.monitor.refresh_symbol_snapshot,
+                    owner_username,
+                    symbol,
+                    True,
+                )
             except Exception:
                 refresh_failed_symbols.append(symbol)
         if invalid_symbols:
@@ -801,7 +811,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         trade_advisor: TradeAdvisor = app.state.trade_advisor
 
         try:
-            snapshot = await asyncio.to_thread(monitor.refresh_symbol_snapshot, owner_username, symbol)
+            snapshot = await asyncio.to_thread(monitor.refresh_symbol_snapshot, owner_username, symbol, True)
             snapshot_payload = {
                 "symbol": snapshot.symbol,
                 "display_name": snapshot.display_name,
@@ -924,6 +934,11 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         min_reward_risk_ratio: float = Form(1.6),
         dcf_discount_rate_pct: float = Form(10.0),
         dcf_terminal_growth_pct: float = Form(3.0),
+        adaptive_learning_enabled: str | None = Form(None),
+        adaptive_lookback_days: int = Form(180),
+        adaptive_holding_days: int = Form(10),
+        adaptive_min_samples: int = Form(12),
+        adaptive_target_return_pct: float = Form(3.0),
     ) -> RedirectResponse:
         current_user = _require_login(request, resolved_settings)
         if isinstance(current_user, RedirectResponse):
@@ -943,6 +958,11 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 "min_reward_risk_ratio": min_reward_risk_ratio,
                 "dcf_discount_rate": dcf_discount_rate_pct / 100,
                 "dcf_terminal_growth": dcf_terminal_growth_pct / 100,
+                "adaptive_learning_enabled": adaptive_learning_enabled is not None,
+                "adaptive_lookback_days": adaptive_lookback_days,
+                "adaptive_holding_days": adaptive_holding_days,
+                "adaptive_min_samples": adaptive_min_samples,
+                "adaptive_target_return_pct": adaptive_target_return_pct / 100,
             }
         )
         save_quant_settings(
@@ -1342,7 +1362,7 @@ async def _load_dashboard_snapshots(app: FastAPI, owner_username: str) -> list[o
 
     for symbol in refresh_symbols:
         try:
-            await asyncio.to_thread(monitor.refresh_symbol_snapshot, owner_username, symbol)
+            await asyncio.to_thread(monitor.refresh_symbol_snapshot, owner_username, symbol, True)
         except Exception:
             continue
     return get_snapshots(settings.db_path, owner_username)

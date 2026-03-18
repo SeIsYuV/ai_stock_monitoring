@@ -92,6 +92,14 @@ class MockMarketDataProvider(MarketDataProvider):
         seed = sum(int(char) for char in symbol if char.isdigit())
         return {"industry_name": self._INDUSTRIES[seed % len(self._INDUSTRIES)]}
 
+    def get_symbol_fundamentals(self, symbol: str) -> dict[str, float | None]:
+        seed = sum(int(char) for char in symbol if char.isdigit())
+        return {
+            "pe_ttm": round(8.0 + seed % 18, 2),
+            "pb": round(0.9 + (seed % 12) * 0.18, 2),
+            "market_cap": round(18_000_000_000 + (seed % 25) * 3_200_000_000, 2),
+        }
+
     def get_industry_daily_bars(self, industry_name: str, limit: int = 120) -> list[PriceBar]:
         today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
         seed = sum(ord(char) for char in industry_name)

@@ -61,6 +61,10 @@
                 <strong>DCF 估值</strong>
                 <span class="muted">使用现金流折现思路；当前数据源缺少财报自由现金流时，会以股息现金流作保守代理。</span>
             </div>
+            <div class="metric-card">
+                <strong>专业基准</strong>
+                <span class="muted">新增 MSCI 动量 + 质量稳定模型，并与现有自适应模型滚动对照，动态决定最终权重。</span>
+            </div>
         </div>
         <form method="post" action="/settings/quant">
             <div class="checkbox-item" style="margin-bottom: 12px;">
@@ -102,7 +106,19 @@
             <input type="number" name="dcf_discount_rate_pct" min="5" max="20" step="0.1" value="{{ '%.2f'|format(quant_strategy_params['dcf_discount_rate'] * 100) }}">
             <label>DCF 永续增长率（%）</label>
             <input type="number" name="dcf_terminal_growth_pct" min="0" max="8" step="0.1" value="{{ '%.2f'|format(quant_strategy_params['dcf_terminal_growth'] * 100) }}">
-            <p class="hint-text">当前组合借鉴了多因子量化里常见的趋势确认、均值回归、波动过滤、支撑强度、盈亏比过滤和 DCF 估值思路。若更强调胜率，可提高动量阈值、降低波动率上限、提高最小盈亏比，并适度上调 DCF 折现率以提升安全边际。</p>
+            <label class="checkbox-item">
+                <input type="checkbox" name="adaptive_learning_enabled" value="1" {% if quant_strategy_params['adaptive_learning_enabled'] %}checked{% endif %}>
+                <span>启用自适应学习校准</span>
+            </label>
+            <label>自适应回看窗口（交易日）</label>
+            <input type="number" name="adaptive_lookback_days" min="60" max="360" step="5" value="{{ quant_strategy_params['adaptive_lookback_days']|int }}">
+            <label>模拟持有周期（交易日）</label>
+            <input type="number" name="adaptive_holding_days" min="3" max="30" step="1" value="{{ quant_strategy_params['adaptive_holding_days']|int }}">
+            <label>最少模拟样本数</label>
+            <input type="number" name="adaptive_min_samples" min="4" max="80" step="1" value="{{ quant_strategy_params['adaptive_min_samples']|int }}">
+            <label>目标收益阈值（%）</label>
+            <input type="number" name="adaptive_target_return_pct" min="0" max="20" step="0.5" value="{{ '%.2f'|format(quant_strategy_params['adaptive_target_return_pct'] * 100) }}">
+            <p class="hint-text">当前组合借鉴了多因子量化里常见的趋势确认、均值回归、波动过滤、支撑强度、盈亏比过滤和 DCF 估值思路。启用“自适应学习校准”后，系统会在项目内用最近历史做滚动模拟交易，统计各子模型的命中率与平均收益，并自动微调它们在综合评分里的影响力。若更强调胜率，可提高动量阈值、降低波动率上限、提高最小盈亏比，并适度上调 DCF 折现率以提升安全边际。</p>
             <button type="submit" class="secondary">保存量化设置</button>
         </form>
     </div>

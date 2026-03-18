@@ -9,7 +9,7 @@ from __future__ import annotations
 - 暴露几组实用参数，让用户可以用更严格的趋势 / 波动 / 股息过滤条件提升命中质量
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import math
 from typing import Any, Iterable, Mapping
@@ -26,6 +26,8 @@ DEFAULT_QUANT_MODELS: tuple[str, ...] = (
     "support_strength",
     "risk_reward",
     "dcf_proxy",
+    "msci_momentum",
+    "quality_stability",
 )
 
 MODEL_LABELS = {
@@ -37,7 +39,11 @@ MODEL_LABELS = {
     "support_strength": "支撑强度",
     "risk_reward": "盈亏比",
     "dcf_proxy": "DCF估值",
+    "msci_momentum": "MSCI动量",
+    "quality_stability": "质量稳定",
 }
+
+PROFESSIONAL_MODEL_KEYS = {"msci_momentum", "quality_stability"}
 
 DEFAULT_QUANT_STRATEGY_PARAMS: dict[str, float | bool] = {
     "require_price_above_ma250": True,
@@ -50,6 +56,11 @@ DEFAULT_QUANT_STRATEGY_PARAMS: dict[str, float | bool] = {
     "min_reward_risk_ratio": 1.6,
     "dcf_discount_rate": 0.10,
     "dcf_terminal_growth": 0.03,
+    "adaptive_learning_enabled": True,
+    "adaptive_lookback_days": 180,
+    "adaptive_holding_days": 10,
+    "adaptive_min_samples": 12,
+    "adaptive_target_return_pct": 0.03,
 }
 
 
@@ -61,6 +72,11 @@ class QuantModelResult:
     reason: str
     intrinsic_value: float | None = None
     valuation_gap_pct: float | None = None
+    base_score: float | None = None
+    adaptive_weight: float = 1.0
+    adaptive_sample_size: int = 0
+    adaptive_hit_rate: float | None = None
+    adaptive_avg_return_pct: float | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +85,23 @@ class QuantSignal:
     summary: str
     breakdown_json: str
     models: tuple[QuantModelResult, ...]
+
+
+@dataclass(frozen=True)
+class AdaptiveLearningProfile:
+    weight: float = 1.0
+    sample_size: int = 0
+    hit_rate: float | None = None
+    avg_return_pct: float | None = None
+
+
+ADAPTIVE_SIGNAL_SCORE_THRESHOLD = 60.0
+
+
+@dataclass(frozen=True)
+class EnsembleLearningProfiles:
+    model_profiles: dict[str, AdaptiveLearningProfile]
+    group_profiles: dict[str, AdaptiveLearningProfile]
 
 
 def normalize_selected_models(selected_models: Iterable[str] | None) -> tuple[str, ...]:
@@ -126,6 +159,16 @@ def normalize_strategy_params(raw_params: Mapping[str, object] | None) -> dict[s
             params["dcf_discount_rate"] = max(0.05, float(raw_params["dcf_discount_rate"]))
         if "dcf_terminal_growth" in raw_params:
             params["dcf_terminal_growth"] = max(0.0, min(0.08, float(raw_params["dcf_terminal_growth"])))
+        if "adaptive_learning_enabled" in raw_params:
+            params["adaptive_learning_enabled"] = bool(raw_params["adaptive_learning_enabled"])
+        if "adaptive_lookback_days" in raw_params:
+            params["adaptive_lookback_days"] = max(60, min(360, int(float(raw_params["adaptive_lookback_days"]))))
+        if "adaptive_holding_days" in raw_params:
+            params["adaptive_holding_days"] = max(3, min(30, int(float(raw_params["adaptive_holding_days"]))))
+        if "adaptive_min_samples" in raw_params:
+            params["adaptive_min_samples"] = max(4, min(80, int(float(raw_params["adaptive_min_samples"]))))
+        if "adaptive_target_return_pct" in raw_params:
+            params["adaptive_target_return_pct"] = max(0.0, min(0.20, float(raw_params["adaptive_target_return_pct"])))
     if float(params["dcf_terminal_growth"]) >= float(params["dcf_discount_rate"]) - 0.01:
         params["dcf_terminal_growth"] = round(float(params["dcf_discount_rate"]) - 0.02, 4)
     return params
@@ -142,6 +185,7 @@ def build_quant_signal(
     dividend_yield: float,
     daily_bars: list[PriceBar],
     weekly_bars: list[PriceBar],
+    symbol_fundamentals: Mapping[str, float | None] | None = None,
     selected_models: Iterable[str] | None = None,
     strategy_params: Mapping[str, object] | None = None,
 ) -> QuantSignal:
@@ -150,32 +194,53 @@ def build_quant_signal(
     params = normalize_strategy_params(strategy_params)
     closes = [float(item.close_price) for item in daily_bars]
     weekly_closes = [float(item.close_price) for item in weekly_bars]
-    daily_returns = _daily_returns(closes)
-    volatility_20 = _annualized_volatility(daily_returns[-20:]) if len(daily_returns) >= 20 else 0.0
-    momentum_20_pct = _price_change_ratio(closes[-20], closes[-1]) if len(closes) >= 20 else 0.0
+    model_keys = normalize_selected_models(selected_models)
+    models = [
+        _build_model_result(
+            model_key,
+            latest_price=latest_price,
+            ma_250=ma_250,
+            boll_mid=boll_mid,
+            boll_lower=boll_lower,
+            boll_upper=boll_upper,
+            ma_30w=ma_30w,
+            ma_60w=ma_60w,
+            dividend_yield=dividend_yield,
+            closes=closes,
+            weekly_closes=weekly_closes,
+            symbol_fundamentals=symbol_fundamentals or {},
+            params=params,
+        )
+        for model_key in model_keys
+    ]
 
-    models: list[QuantModelResult] = []
+    learning_profiles = EnsembleLearningProfiles(model_profiles={}, group_profiles={})
+    if bool(params["adaptive_learning_enabled"]):
+        learning_profiles = _simulate_adaptive_learning(
+            daily_bars=daily_bars,
+            weekly_bars=weekly_bars,
+            dividend_yield=dividend_yield,
+            symbol_fundamentals=symbol_fundamentals or {},
+            selected_models=model_keys,
+            params=params,
+        )
+        models = [
+            _apply_adaptive_profile(
+                model,
+                learning_profiles.model_profiles.get(model.key, AdaptiveLearningProfile()),
+                holding_days=int(params["adaptive_holding_days"]),
+            )
+            for model in models
+        ]
 
-    for model_key in normalize_selected_models(selected_models):
-        if model_key == "trend_following":
-            models.append(_trend_following_model(latest_price, ma_250, closes, params))
-        elif model_key == "mean_reversion":
-            models.append(_mean_reversion_model(latest_price, ma_250, boll_mid, params))
-        elif model_key == "dividend_quality":
-            models.append(_dividend_quality_model(latest_price, ma_250, dividend_yield, params))
-        elif model_key == "weekly_resonance":
-            models.append(_weekly_resonance_model(ma_30w, ma_60w, weekly_closes, params))
-        elif model_key == "volatility_filter":
-            models.append(_volatility_filter_model(volatility_20, momentum_20_pct, params))
-        elif model_key == "support_strength":
-            models.append(_support_strength_model(latest_price, ma_250, boll_mid, boll_lower, params))
-        elif model_key == "risk_reward":
-            models.append(_risk_reward_model(latest_price, ma_250, boll_mid, boll_lower, boll_upper, params))
-        elif model_key == "dcf_proxy":
-            models.append(_dcf_proxy_model(latest_price, dividend_yield, closes, weekly_closes, params))
-
-    probability = round(sum(item.score for item in models) / max(len(models), 1), 2)
-    summary = _build_summary(probability, models, params)
+    probability = round(
+        _blend_group_scores(
+            models,
+            learning_profiles.group_profiles,
+        ),
+        2,
+    )
+    summary = _build_summary(probability, models, params, learning_profiles.group_profiles)
     breakdown = json.dumps(
         [
             {
@@ -185,6 +250,11 @@ def build_quant_signal(
                 "reason": item.reason,
                 "intrinsic_value": item.intrinsic_value,
                 "valuation_gap_pct": item.valuation_gap_pct,
+                "base_score": item.base_score,
+                "adaptive_weight": item.adaptive_weight,
+                "adaptive_sample_size": item.adaptive_sample_size,
+                "adaptive_hit_rate": item.adaptive_hit_rate,
+                "adaptive_avg_return_pct": item.adaptive_avg_return_pct,
             }
             for item in models
         ],
@@ -196,6 +266,209 @@ def build_quant_signal(
         breakdown_json=breakdown,
         models=tuple(models),
     )
+
+
+def _build_model_result(
+    model_key: str,
+    *,
+    latest_price: float,
+    ma_250: float,
+    boll_mid: float,
+    boll_lower: float,
+    boll_upper: float,
+    ma_30w: float,
+    ma_60w: float,
+    dividend_yield: float,
+    closes: list[float],
+    weekly_closes: list[float],
+    symbol_fundamentals: Mapping[str, float | None],
+    params: Mapping[str, float | bool],
+) -> QuantModelResult:
+    daily_returns = _daily_returns(closes)
+    volatility_20 = _annualized_volatility(daily_returns[-20:]) if len(daily_returns) >= 20 else 0.0
+    momentum_20_pct = _price_change_ratio(closes[-20], closes[-1]) if len(closes) >= 20 else 0.0
+
+    if model_key == "trend_following":
+        return _trend_following_model(latest_price, ma_250, closes, params)
+    if model_key == "mean_reversion":
+        return _mean_reversion_model(latest_price, ma_250, boll_mid, params)
+    if model_key == "dividend_quality":
+        return _dividend_quality_model(latest_price, ma_250, dividend_yield, params)
+    if model_key == "weekly_resonance":
+        return _weekly_resonance_model(ma_30w, ma_60w, weekly_closes, params)
+    if model_key == "volatility_filter":
+        return _volatility_filter_model(volatility_20, momentum_20_pct, params)
+    if model_key == "support_strength":
+        return _support_strength_model(latest_price, ma_250, boll_mid, boll_lower, params)
+    if model_key == "risk_reward":
+        return _risk_reward_model(latest_price, ma_250, boll_mid, boll_lower, boll_upper, params)
+    if model_key == "dcf_proxy":
+        return _dcf_proxy_model(latest_price, dividend_yield, closes, weekly_closes, params)
+    if model_key == "msci_momentum":
+        return _msci_momentum_model(latest_price, ma_250, closes, params)
+    if model_key == "quality_stability":
+        return _quality_stability_model(latest_price, ma_250, dividend_yield, closes, weekly_closes, symbol_fundamentals, params)
+    raise ValueError(f"Unsupported quant model: {model_key}")
+
+
+def _simulate_adaptive_learning(
+    daily_bars: list[PriceBar],
+    weekly_bars: list[PriceBar],
+    dividend_yield: float,
+    symbol_fundamentals: Mapping[str, float | None],
+    selected_models: tuple[str, ...],
+    params: Mapping[str, float | bool],
+) -> EnsembleLearningProfiles:
+    holding_days = int(params["adaptive_holding_days"])
+    lookback_days = int(params["adaptive_lookback_days"])
+    min_samples = int(params["adaptive_min_samples"])
+    target_return = float(params["adaptive_target_return_pct"])
+    if len(daily_bars) <= holding_days + 25:
+        return EnsembleLearningProfiles(model_profiles={}, group_profiles={})
+
+    lookback_span = max(holding_days + 25, lookback_days + holding_days)
+    recent_daily_bars = daily_bars[-lookback_span:]
+    samples_by_model: dict[str, list[float]] = {key: [] for key in selected_models}
+    group_samples: dict[str, list[float]] = {"professional": [], "adaptive": []}
+
+    for index in range(20, len(recent_daily_bars) - holding_days):
+        history_daily = recent_daily_bars[: index + 1]
+        current_date = history_daily[-1].traded_on
+        history_weekly = [item for item in weekly_bars if item.traded_on <= current_date]
+        if len(history_daily) < 20 or not history_weekly:
+            continue
+        closes = [float(item.close_price) for item in history_daily]
+        weekly_closes = [float(item.close_price) for item in history_weekly]
+        latest_price = closes[-1]
+        ma_250 = _simple_moving_average(closes, 250)
+        boll_mid = _simple_moving_average(closes, 20)
+        boll_lower = _bollinger_lower_band(closes, 20)
+        boll_upper = _bollinger_upper_band(closes, 20)
+        ma_30w = _simple_moving_average(weekly_closes, 30)
+        ma_60w = _simple_moving_average(weekly_closes, 60)
+        forward_price = float(recent_daily_bars[index + holding_days].close_price)
+        if latest_price <= 0:
+            continue
+        forward_return = (forward_price - latest_price) / latest_price
+
+        iteration_results: dict[str, QuantModelResult] = {}
+        for model_key in selected_models:
+            simulated = _build_model_result(
+                model_key,
+                latest_price=latest_price,
+                ma_250=ma_250,
+                boll_mid=boll_mid,
+                boll_lower=boll_lower,
+                boll_upper=boll_upper,
+                ma_30w=ma_30w,
+                ma_60w=ma_60w,
+                dividend_yield=dividend_yield,
+                closes=closes,
+                weekly_closes=weekly_closes,
+                symbol_fundamentals=symbol_fundamentals,
+                params=params,
+            )
+            iteration_results[model_key] = simulated
+            if simulated.score >= ADAPTIVE_SIGNAL_SCORE_THRESHOLD:
+                samples_by_model[model_key].append(forward_return)
+
+        professional_scores = [
+            result.score for key, result in iteration_results.items() if key in PROFESSIONAL_MODEL_KEYS
+        ]
+        adaptive_scores = [
+            result.score for key, result in iteration_results.items() if key not in PROFESSIONAL_MODEL_KEYS
+        ]
+        if professional_scores and sum(professional_scores) / len(professional_scores) >= ADAPTIVE_SIGNAL_SCORE_THRESHOLD:
+            group_samples["professional"].append(forward_return)
+        if adaptive_scores and sum(adaptive_scores) / len(adaptive_scores) >= ADAPTIVE_SIGNAL_SCORE_THRESHOLD:
+            group_samples["adaptive"].append(forward_return)
+
+    adaptive_profiles: dict[str, AdaptiveLearningProfile] = {}
+    for model_key, sample_returns in samples_by_model.items():
+        adaptive_profiles[model_key] = _build_learning_profile(sample_returns, min_samples, target_return)
+
+    group_profiles = {
+        group_key: _build_learning_profile(sample_returns, min_samples, target_return)
+        for group_key, sample_returns in group_samples.items()
+    }
+    return EnsembleLearningProfiles(
+        model_profiles=adaptive_profiles,
+        group_profiles=group_profiles,
+    )
+
+
+def _apply_adaptive_profile(
+    model: QuantModelResult,
+    profile: AdaptiveLearningProfile,
+    holding_days: int,
+) -> QuantModelResult:
+    base_score = model.score
+    if profile.sample_size <= 0:
+        return replace(model, base_score=base_score)
+
+    adjusted_score = _clamp_score(base_score * (1.0 + (profile.weight - 1.0) * 0.35))
+    learning_reason = (
+        f"；滚动模拟 {profile.sample_size} 次，{holding_days} 日目标命中率 {profile.hit_rate:.2f}%"
+        f"，平均收益 {profile.avg_return_pct:.2f}%"
+    )
+    return replace(
+        model,
+        score=adjusted_score,
+        reason=f"{model.reason}{learning_reason}",
+        base_score=base_score,
+        adaptive_weight=profile.weight,
+        adaptive_sample_size=profile.sample_size,
+        adaptive_hit_rate=profile.hit_rate,
+        adaptive_avg_return_pct=profile.avg_return_pct,
+    )
+
+
+def _build_learning_profile(
+    sample_returns: list[float],
+    min_samples: int,
+    target_return: float,
+) -> AdaptiveLearningProfile:
+    sample_size = len(sample_returns)
+    if sample_size < min_samples:
+        return AdaptiveLearningProfile(sample_size=sample_size)
+    hit_rate = sum(1 for value in sample_returns if value >= target_return) / sample_size
+    avg_return = sum(sample_returns) / sample_size
+    confidence = min(1.0, sample_size / max(min_samples * 2, 1))
+    raw_weight = 1.0 + (hit_rate - 0.5) * 0.9 + avg_return * 2.5
+    blended_weight = 1.0 + (raw_weight - 1.0) * confidence
+    return AdaptiveLearningProfile(
+        weight=round(max(0.75, min(1.35, blended_weight)), 3),
+        sample_size=sample_size,
+        hit_rate=round(hit_rate * 100, 2),
+        avg_return_pct=round(avg_return * 100, 2),
+    )
+
+
+def _blend_group_scores(
+    models: list[QuantModelResult],
+    group_profiles: Mapping[str, AdaptiveLearningProfile],
+) -> float:
+    if not models:
+        return 0.0
+    professional_scores = [item.score for item in models if item.key in PROFESSIONAL_MODEL_KEYS]
+    adaptive_scores = [item.score for item in models if item.key not in PROFESSIONAL_MODEL_KEYS]
+    if not professional_scores or not adaptive_scores:
+        return sum(item.score for item in models) / len(models)
+
+    professional_avg = sum(professional_scores) / len(professional_scores)
+    adaptive_avg = sum(adaptive_scores) / len(adaptive_scores)
+    professional_weight = _group_weight(group_profiles.get("professional"))
+    adaptive_weight = _group_weight(group_profiles.get("adaptive"))
+    total_weight = professional_weight + adaptive_weight
+    if total_weight <= 0:
+        return sum(item.score for item in models) / len(models)
+    return (professional_avg * professional_weight + adaptive_avg * adaptive_weight) / total_weight
+
+
+def _group_weight(profile: AdaptiveLearningProfile | None) -> float:
+    if profile is None or profile.sample_size <= 0:
+        return 1.0
+    return max(0.85, min(1.35, profile.weight))
 
 
 def _trend_following_model(
@@ -334,6 +607,138 @@ def _weekly_resonance_model(
         label=MODEL_LABELS["weekly_resonance"],
         score=_clamp_score(score),
         reason="；".join(reasons) or "缺少周线数据",
+    )
+
+
+def _msci_momentum_model(
+    latest_price: float,
+    ma_250: float,
+    closes: list[float],
+    params: Mapping[str, float | bool],
+) -> QuantModelResult:
+    """Approximate MSCI-style medium-term momentum with a 1-month skip and volatility penalty."""
+
+    score = 48.0
+    reasons: list[str] = []
+    if len(closes) < 147:
+        return QuantModelResult(
+            key="msci_momentum",
+            label=MODEL_LABELS["msci_momentum"],
+            score=_clamp_score(score),
+            reason="历史样本不足，暂无法计算 6-12 个月动量",
+        )
+
+    six_month_skip = _price_change_ratio(closes[-147], closes[-21]) if len(closes) >= 147 else 0.0
+    twelve_month_skip = _price_change_ratio(closes[-273], closes[-21]) if len(closes) >= 273 else six_month_skip
+    momentum_returns = _daily_returns(closes[-126:]) if len(closes) >= 126 else _daily_returns(closes)
+    momentum_vol = _annualized_volatility(momentum_returns[-60:]) if len(momentum_returns) >= 60 else _annualized_volatility(momentum_returns)
+    risk_adjusted_momentum = ((six_month_skip * 0.6) + (twelve_month_skip * 0.4)) / max(momentum_vol, 0.08)
+
+    if risk_adjusted_momentum >= 0.35:
+        score += 26
+        reasons.append("6-12 个月风险调整后动量显著为正")
+    elif risk_adjusted_momentum >= 0.12:
+        score += 14
+        reasons.append("中期风险调整后动量保持正值")
+    else:
+        score -= 18
+        reasons.append("中期动量不足或波动侵蚀收益")
+
+    if ma_250 > 0 and latest_price >= ma_250:
+        score += 10
+        reasons.append("价格位于 250 日线之上")
+    elif ma_250 > 0:
+        score -= 10
+        reasons.append("价格仍低于 250 日线")
+
+    near_high_ratio = latest_price / max(max(closes[-252:]), 0.01) if len(closes) >= 252 else 0.0
+    if near_high_ratio >= 0.9:
+        score += 8
+        reasons.append("价格维持在近一年高位区附近")
+    elif near_high_ratio > 0:
+        score -= 4
+        reasons.append("价格距离近一年强势区仍有差距")
+
+    return QuantModelResult(
+        key="msci_momentum",
+        label=MODEL_LABELS["msci_momentum"],
+        score=_clamp_score(score),
+        reason="；".join(reasons),
+    )
+
+
+def _quality_stability_model(
+    latest_price: float,
+    ma_250: float,
+    dividend_yield: float,
+    closes: list[float],
+    weekly_closes: list[float],
+    symbol_fundamentals: Mapping[str, float | None],
+    params: Mapping[str, float | bool],
+) -> QuantModelResult:
+    """Approximate quality/stability using available valuation plus defensive price behavior."""
+
+    score = 50.0
+    reasons: list[str] = []
+    pe_ttm = _safe_float(symbol_fundamentals.get("pe_ttm"))
+    pb = _safe_float(symbol_fundamentals.get("pb"))
+    market_cap = _safe_float(symbol_fundamentals.get("market_cap"))
+    volatility_60 = _annualized_volatility(_daily_returns(closes[-60:])) if len(closes) >= 60 else 0.0
+    weekly_drawdown = _rolling_drawdown(weekly_closes[-26:]) if len(weekly_closes) >= 26 else 0.0
+
+    if pe_ttm is not None and 0 < pe_ttm <= 28:
+        score += 10
+        reasons.append(f"市盈率约 {pe_ttm:.2f}，估值不过热")
+    elif pe_ttm is not None and pe_ttm > 40:
+        score -= 8
+        reasons.append(f"市盈率约 {pe_ttm:.2f}，估值偏高")
+    else:
+        reasons.append("缺少稳定 PE 数据，改用价格稳定性做代理")
+
+    if pb is not None and 0 < pb <= 3.5:
+        score += 10
+        reasons.append(f"市净率约 {pb:.2f}，资产定价相对克制")
+    elif pb is not None and pb > 6:
+        score -= 8
+        reasons.append(f"市净率约 {pb:.2f}，估值弹性较大")
+
+    if dividend_yield >= 3.0:
+        score += 10
+        reasons.append("股息率达到质量筛选参考线")
+    elif dividend_yield > 0:
+        score += 3
+        reasons.append("存在现金分红，但防御性一般")
+    else:
+        score -= 6
+        reasons.append("缺少现金分红支撑")
+
+    if volatility_60 and volatility_60 <= 0.28:
+        score += 10
+        reasons.append(f"近 60 日年化波动约 {volatility_60 * 100:.2f}%，稳定性较好")
+    elif volatility_60:
+        score -= 10
+        reasons.append(f"近 60 日年化波动约 {volatility_60 * 100:.2f}%，稳定性偏弱")
+
+    if weekly_drawdown <= 0.12:
+        score += 8
+        reasons.append("近半年周线回撤控制较好")
+    elif weekly_drawdown >= 0.22:
+        score -= 8
+        reasons.append("近半年周线回撤偏大")
+
+    if ma_250 > 0 and latest_price >= ma_250:
+        score += 6
+        reasons.append("长期趋势未破坏")
+
+    if market_cap is not None and market_cap >= 20_000_000_000:
+        score += 4
+        reasons.append("市值体量较大，波动通常更可控")
+
+    return QuantModelResult(
+        key="quality_stability",
+        label=MODEL_LABELS["quality_stability"],
+        score=_clamp_score(score),
+        reason="；".join(reasons),
     )
 
 
@@ -572,6 +977,50 @@ def _daily_returns(closes: list[float]) -> list[float]:
     return returns
 
 
+def _safe_float(value: object) -> float | None:
+    try:
+        parsed = float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    return parsed
+
+
+def _rolling_drawdown(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    peak = values[0]
+    max_drawdown = 0.0
+    for value in values:
+        peak = max(peak, value)
+        if peak > 0:
+            max_drawdown = max(max_drawdown, (peak - value) / peak)
+    return max_drawdown
+
+
+def _simple_moving_average(values: list[float], window: int) -> float:
+    if len(values) < window:
+        return 0.0
+    return round(sum(values[-window:]) / window, 2)
+
+
+def _bollinger_lower_band(values: list[float], window: int = 20, std_multiplier: float = 2.0) -> float:
+    if len(values) < window:
+        return 0.0
+    sample = values[-window:]
+    middle = sum(sample) / window
+    variance = sum((item - middle) ** 2 for item in sample) / window
+    return round(middle - std_multiplier * math.sqrt(variance), 2)
+
+
+def _bollinger_upper_band(values: list[float], window: int = 20, std_multiplier: float = 2.0) -> float:
+    if len(values) < window:
+        return 0.0
+    sample = values[-window:]
+    middle = sum(sample) / window
+    variance = sum((item - middle) ** 2 for item in sample) / window
+    return round(middle + std_multiplier * math.sqrt(variance), 2)
+
+
 def _annualized_volatility(returns: list[float]) -> float:
     if not returns:
         return 0.0
@@ -590,6 +1039,7 @@ def _build_summary(
     probability: float,
     models: list[QuantModelResult],
     params: Mapping[str, float | bool],
+    group_profiles: Mapping[str, AdaptiveLearningProfile] | None = None,
 ) -> str:
     ranked_models = sorted(models, key=lambda item: item.score, reverse=True)
     top_model = ranked_models[0] if ranked_models else None
@@ -609,7 +1059,7 @@ def _build_summary(
         f"{prefix}，当前最强信号来自{top_model.label}模型"
         f"（次强为{secondary_model.label}）" if secondary_model else f"{prefix}，当前最强信号来自{top_model.label}模型"
     )
-    return (
+    summary = (
         f"{summary}；最小股息率阈值 {float(params['min_dividend_yield']):.2f}% ，"
         f"20 日动量阈值 {float(params['min_20d_momentum_pct']) * 100:.2f}% ，"
         f"20 日波动率上限 {float(params['max_20d_volatility']) * 100:.2f}% ，"
@@ -618,6 +1068,23 @@ def _build_summary(
         f"最小盈亏比 {float(params['min_reward_risk_ratio']):.2f} ，"
         f"DCF 折现率 {float(params['dcf_discount_rate']) * 100:.2f}% / 永续增长 {float(params['dcf_terminal_growth']) * 100:.2f}%。"
     )
+    if bool(params.get("adaptive_learning_enabled")):
+        professional_profile = (group_profiles or {}).get("professional")
+        adaptive_profile = (group_profiles or {}).get("adaptive")
+        learning_clause = (
+            f" 自适应层已根据最近 {int(params['adaptive_lookback_days'])} 个交易日的滚动模拟结果，"
+            f"按 {int(params['adaptive_holding_days'])} 日持有周期自动校准各子模型权重。"
+        )
+        if (
+            professional_profile is not None and professional_profile.sample_size > 0
+            and adaptive_profile is not None and adaptive_profile.sample_size > 0
+        ):
+            learning_clause += (
+                f" 专业基准组最近命中率 {professional_profile.hit_rate:.2f}% / 平均收益 {professional_profile.avg_return_pct:.2f}% ，"
+                f"自适应组最近命中率 {adaptive_profile.hit_rate:.2f}% / 平均收益 {adaptive_profile.avg_return_pct:.2f}% 。"
+            )
+        return f"{summary}{learning_clause}"
+    return summary
 
 
 def _clamp_score(score: float) -> float:

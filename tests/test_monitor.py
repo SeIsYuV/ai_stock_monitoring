@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import json
 import tempfile
 import unittest
@@ -25,9 +25,65 @@ from src.ai_stock_monitoring.monitor import (
     validate_stock_symbol,
 )
 from src.ai_stock_monitoring.quant import build_quant_signal
-from src.ai_stock_monitoring.providers.base import PriceBar
+from src.ai_stock_monitoring.providers.base import MarketDataProvider, PriceBar, Quote
 from src.ai_stock_monitoring.security import verify_password
 from src.ai_stock_monitoring.trade_advisor import build_market_action_summary, build_portfolio_profile, build_position_summary, build_recommended_price_plan, build_stock_comprehensive_advice
+
+
+class RefreshAwareProvider(MarketDataProvider):
+    provider_name = "refresh-aware"
+
+    def __init__(self) -> None:
+        self.version = 0
+        self.invalidated_symbols: list[str] = []
+
+    def get_quote(self, symbol: str) -> Quote:
+        return Quote(
+            symbol=symbol,
+            name=f"测试股票{symbol}",
+            latest_price=10.0 + self.version,
+            updated_at=datetime.fromisoformat("2026-03-18T10:00:00+00:00"),
+        )
+
+    def get_daily_bars(self, symbol: str, limit: int = 320) -> list[PriceBar]:
+        base = 10.0 + self.version
+        start = date(2025, 1, 1)
+        return [
+            PriceBar(
+                traded_on=start + timedelta(days=index),
+                open_price=base - 0.2,
+                high_price=base + 0.4,
+                low_price=base - 0.4,
+                close_price=base + (index % 6) * 0.03,
+                volume=1_000_000 + index * 1000,
+            )
+            for index in range(limit)
+        ]
+
+    def get_weekly_bars(self, symbol: str, limit: int = 80) -> list[PriceBar]:
+        base = 10.0 + self.version
+        start = date(2024, 1, 5)
+        return [
+            PriceBar(
+                traded_on=start + timedelta(days=index * 7),
+                open_price=base - 0.3,
+                high_price=base + 0.5,
+                low_price=base - 0.5,
+                close_price=base + (index % 5) * 0.08,
+                volume=5_000_000 + index * 5000,
+            )
+            for index in range(limit)
+        ]
+
+    def get_trailing_dividend_yield(self, symbol: str, latest_price: float) -> float:
+        return 4.2
+
+    def get_trade_dates(self) -> list[date]:
+        return [date(2026, 3, 18)]
+
+    def invalidate_symbol_cache(self, symbol: str) -> None:
+        self.invalidated_symbols.append(symbol)
+        self.version += 1
 
 
 class MonitorTests(unittest.TestCase):
@@ -74,6 +130,18 @@ class MonitorTests(unittest.TestCase):
             initialize_database(settings)
             summary = StockMonitor(settings).run()
             self.assertIn("Monitoring 3 stock(s)", summary)
+
+    def test_refresh_symbol_snapshot_force_refresh_invalidates_provider_cache(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            settings = AppSettings(db_path=database_file.name, provider_name="mock")
+            initialize_database(settings)
+            monitor = StockMonitor(settings)
+            monitor.provider = RefreshAwareProvider()
+            normal_snapshot = monitor.refresh_symbol_snapshot("admin", "600519")
+            forced_snapshot = monitor.refresh_symbol_snapshot("admin", "600519", force_refresh=True)
+            self.assertEqual(normal_snapshot.latest_price, 10.0)
+            self.assertEqual(forced_snapshot.latest_price, 11.0)
+            self.assertEqual(monitor.provider.invalidated_symbols, ["600519"])
 
     def test_dashboard_route_renders(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
@@ -771,6 +839,37 @@ class MonitorTests(unittest.TestCase):
         self.assertLessEqual(signal.probability, 99)
         self.assertIn("模型", signal.summary)
 
+    def test_quant_signal_adaptive_learning_adds_backtest_metadata(self) -> None:
+        settings = AppSettings(provider_name="mock")
+        monitor = StockMonitor(settings)
+        bars_daily = monitor.provider.get_daily_bars("600519")
+        bars_weekly = monitor.provider.get_weekly_bars("600519")
+        quote = monitor.provider.get_quote("600519")
+        signal = build_quant_signal(
+            latest_price=quote.latest_price,
+            ma_250=calculate_simple_moving_average([item.close_price for item in bars_daily], 250),
+            boll_mid=calculate_simple_moving_average([item.close_price for item in bars_daily], 20),
+            boll_lower=calculate_bollinger_lower_band([item.close_price for item in bars_daily]),
+            boll_upper=calculate_bollinger_upper_band([item.close_price for item in bars_daily]),
+            ma_30w=calculate_simple_moving_average([item.close_price for item in bars_weekly], 30),
+            ma_60w=calculate_simple_moving_average([item.close_price for item in bars_weekly], 60),
+            dividend_yield=monitor.provider.get_trailing_dividend_yield("600519", quote.latest_price),
+            daily_bars=bars_daily,
+            weekly_bars=bars_weekly,
+            strategy_params={
+                "adaptive_learning_enabled": True,
+                "adaptive_lookback_days": 120,
+                "adaptive_holding_days": 5,
+                "adaptive_min_samples": 4,
+                "adaptive_target_return_pct": 0.0,
+            },
+        )
+        self.assertIn("自适应层", signal.summary)
+        self.assertTrue(any(item.adaptive_sample_size > 0 for item in signal.models))
+        self.assertTrue(any(item.base_score is not None for item in signal.models))
+        self.assertIn("MSCI动量", {item.label for item in signal.models})
+        self.assertIn("质量稳定", {item.label for item in signal.models})
+
     def test_created_user_password_is_stored(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
             app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
@@ -885,6 +984,8 @@ class MonitorTests(unittest.TestCase):
                 self.assertIn("1.2.3.4", settings_response.text)
                 self.assertIn("20 日最大波动率阈值", settings_response.text)
                 self.assertIn("BOLL 中轨最大偏离", settings_response.text)
+                self.assertIn("启用自适应学习校准", settings_response.text)
+                self.assertIn("专业基准", settings_response.text)
                 self.assertIn("table-scroll", settings_response.text)
 
     def test_market_action_summary_prefers_sell_when_sell_signals_dominate(self) -> None:

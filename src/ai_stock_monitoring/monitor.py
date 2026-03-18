@@ -494,12 +494,16 @@ class StockMonitor:
         symbol: str,
         selected_models: list[str] | tuple[str, ...] | None = None,
         strategy_params: dict[str, float | bool] | None = None,
+        force_refresh: bool = False,
     ) -> SnapshotComputation:
         """Build a snapshot for one symbol.
 
         盘中优先使用实时价格；如果盘后或接口短暂返回 0，
         就退回到最近一个日线收盘价，这样新增股票后在非交易时段也能立刻看到最近可用数据。
         """
+
+        if force_refresh:
+            self.provider.invalidate_symbol_cache(symbol)
 
         daily_bars = self.provider.get_daily_bars(symbol)
         weekly_bars = self.provider.get_weekly_bars(symbol)
@@ -523,6 +527,7 @@ class StockMonitor:
             self.last_error_message = f"{symbol} 实时报价获取失败，已回退到最近K线价格：{quote_error}"
 
         dividend_yield = self.provider.get_trailing_dividend_yield(symbol, effective_quote.latest_price)
+        symbol_fundamentals = self.provider.get_symbol_fundamentals(symbol)
         quant_signal = build_quant_signal(
             latest_price=effective_quote.latest_price,
             ma_250=calculate_simple_moving_average([item.close_price for item in daily_bars], 250),
@@ -534,6 +539,7 @@ class StockMonitor:
             dividend_yield=dividend_yield,
             daily_bars=daily_bars,
             weekly_bars=weekly_bars,
+            symbol_fundamentals=symbol_fundamentals,
             selected_models=normalize_selected_models(selected_models),
             strategy_params=normalize_strategy_params(strategy_params),
         )
@@ -635,13 +641,19 @@ class StockMonitor:
             "trigger_detail": trigger_detail,
         }
 
-    def refresh_symbol_snapshot(self, owner_username: str, symbol: str) -> SnapshotComputation:
+    def refresh_symbol_snapshot(
+        self,
+        owner_username: str,
+        symbol: str,
+        force_refresh: bool = False,
+    ) -> SnapshotComputation:
         quant_config = self._resolve_owner_quant_config(owner_username)
         try:
             snapshot = self.build_snapshot(
                 symbol,
                 selected_models=quant_config["selected_models"],
                 strategy_params=quant_config["strategy_params"],
+                force_refresh=force_refresh,
             )
         except Exception as exc:
             fallback_row = get_snapshot(self.settings.db_path, owner_username, symbol)

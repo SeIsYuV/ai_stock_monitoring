@@ -25,6 +25,25 @@ def _to_float(value: Any) -> float:
     return float(value)
 
 
+def _to_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip().replace(",", "")
+    if not text or text in {"-", "--", "nan", "None"}:
+        return None
+    multiplier = 1.0
+    if text.endswith("亿"):
+        multiplier = 100_000_000.0
+        text = text[:-1]
+    elif text.endswith("万"):
+        multiplier = 10_000.0
+        text = text[:-1]
+    try:
+        return float(text) * multiplier
+    except ValueError:
+        return None
+
+
 class AkshareMarketDataProvider(MarketDataProvider):
     """Fetch quotes, history bars, dividends and trade dates through AKShare."""
     provider_name = "akshare"
@@ -144,6 +163,24 @@ class AkshareMarketDataProvider(MarketDataProvider):
         industry_name = str(item_map.get("行业") or item_map.get("所属行业") or "")
         return {"industry_name": industry_name}
 
+    def get_symbol_fundamentals(self, symbol: str) -> dict[str, float | None]:
+        item_map = self._load_symbol_item_map(symbol)
+        return {
+            "pe_ttm": _to_optional_float(
+                item_map.get("市盈率(动态)")
+                or item_map.get("市盈率")
+                or item_map.get("市盈率TTM")
+            ),
+            "pb": _to_optional_float(
+                item_map.get("市净率")
+                or item_map.get("市净率MRQ")
+            ),
+            "market_cap": _to_optional_float(
+                item_map.get("总市值")
+                or item_map.get("流通市值")
+            ),
+        }
+
     def get_industry_daily_bars(self, industry_name: str, limit: int = 120) -> list[PriceBar]:
         if not industry_name:
             return []
@@ -165,6 +202,14 @@ class AkshareMarketDataProvider(MarketDataProvider):
         if frame is None or frame.empty:
             return []
         return self._to_bars(frame.tail(limit))
+
+    def invalidate_symbol_cache(self, symbol: str) -> None:
+        self._cache = {
+            key: value for key, value in self._cache.items() if key[1] != symbol
+        }
+
+    def invalidate_all_cache(self) -> None:
+        self._cache.clear()
 
     def _load_symbol_item_map(self, symbol: str) -> dict[str, Any]:
         info = self._cached(

@@ -52,3 +52,16 @@ class MarketDataProvider:
 
     def get_industry_daily_bars(self, industry_name: str, limit: int = 120) -> list[PriceBar]:
         return []
+
+    def get_symbol_fundamentals(self, symbol: str) -> dict[str, float | None]:
+        return {
+            "pe_ttm": None,
+            "pb": None,
+            "market_cap": None,
+        }
+
+    def invalidate_symbol_cache(self, symbol: str) -> None:
+        """Drop short-lived cache entries for one symbol when a hard refresh is requested."""
+
+    def invalidate_all_cache(self) -> None:
+        """Drop all short-lived cache entries when the caller needs a full refresh."""
