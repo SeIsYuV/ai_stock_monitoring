@@ -186,6 +186,7 @@ def build_quant_signal(
     daily_bars: list[PriceBar],
     weekly_bars: list[PriceBar],
     symbol_fundamentals: Mapping[str, float | None] | None = None,
+    live_feedback: Mapping[str, Mapping[str, float | int]] | None = None,
     selected_models: Iterable[str] | None = None,
     strategy_params: Mapping[str, object] | None = None,
 ) -> QuantSignal:
@@ -233,14 +234,25 @@ def build_quant_signal(
             for model in models
         ]
 
+    feedback_payload = dict(live_feedback or {})
+    if feedback_payload:
+        models = [
+            _apply_live_feedback(
+                model,
+                feedback_payload.get(model.key),
+            )
+            for model in models
+        ]
+
     probability = round(
         _blend_group_scores(
             models,
             learning_profiles.group_profiles,
+            feedback_payload,
         ),
         2,
     )
-    summary = _build_summary(probability, models, params, learning_profiles.group_profiles)
+    summary = _build_summary(probability, models, params, learning_profiles.group_profiles, feedback_payload)
     breakdown = json.dumps(
         [
             {
@@ -444,9 +456,35 @@ def _build_learning_profile(
     )
 
 
+def _apply_live_feedback(
+    model: QuantModelResult,
+    feedback: Mapping[str, float | int] | None,
+) -> QuantModelResult:
+    if not feedback:
+        return model
+    sample_size = int(feedback.get("sample_size") or 0)
+    if sample_size < 3:
+        return model
+    hit_rate = float(feedback.get("hit_rate") or 0.0)
+    avg_return_pct = float(feedback.get("avg_return_pct") or 0.0)
+    confidence = min(1.0, sample_size / 12.0)
+    raw_weight = 1.0 + ((hit_rate / 100.0) - 0.5) * 0.4 + (avg_return_pct / 100.0) * 1.2
+    weight = 1.0 + (raw_weight - 1.0) * confidence
+    adjusted_score = _clamp_score(model.score * (1.0 + (weight - 1.0) * 0.18))
+    return replace(
+        model,
+        score=adjusted_score,
+        reason=(
+            f"{model.reason}；纸面交易 {sample_size} 笔，命中率 {hit_rate:.2f}%"
+            f"，平均收益 {avg_return_pct:.2f}%"
+        ),
+    )
+
+
 def _blend_group_scores(
     models: list[QuantModelResult],
     group_profiles: Mapping[str, AdaptiveLearningProfile],
+    live_feedback: Mapping[str, Mapping[str, float | int]] | None = None,
 ) -> float:
     if not models:
         return 0.0
@@ -457,8 +495,8 @@ def _blend_group_scores(
 
     professional_avg = sum(professional_scores) / len(professional_scores)
     adaptive_avg = sum(adaptive_scores) / len(adaptive_scores)
-    professional_weight = _group_weight(group_profiles.get("professional"))
-    adaptive_weight = _group_weight(group_profiles.get("adaptive"))
+    professional_weight = _group_weight(group_profiles.get("professional")) * _feedback_group_weight((live_feedback or {}).get("professional"))
+    adaptive_weight = _group_weight(group_profiles.get("adaptive")) * _feedback_group_weight((live_feedback or {}).get("adaptive"))
     total_weight = professional_weight + adaptive_weight
     if total_weight <= 0:
         return sum(item.score for item in models) / len(models)
@@ -469,6 +507,19 @@ def _group_weight(profile: AdaptiveLearningProfile | None) -> float:
     if profile is None or profile.sample_size <= 0:
         return 1.0
     return max(0.85, min(1.35, profile.weight))
+
+
+def _feedback_group_weight(feedback: Mapping[str, float | int] | None) -> float:
+    if not feedback:
+        return 1.0
+    sample_size = int(feedback.get("sample_size") or 0)
+    if sample_size < 3:
+        return 1.0
+    hit_rate = float(feedback.get("hit_rate") or 0.0)
+    avg_return_pct = float(feedback.get("avg_return_pct") or 0.0)
+    confidence = min(1.0, sample_size / 12.0)
+    raw_weight = 1.0 + ((hit_rate / 100.0) - 0.5) * 0.45 + (avg_return_pct / 100.0) * 1.3
+    return max(0.85, min(1.35, 1.0 + (raw_weight - 1.0) * confidence))
 
 
 def _trend_following_model(
@@ -1040,6 +1091,7 @@ def _build_summary(
     models: list[QuantModelResult],
     params: Mapping[str, float | bool],
     group_profiles: Mapping[str, AdaptiveLearningProfile] | None = None,
+    live_feedback: Mapping[str, Mapping[str, float | int]] | None = None,
 ) -> str:
     ranked_models = sorted(models, key=lambda item: item.score, reverse=True)
     top_model = ranked_models[0] if ranked_models else None
@@ -1082,6 +1134,15 @@ def _build_summary(
             learning_clause += (
                 f" 专业基准组最近命中率 {professional_profile.hit_rate:.2f}% / 平均收益 {professional_profile.avg_return_pct:.2f}% ，"
                 f"自适应组最近命中率 {adaptive_profile.hit_rate:.2f}% / 平均收益 {adaptive_profile.avg_return_pct:.2f}% 。"
+            )
+        professional_live = (live_feedback or {}).get("professional")
+        adaptive_live = (live_feedback or {}).get("adaptive")
+        if professional_live and adaptive_live:
+            learning_clause += (
+                f" 真实纸面交易方面，专业组近 {int(professional_live.get('sample_size') or 0)} 笔命中率"
+                f" {float(professional_live.get('hit_rate') or 0.0):.2f}% ，"
+                f"自适应组近 {int(adaptive_live.get('sample_size') or 0)} 笔命中率"
+                f" {float(adaptive_live.get('hit_rate') or 0.0):.2f}% 。"
             )
         return f"{summary}{learning_clause}"
     return summary

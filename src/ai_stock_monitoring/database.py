@@ -167,6 +167,33 @@ def initialize_database(settings: AppSettings) -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS user_model_paper_trade (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_username TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                model_scope TEXT NOT NULL,
+                model_key TEXT NOT NULL,
+                model_label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                entry_date TEXT NOT NULL,
+                latest_price REAL NOT NULL,
+                latest_date TEXT NOT NULL,
+                exit_price REAL,
+                exit_date TEXT,
+                holding_days INTEGER NOT NULL DEFAULT 0,
+                max_return_pct REAL NOT NULL DEFAULT 0,
+                min_return_pct REAL NOT NULL DEFAULT 0,
+                max_drawdown_pct REAL NOT NULL DEFAULT 0,
+                unrealized_return_pct REAL NOT NULL DEFAULT 0,
+                realized_return_pct REAL,
+                entry_reason TEXT NOT NULL DEFAULT '',
+                exit_reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS login_guard (
                 subject TEXT PRIMARY KEY,
                 failed_attempts INTEGER NOT NULL DEFAULT 0,
@@ -196,6 +223,10 @@ def initialize_database(settings: AppSettings) -> None:
                 ON user_trade_record (owner_username, symbol, traded_at DESC);
             CREATE INDEX IF NOT EXISTS idx_user_trade_analysis_owner_symbol_time
                 ON user_trade_analysis (owner_username, symbol, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_user_model_paper_trade_owner_status
+                ON user_model_paper_trade (owner_username, status, latest_date DESC);
+            CREATE INDEX IF NOT EXISTS idx_user_model_paper_trade_owner_model
+                ON user_model_paper_trade (owner_username, model_key, latest_date DESC);
             CREATE INDEX IF NOT EXISTS idx_user_signal_state_owner_delivery
                 ON user_signal_state (owner_username, pending_delivery, deliver_on);
             CREATE INDEX IF NOT EXISTS idx_user_login_history_username_time
@@ -369,6 +400,36 @@ def _migrate_legacy_data(connection: sqlite3.Connection, settings: AppSettings, 
             "created_at",
         ),
     )
+    _copy_simple_legacy_table(
+        connection,
+        legacy_table="model_paper_trade",
+        target_table="user_model_paper_trade",
+        owner_username=admin_username,
+        columns=(
+            "symbol",
+            "display_name",
+            "model_scope",
+            "model_key",
+            "model_label",
+            "status",
+            "entry_price",
+            "entry_date",
+            "latest_price",
+            "latest_date",
+            "exit_price",
+            "exit_date",
+            "holding_days",
+            "max_return_pct",
+            "min_return_pct",
+            "max_drawdown_pct",
+            "unrealized_return_pct",
+            "realized_return_pct",
+            "entry_reason",
+            "exit_reason",
+            "created_at",
+            "updated_at",
+        ),
+    )
 
 
 def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
@@ -385,6 +446,36 @@ def _column_exists(connection: sqlite3.Connection, table_name: str, column_name:
 
 
 def _ensure_schema_migrations(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_model_paper_trade (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_username TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            model_scope TEXT NOT NULL,
+            model_key TEXT NOT NULL,
+            model_label TEXT NOT NULL,
+            status TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            entry_date TEXT NOT NULL,
+            latest_price REAL NOT NULL,
+            latest_date TEXT NOT NULL,
+            exit_price REAL,
+            exit_date TEXT,
+            holding_days INTEGER NOT NULL DEFAULT 0,
+            max_return_pct REAL NOT NULL DEFAULT 0,
+            min_return_pct REAL NOT NULL DEFAULT 0,
+            max_drawdown_pct REAL NOT NULL DEFAULT 0,
+            unrealized_return_pct REAL NOT NULL DEFAULT 0,
+            realized_return_pct REAL,
+            entry_reason TEXT NOT NULL DEFAULT '',
+            exit_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS user_portfolio_settings (
@@ -1334,3 +1425,177 @@ def get_latest_trade_analysis(db_path: str, owner_username: str, symbol: str | N
     query += " ORDER BY created_at DESC, id DESC LIMIT 1"
     with get_connection(db_path) as connection:
         return connection.execute(query, parameters).fetchone()
+
+
+def get_open_model_paper_trade(
+    db_path: str,
+    owner_username: str,
+    symbol: str,
+    model_key: str,
+) -> sqlite3.Row | None:
+    with get_connection(db_path) as connection:
+        return connection.execute(
+            """
+            SELECT *
+            FROM user_model_paper_trade
+            WHERE owner_username = ? AND symbol = ? AND model_key = ? AND status = 'open'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (owner_username, symbol, model_key),
+        ).fetchone()
+
+
+def list_model_paper_trades(
+    db_path: str,
+    owner_username: str,
+    symbol: str | None = None,
+    status: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> list[sqlite3.Row]:
+    query = """
+        SELECT *
+        FROM user_model_paper_trade
+        WHERE owner_username = ?
+    """
+    parameters: list[Any] = [owner_username]
+    if symbol:
+        query += " AND symbol = ?"
+        parameters.append(symbol)
+    if status:
+        query += " AND status = ?"
+        parameters.append(status)
+    if date_from:
+        query += " AND COALESCE(exit_date, latest_date, entry_date) >= ?"
+        parameters.append(date_from)
+    if date_to:
+        query += " AND entry_date <= ?"
+        parameters.append(date_to)
+    query += " ORDER BY latest_date DESC, id DESC"
+    with get_connection(db_path) as connection:
+        return list(connection.execute(query, parameters).fetchall())
+
+
+def open_model_paper_trade(
+    db_path: str,
+    owner_username: str,
+    symbol: str,
+    display_name: str,
+    model_scope: str,
+    model_key: str,
+    model_label: str,
+    entry_price: float,
+    entry_date: str,
+    entry_reason: str,
+) -> None:
+    now = datetime.now(UTC).isoformat()
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO user_model_paper_trade (
+                owner_username, symbol, display_name, model_scope, model_key, model_label,
+                status, entry_price, entry_date, latest_price, latest_date,
+                holding_days, max_return_pct, min_return_pct, max_drawdown_pct,
+                unrealized_return_pct, entry_reason, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, ?, ?)
+            """,
+            (
+                owner_username,
+                symbol,
+                display_name,
+                model_scope,
+                model_key,
+                model_label,
+                entry_price,
+                entry_date,
+                entry_price,
+                entry_date,
+                entry_reason,
+                now,
+                now,
+            ),
+        )
+
+
+def mark_model_paper_trade(
+    db_path: str,
+    trade_id: int,
+    latest_price: float,
+    latest_date: str,
+    holding_days: int,
+    max_return_pct: float,
+    min_return_pct: float,
+    max_drawdown_pct: float,
+    unrealized_return_pct: float,
+) -> None:
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE user_model_paper_trade
+            SET latest_price = ?, latest_date = ?, holding_days = ?,
+                max_return_pct = ?, min_return_pct = ?, max_drawdown_pct = ?,
+                unrealized_return_pct = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                latest_price,
+                latest_date,
+                holding_days,
+                max_return_pct,
+                min_return_pct,
+                max_drawdown_pct,
+                unrealized_return_pct,
+                datetime.now(UTC).isoformat(),
+                trade_id,
+            ),
+        )
+
+
+def close_model_paper_trade(
+    db_path: str,
+    trade_id: int,
+    exit_price: float,
+    exit_date: str,
+    holding_days: int,
+    max_return_pct: float,
+    min_return_pct: float,
+    max_drawdown_pct: float,
+    realized_return_pct: float,
+    exit_reason: str,
+) -> None:
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE user_model_paper_trade
+            SET status = 'closed',
+                latest_price = ?,
+                latest_date = ?,
+                exit_price = ?,
+                exit_date = ?,
+                holding_days = ?,
+                max_return_pct = ?,
+                min_return_pct = ?,
+                max_drawdown_pct = ?,
+                unrealized_return_pct = 0,
+                realized_return_pct = ?,
+                exit_reason = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                exit_price,
+                exit_date,
+                exit_price,
+                exit_date,
+                holding_days,
+                max_return_pct,
+                min_return_pct,
+                max_drawdown_pct,
+                realized_return_pct,
+                exit_reason,
+                datetime.now(UTC).isoformat(),
+                trade_id,
+            ),
+        )

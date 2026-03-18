@@ -13,7 +13,7 @@ from __future__ import annotations
 """
 
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 import json
 import math
 import re
@@ -41,20 +41,29 @@ PRICE_SUPPORT_TRIGGER_TYPES = {"250日线", "BOLL中轨", "BOLL下轨"}
 SELL_TRIGGER_TYPES = {"BOLL上轨卖出", "低股息率卖出", "量化走弱卖出"}
 WEEKLY_BREAKOUT_MIN_CLOSE_RATIO = 1.01
 WEEKLY_BREAKOUT_MIN_LOW_RATIO = 0.995
+PAPER_TRADE_OPEN_THRESHOLD_MODEL = 72.0
+PAPER_TRADE_CLOSE_THRESHOLD_MODEL = 46.0
+PAPER_TRADE_OPEN_THRESHOLD_GROUP = 68.0
+PAPER_TRADE_CLOSE_THRESHOLD_GROUP = 50.0
 
 from .config import AppSettings
 from .database import (
     add_alert_history,
+    close_model_paper_trade,
     get_email_settings,
     get_job_state,
     get_monitored_stocks,
+    get_open_model_paper_trade,
     get_portfolio_settings,
     get_quant_settings,
     get_snapshot,
     get_signal_state,
+    list_model_paper_trades,
     list_pending_signal_states,
     list_trade_records,
     list_trade_records_for_symbol,
+    mark_model_paper_trade,
+    open_model_paper_trade,
     set_job_state,
     upsert_signal_state,
     upsert_snapshot,
@@ -494,6 +503,7 @@ class StockMonitor:
         symbol: str,
         selected_models: list[str] | tuple[str, ...] | None = None,
         strategy_params: dict[str, float | bool] | None = None,
+        live_feedback: dict[str, dict[str, float | int]] | None = None,
         force_refresh: bool = False,
     ) -> SnapshotComputation:
         """Build a snapshot for one symbol.
@@ -540,6 +550,7 @@ class StockMonitor:
             daily_bars=daily_bars,
             weekly_bars=weekly_bars,
             symbol_fundamentals=symbol_fundamentals,
+            live_feedback=live_feedback,
             selected_models=normalize_selected_models(selected_models),
             strategy_params=normalize_strategy_params(strategy_params),
         )
@@ -653,6 +664,7 @@ class StockMonitor:
                 symbol,
                 selected_models=quant_config["selected_models"],
                 strategy_params=quant_config["strategy_params"],
+                live_feedback=quant_config["paper_trade_feedback"],
                 force_refresh=force_refresh,
             )
         except Exception as exc:
@@ -689,6 +701,7 @@ class StockMonitor:
             earnings_days_to_window=snapshot.earnings_days_to_window,
             updated_at=snapshot.updated_at.isoformat(),
         )
+        self._sync_model_paper_trades(owner_username, snapshot)
         self.last_refresh_at = datetime.now(UTC)
         return snapshot
 
@@ -783,6 +796,7 @@ class StockMonitor:
                     symbol,
                     tuple(selected_models),
                     json.dumps(strategy_params, ensure_ascii=False, sort_keys=True),
+                    json.dumps(quant_settings["paper_trade_feedback"], ensure_ascii=False, sort_keys=True),
                 )
                 snapshot = snapshot_cache.get(cache_key)
                 if snapshot is None:
@@ -790,6 +804,7 @@ class StockMonitor:
                         symbol,
                         selected_models=selected_models,
                         strategy_params=strategy_params,
+                        live_feedback=quant_settings["paper_trade_feedback"],
                     )
                     snapshot_cache[cache_key] = snapshot
                 upsert_snapshot(
@@ -830,6 +845,7 @@ class StockMonitor:
                 snapshot = replace(snapshot, position_concentration_pct=position_concentration_pct)
                 stock_advice = build_stock_comprehensive_advice(snapshot.__dict__)
                 stock_advice["position_concentration_pct"] = position_concentration_pct
+                self._sync_model_paper_trades(owner_username, snapshot)
                 self._process_intraday_signal(
                     owner_username=owner_username,
                     symbol=symbol,
@@ -1189,7 +1205,183 @@ class StockMonitor:
             "probability_threshold": float(settings["probability_threshold"]),
             "selected_models": tuple(json.loads(settings["selected_models"] or "[]")) or DEFAULT_QUANT_MODELS,
             "strategy_params": normalize_strategy_params(json.loads(settings["strategy_params"] or "{}")),
+            "paper_trade_feedback": self._resolve_owner_model_feedback(owner_username),
         }
+
+    def _resolve_owner_model_feedback(self, owner_username: str, lookback_days: int = 180) -> dict[str, dict[str, float | int]]:
+        closed_rows = list_model_paper_trades(
+            self.settings.db_path,
+            owner_username,
+            status="closed",
+            date_from=(datetime.now(UTC).date() - timedelta(days=lookback_days)).isoformat(),
+        )
+        grouped: dict[str, list[float]] = {}
+        drawdowns: dict[str, list[float]] = {}
+        for row in closed_rows:
+            key = str(row["model_key"])
+            realized_return = float(row["realized_return_pct"] or 0.0)
+            grouped.setdefault(key, []).append(realized_return)
+            drawdowns.setdefault(key, []).append(float(row["max_drawdown_pct"] or 0.0))
+        feedback: dict[str, dict[str, float | int]] = {}
+        for key, returns in grouped.items():
+            sample_size = len(returns)
+            if sample_size <= 0:
+                continue
+            feedback[key] = {
+                "sample_size": sample_size,
+                "hit_rate": round(sum(1 for value in returns if value > 0) / sample_size * 100, 2),
+                "avg_return_pct": round(sum(returns) / sample_size, 2),
+                "avg_drawdown_pct": round(sum(drawdowns.get(key, [0.0])) / sample_size, 2),
+            }
+        return feedback
+
+    @staticmethod
+    def _load_quant_breakdown(snapshot: SnapshotComputation) -> list[dict[str, Any]]:
+        try:
+            payload = json.loads(snapshot.quant_model_breakdown or "[]")
+        except json.JSONDecodeError:
+            return []
+        return [item for item in payload if isinstance(item, dict)]
+
+    @staticmethod
+    def _build_paper_trade_candidates(snapshot: SnapshotComputation) -> list[dict[str, Any]]:
+        breakdown = StockMonitor._load_quant_breakdown(snapshot)
+        professional_scores = [
+            float(item.get("score") or 0.0)
+            for item in breakdown
+            if str(item.get("key") or "") in {"msci_momentum", "quality_stability"}
+        ]
+        adaptive_scores = [
+            float(item.get("score") or 0.0)
+            for item in breakdown
+            if str(item.get("key") or "") not in {"msci_momentum", "quality_stability"}
+        ]
+        candidates: list[dict[str, Any]] = []
+        if professional_scores:
+            candidates.append(
+                {
+                    "model_scope": "group",
+                    "model_key": "professional",
+                    "model_label": "专业组",
+                    "score": round(sum(professional_scores) / len(professional_scores), 2),
+                    "open_threshold": PAPER_TRADE_OPEN_THRESHOLD_GROUP,
+                    "close_threshold": PAPER_TRADE_CLOSE_THRESHOLD_GROUP,
+                }
+            )
+        if adaptive_scores:
+            candidates.append(
+                {
+                    "model_scope": "group",
+                    "model_key": "adaptive",
+                    "model_label": "自适应组",
+                    "score": round(sum(adaptive_scores) / len(adaptive_scores), 2),
+                    "open_threshold": PAPER_TRADE_OPEN_THRESHOLD_GROUP,
+                    "close_threshold": PAPER_TRADE_CLOSE_THRESHOLD_GROUP,
+                }
+            )
+        for item in breakdown:
+            candidates.append(
+                {
+                    "model_scope": "model",
+                    "model_key": str(item.get("key") or ""),
+                    "model_label": str(item.get("label") or "模型"),
+                    "score": float(item.get("score") or 0.0),
+                    "open_threshold": PAPER_TRADE_OPEN_THRESHOLD_MODEL,
+                    "close_threshold": PAPER_TRADE_CLOSE_THRESHOLD_MODEL,
+                }
+            )
+        return [item for item in candidates if item["model_key"]]
+
+    def _sync_model_paper_trades(self, owner_username: str, snapshot: SnapshotComputation) -> None:
+        trade_date = snapshot.updated_at.date().isoformat()
+        candidates = self._build_paper_trade_candidates(snapshot)
+        candidate_keys = {str(item["model_key"]) for item in candidates}
+        existing_open_rows = list_model_paper_trades(
+            self.settings.db_path,
+            owner_username,
+            symbol=snapshot.symbol,
+            status="open",
+        )
+        for row in existing_open_rows:
+            if str(row["model_key"]) in candidate_keys:
+                continue
+            entry_price = float(row["entry_price"] or 0.0)
+            current_return_pct = round((snapshot.latest_price - entry_price) / entry_price * 100, 2) if entry_price > 0 else 0.0
+            entry_date = date.fromisoformat(str(row["entry_date"])[:10])
+            holding_days = max(0, (snapshot.updated_at.date() - entry_date).days)
+            max_return_pct = max(float(row["max_return_pct"] or 0.0), current_return_pct)
+            min_return_pct = min(float(row["min_return_pct"] or 0.0), current_return_pct)
+            max_drawdown_pct = max(float(row["max_drawdown_pct"] or 0.0), max_return_pct - current_return_pct)
+            close_model_paper_trade(
+                self.settings.db_path,
+                trade_id=int(row["id"]),
+                exit_price=snapshot.latest_price,
+                exit_date=trade_date,
+                holding_days=holding_days,
+                max_return_pct=max_return_pct,
+                min_return_pct=min_return_pct,
+                max_drawdown_pct=max_drawdown_pct,
+                realized_return_pct=current_return_pct,
+                exit_reason="模型已移出当前组合，纸面持仓自动结束。",
+            )
+        for item in candidates:
+            score = float(item["score"])
+            trade = get_open_model_paper_trade(
+                self.settings.db_path,
+                owner_username,
+                snapshot.symbol,
+                str(item["model_key"]),
+            )
+            if trade is None and score >= float(item["open_threshold"]) and snapshot.latest_price > 0:
+                open_model_paper_trade(
+                    self.settings.db_path,
+                    owner_username=owner_username,
+                    symbol=snapshot.symbol,
+                    display_name=snapshot.display_name,
+                    model_scope=str(item["model_scope"]),
+                    model_key=str(item["model_key"]),
+                    model_label=str(item["model_label"]),
+                    entry_price=snapshot.latest_price,
+                    entry_date=trade_date,
+                    entry_reason=f"量化评分 {score:.2f} 分，达到入场阈值 {float(item['open_threshold']):.2f}。",
+                )
+                continue
+            if trade is None:
+                continue
+
+            entry_price = float(trade["entry_price"] or 0.0)
+            if entry_price <= 0:
+                continue
+            current_return_pct = round((snapshot.latest_price - entry_price) / entry_price * 100, 2)
+            max_return_pct = max(float(trade["max_return_pct"] or 0.0), current_return_pct)
+            min_return_pct = min(float(trade["min_return_pct"] or 0.0), current_return_pct)
+            max_drawdown_pct = max(float(trade["max_drawdown_pct"] or 0.0), max_return_pct - current_return_pct)
+            entry_date = date.fromisoformat(str(trade["entry_date"])[:10])
+            holding_days = max(0, (snapshot.updated_at.date() - entry_date).days)
+            mark_model_paper_trade(
+                self.settings.db_path,
+                trade_id=int(trade["id"]),
+                latest_price=snapshot.latest_price,
+                latest_date=trade_date,
+                holding_days=holding_days,
+                max_return_pct=max_return_pct,
+                min_return_pct=min_return_pct,
+                max_drawdown_pct=max_drawdown_pct,
+                unrealized_return_pct=current_return_pct,
+            )
+            if score <= float(item["close_threshold"]):
+                close_model_paper_trade(
+                    self.settings.db_path,
+                    trade_id=int(trade["id"]),
+                    exit_price=snapshot.latest_price,
+                    exit_date=trade_date,
+                    holding_days=holding_days,
+                    max_return_pct=max_return_pct,
+                    min_return_pct=min_return_pct,
+                    max_drawdown_pct=max_drawdown_pct,
+                    realized_return_pct=current_return_pct,
+                    exit_reason=f"量化评分 {score:.2f} 分，跌破离场阈值 {float(item['close_threshold']):.2f}。",
+                )
 
     def _process_intraday_signal(
         self,
@@ -1255,13 +1447,19 @@ class StockMonitor:
             if job_state and job_state["last_run_marker"] == marker:
                 continue
             for stock in get_monitored_stocks(self.settings.db_path, owner_username):
-                cache_key = (stock["symbol"], tuple(quant_config["selected_models"]), cache_suffix)
+                cache_key = (
+                    stock["symbol"],
+                    tuple(quant_config["selected_models"]),
+                    cache_suffix,
+                    json.dumps(quant_config["paper_trade_feedback"], ensure_ascii=False, sort_keys=True),
+                )
                 snapshot = snapshot_cache.get(cache_key)
                 if snapshot is None:
                     snapshot = self.build_snapshot(
                         stock["symbol"],
                         selected_models=quant_config["selected_models"],
                         strategy_params=quant_config["strategy_params"],
+                        live_feedback=quant_config["paper_trade_feedback"],
                     )
                     snapshot_cache[cache_key] = snapshot
                 stock_advice = build_stock_comprehensive_advice(snapshot.__dict__)
@@ -1351,13 +1549,19 @@ class StockMonitor:
             if job_state and job_state["last_run_marker"] == marker:
                 continue
             for stock in get_monitored_stocks(self.settings.db_path, owner_username):
-                cache_key = (stock["symbol"], tuple(quant_config["selected_models"]), cache_suffix)
+                cache_key = (
+                    stock["symbol"],
+                    tuple(quant_config["selected_models"]),
+                    cache_suffix,
+                    json.dumps(quant_config["paper_trade_feedback"], ensure_ascii=False, sort_keys=True),
+                )
                 snapshot = snapshot_cache.get(cache_key)
                 if snapshot is None:
                     snapshot = self.build_snapshot(
                         stock["symbol"],
                         selected_models=quant_config["selected_models"],
                         strategy_params=quant_config["strategy_params"],
+                        live_feedback=quant_config["paper_trade_feedback"],
                     )
                     snapshot_cache[cache_key] = snapshot
                 position_summary = owner_positions.get(stock["symbol"])

@@ -49,6 +49,7 @@ from .database import (
     get_unread_alerts,
     get_user,
     initialize_database,
+    list_model_paper_trades,
     list_recent_login_events,
     list_trade_records,
     list_trade_records_for_symbol,
@@ -1112,6 +1113,41 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             ),
         )
 
+    @app.get("/model-review", response_class=HTMLResponse)
+    async def model_review_page(
+        request: Request,
+        month: str | None = None,
+        message: str | None = None,
+        message_type: str = "info",
+    ) -> Response:
+        current_user = _require_login(request, resolved_settings)
+        if isinstance(current_user, RedirectResponse):
+            return current_user
+
+        selected_month, month_start, month_end = _resolve_review_month(month, resolved_settings.timezone_name)
+        rows = list_model_paper_trades(
+            resolved_settings.db_path,
+            current_user["username"],
+            date_from=month_start.isoformat(),
+            date_to=month_end.isoformat(),
+        )
+        review_payload = _build_model_review_payload(rows, month_start, month_end)
+        return templates.TemplateResponse(
+            request,
+            "model_review.html",
+            _base_template_context(
+                request,
+                current_user,
+                message=message,
+                message_type=message_type,
+                page_title="模型复盘",
+                selected_month=selected_month,
+                month_start=month_start.isoformat(),
+                month_end=month_end.isoformat(),
+                review_payload=review_payload,
+            ),
+        )
+
     return app
 
 
@@ -1344,6 +1380,116 @@ def _login_subject(request: Request, username: str = "") -> str:
     client_host = _request_client_host(request)
     user_agent = _request_user_agent(request)
     return f"{username.lower()}|{client_host}|{user_agent}"
+
+
+def _resolve_review_month(month: str | None, timezone_name: str) -> tuple[str, date, date]:
+    zone = ZoneInfo(timezone_name)
+    if month:
+        year_text, month_text = month.split("-", 1)
+        selected = date(int(year_text), int(month_text), 1)
+    else:
+        now = datetime.now(zone)
+        selected = date(now.year, now.month, 1)
+    if selected.month == 12:
+        next_month = date(selected.year + 1, 1, 1)
+    else:
+        next_month = date(selected.year, selected.month + 1, 1)
+    return selected.strftime("%Y-%m"), selected, next_month - timedelta(days=1)
+
+
+def _build_model_review_payload(rows: list[object], month_start: date, month_end: date) -> dict[str, object]:
+    summary_map: dict[str, dict[str, object]] = {}
+    trade_rows: list[dict[str, object]] = []
+
+    for row in rows:
+        payload = dict(row)
+        status = str(payload.get("status") or "")
+        realized = payload.get("realized_return_pct")
+        unrealized = payload.get("unrealized_return_pct")
+        current_return_pct = float(realized if status == "closed" and realized is not None else unrealized or 0.0)
+        key = str(payload.get("model_key") or "")
+        summary = summary_map.setdefault(
+            key,
+            {
+                "model_key": key,
+                "model_label": str(payload.get("model_label") or key),
+                "model_scope": str(payload.get("model_scope") or "model"),
+                "total_count": 0,
+                "closed_count": 0,
+                "open_count": 0,
+                "win_count": 0,
+                "return_sum": 0.0,
+                "holding_days_sum": 0,
+                "max_drawdown_pct": 0.0,
+            },
+        )
+        summary["total_count"] = int(summary["total_count"]) + 1
+        summary["return_sum"] = float(summary["return_sum"]) + current_return_pct
+        summary["holding_days_sum"] = int(summary["holding_days_sum"]) + int(payload.get("holding_days") or 0)
+        summary["max_drawdown_pct"] = max(float(summary["max_drawdown_pct"]), float(payload.get("max_drawdown_pct") or 0.0))
+        if status == "closed":
+            summary["closed_count"] = int(summary["closed_count"]) + 1
+            if current_return_pct > 0:
+                summary["win_count"] = int(summary["win_count"]) + 1
+        else:
+            summary["open_count"] = int(summary["open_count"]) + 1
+
+        trade_rows.append(
+            {
+                **payload,
+                "current_return_pct": round(current_return_pct, 2),
+                "last_active_at": str(payload.get("exit_date") or payload.get("latest_date") or payload.get("entry_date") or ""),
+            }
+        )
+
+    summary_rows: list[dict[str, object]] = []
+    for item in summary_map.values():
+        total_count = int(item["total_count"])
+        closed_count = int(item["closed_count"])
+        avg_return_pct = round(float(item["return_sum"]) / max(total_count, 1), 2)
+        avg_holding_days = round(int(item["holding_days_sum"]) / max(total_count, 1), 1)
+        win_rate = round(int(item["win_count"]) / max(closed_count, 1) * 100, 2) if closed_count else 0.0
+        summary_rows.append(
+            {
+                "model_key": item["model_key"],
+                "model_label": item["model_label"],
+                "model_scope": item["model_scope"],
+                "total_count": total_count,
+                "closed_count": closed_count,
+                "open_count": int(item["open_count"]),
+                "win_rate": win_rate,
+                "avg_return_pct": avg_return_pct,
+                "avg_holding_days": avg_holding_days,
+                "max_drawdown_pct": round(float(item["max_drawdown_pct"]), 2),
+            }
+        )
+
+    scope_priority = {"group": 0, "model": 1}
+    key_priority = {"professional": 0, "adaptive": 1}
+    summary_rows.sort(
+        key=lambda item: (
+            scope_priority.get(str(item["model_scope"]), 9),
+            key_priority.get(str(item["model_key"]), 99),
+            -float(item["avg_return_pct"]),
+            str(item["model_label"]),
+        )
+    )
+    trade_rows.sort(
+        key=lambda item: (
+            str(item["status"]) != "open",
+            -float(item["current_return_pct"]),
+            str(item["model_label"]),
+            str(item["symbol"]),
+        )
+    )
+    return {
+        "month_label": f"{month_start.isoformat()} 至 {month_end.isoformat()}",
+        "summary_rows": summary_rows,
+        "trade_rows": trade_rows,
+        "total_trades": len(trade_rows),
+        "open_trades": sum(1 for item in trade_rows if str(item["status"]) == "open"),
+        "closed_trades": sum(1 for item in trade_rows if str(item["status"]) == "closed"),
+    }
 
 
 async def _load_dashboard_snapshots(app: FastAPI, owner_username: str) -> list[object]:

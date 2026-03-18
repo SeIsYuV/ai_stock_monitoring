@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="card" style="margin-bottom: 16px;">
+    <h1>模型复盘</h1>
+    <p>这里展示账号 {{ current_user['username'] }} 的纸面交易战绩，用来对照专业组、自适应组和单模型的真实表现。</p>
+    <form method="get" action="/model-review">
+        <label>复盘月份</label>
+        <input type="month" name="month" value="{{ selected_month }}">
+        <button type="submit">查看月度复盘</button>
+    </form>
+    <p class="muted">统计窗口：{{ review_payload['month_label'] }} ｜ 总样本 {{ review_payload['total_trades'] }} 笔 ｜ 开放仓位 {{ review_payload['open_trades'] }} 笔 ｜ 已平仓 {{ review_payload['closed_trades'] }} 笔</p>
+</section>
+
+<section class="card" style="margin-bottom: 16px;">
+    <h2>组别与模型战绩</h2>
+    <div class="table-scroll">
+        <table class="compact-table wide-table">
+            <thead>
+            <tr>
+                <th>类别</th>
+                <th>模型</th>
+                <th>总样本</th>
+                <th>已平仓</th>
+                <th>开放中</th>
+                <th>胜率</th>
+                <th>平均收益</th>
+                <th>平均持有天数</th>
+                <th>最大回撤</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in review_payload['summary_rows'] %}
+            <tr>
+                <td>{{ '组别' if item['model_scope'] == 'group' else '单模型' }}</td>
+                <td>{{ item['model_label'] }}</td>
+                <td>{{ item['total_count'] }}</td>
+                <td>{{ item['closed_count'] }}</td>
+                <td>{{ item['open_count'] }}</td>
+                <td>{{ '%.2f%%'|format(item['win_rate']) if item['closed_count'] else '-' }}</td>
+                <td class="{% if item['avg_return_pct'] > 0 %}pnl-profit{% elif item['avg_return_pct'] < 0 %}pnl-loss{% else %}muted{% endif %}">{{ '%.2f%%'|format(item['avg_return_pct']) }}</td>
+                <td>{{ item['avg_holding_days'] }}</td>
+                <td class="danger-text">{{ '%.2f%%'|format(item['max_drawdown_pct']) }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="9">当前月份暂无纸面交易记录。</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="card">
+    <h2>纸面交易明细</h2>
+    <div class="table-scroll">
+        <table class="compact-table wide-table">
+            <thead>
+            <tr>
+                <th>状态</th>
+                <th>模型</th>
+                <th>股票</th>
+                <th>入场日</th>
+                <th>入场价</th>
+                <th>最新/离场价</th>
+                <th>最后更新</th>
+                <th>持有天数</th>
+                <th>当前收益</th>
+                <th>最大收益</th>
+                <th>最大回撤</th>
+                <th>原因</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in review_payload['trade_rows'] %}
+            <tr>
+                <td><span class="signal-badge {{ 'signal-buy' if item['status'] == 'open' else 'signal-neutral' }}">{{ '开放中' if item['status'] == 'open' else '已平仓' }}</span></td>
+                <td>{{ item['model_label'] }}</td>
+                <td>{{ item['symbol'] }} {{ item['display_name'] }}</td>
+                <td class="nowrap">{{ item['entry_date'] }}</td>
+                <td>{{ '%.2f'|format(item['entry_price']) }}</td>
+                <td>{{ '%.2f'|format(item['exit_price'] if item['status'] == 'closed' and item['exit_price'] is not none else item['latest_price']) }}</td>
+                <td class="nowrap">{{ item['last_active_at'] }}</td>
+                <td>{{ item['holding_days'] }}</td>
+                <td class="{% if item['current_return_pct'] > 0 %}pnl-profit{% elif item['current_return_pct'] < 0 %}pnl-loss{% else %}muted{% endif %}">{{ '%.2f%%'|format(item['current_return_pct']) }}</td>
+                <td class="{% if item['max_return_pct'] > 0 %}pnl-profit{% else %}muted{% endif %}">{{ '%.2f%%'|format(item['max_return_pct']) }}</td>
+                <td class="danger-text">{{ '%.2f%%'|format(item['max_drawdown_pct']) }}</td>
+                <td>
+                    <div style="font-size: 12px; color: #475569; line-height: 1.5;">
+                        <div><strong>入场：</strong>{{ item['entry_reason'] or '-' }}</div>
+                        <div><strong>离场：</strong>{{ item['exit_reason'] or '仍在持有，等待模型信号变化。' }}</div>
+                    </div>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="12">当前月份暂无纸面交易明细。</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

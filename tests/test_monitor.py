@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from src.ai_stock_monitoring.app import _format_snapshot_timestamp, create_app
 from src.ai_stock_monitoring.config import AppSettings
-from src.ai_stock_monitoring.database import add_trade_record, get_alert_history, get_login_unlock_code, get_snapshot, get_user, initialize_database, list_recent_login_events, list_trade_records, upsert_snapshot
+from src.ai_stock_monitoring.database import add_trade_record, get_alert_history, get_login_unlock_code, get_snapshot, get_user, initialize_database, list_model_paper_trades, list_recent_login_events, list_trade_records, upsert_snapshot
 from src.ai_stock_monitoring.mailer import build_alert_email_body, build_alert_email_html_body, build_portfolio_review_email_body
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
 from src.ai_stock_monitoring.monitor import (
@@ -143,6 +143,63 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(forced_snapshot.latest_price, 11.0)
             self.assertEqual(monitor.provider.invalidated_symbols, ["600519"])
 
+    def test_model_paper_trades_open_and_close_from_snapshot_scores(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            settings = AppSettings(db_path=database_file.name, provider_name="mock")
+            initialize_database(settings)
+            monitor = StockMonitor(settings)
+            open_snapshot = SnapshotComputation(
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=100.0,
+                ma_250=95.0,
+                ma_30w=96.0,
+                ma_60w=92.0,
+                prev_ma_30w=95.0,
+                prev_ma_60w=91.0,
+                boll_mid=98.0,
+                boll_lower=94.0,
+                boll_upper=108.0,
+                dividend_yield=3.8,
+                quant_probability=78.0,
+                quant_model_breakdown=json.dumps(
+                    [
+                        {"key": "msci_momentum", "label": "MSCI动量", "score": 80},
+                        {"key": "quality_stability", "label": "质量稳定", "score": 76},
+                        {"key": "trend_following", "label": "趋势跟随", "score": 74},
+                    ],
+                    ensure_ascii=False,
+                ),
+                trigger_state="量化盈利概率",
+                trigger_detail="test",
+                triggered_labels=("量化盈利概率",),
+                weekly_crossed=False,
+                updated_at=datetime.fromisoformat("2026-03-18T10:00:00+00:00"),
+            )
+            monitor._sync_model_paper_trades("admin", open_snapshot)
+            opened = list_model_paper_trades(database_file.name, "admin")
+            self.assertTrue(opened)
+            self.assertTrue(any(row["status"] == "open" for row in opened))
+
+            close_snapshot = SnapshotComputation(
+                **{
+                    **open_snapshot.__dict__,
+                    "latest_price": 96.0,
+                    "quant_model_breakdown": json.dumps(
+                        [
+                            {"key": "msci_momentum", "label": "MSCI动量", "score": 42},
+                            {"key": "quality_stability", "label": "质量稳定", "score": 44},
+                            {"key": "trend_following", "label": "趋势跟随", "score": 40},
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    "updated_at": datetime.fromisoformat("2026-03-25T10:00:00+00:00"),
+                }
+            )
+            monitor._sync_model_paper_trades("admin", close_snapshot)
+            closed = list_model_paper_trades(database_file.name, "admin")
+            self.assertTrue(any(row["status"] == "closed" for row in closed))
+
     def test_dashboard_route_renders(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
             app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
@@ -167,6 +224,21 @@ class MonitorTests(unittest.TestCase):
                 self.assertIn("量能比", dashboard_response.text)
                 self.assertIn("dashboard-current-time", dashboard_response.text)
                 self.assertIn("dashboard-refresh-countdown", dashboard_response.text)
+
+    def test_model_review_route_renders(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                login_response = client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                self.assertEqual(login_response.status_code, 303)
+                response = client.get("/model-review")
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("模型复盘", response.text)
+                self.assertIn("当前月份暂无纸面交易记录", response.text)
 
     def test_login_page_hides_default_credentials(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:

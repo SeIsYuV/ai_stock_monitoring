@@ -167,6 +167,7 @@
         <a href="/trades"{% if request.url.path.startswith('/trades') %} class="active"{% endif %}>交易复盘</a>
         <a href="/settings"{% if request.url.path == '/settings' %} class="active"{% endif %}>设置</a>
         <a href="/history"{% if request.url.path.startswith('/history') %} class="active"{% endif %}>历史提醒</a>
+        <a href="/model-review"{% if request.url.path.startswith('/model-review') %} class="active"{% endif %}>模型复盘</a>
         <a href="/logout">退出</a>
     </nav>
 </header>
