@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from src.ai_stock_monitoring.app import _format_snapshot_timestamp, create_app
+from src.ai_stock_monitoring.app import _build_model_review_payload, _format_snapshot_timestamp, create_app
 from src.ai_stock_monitoring.config import AppSettings
 from src.ai_stock_monitoring.database import add_trade_record, get_alert_history, get_login_unlock_code, get_snapshot, get_user, initialize_database, list_model_paper_trades, list_recent_login_events, list_trade_records, upsert_snapshot
 from src.ai_stock_monitoring.mailer import build_alert_email_body, build_alert_email_html_body, build_portfolio_review_email_body
@@ -200,6 +200,55 @@ class MonitorTests(unittest.TestCase):
             closed = list_model_paper_trades(database_file.name, "admin")
             self.assertTrue(any(row["status"] == "closed" for row in closed))
 
+    def test_model_paper_trades_support_take_profit_stop_loss_and_timeout_exits(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            settings = AppSettings(db_path=database_file.name, provider_name="mock")
+            initialize_database(settings)
+            monitor = StockMonitor(settings)
+
+            def build_snapshot(symbol: str, latest_price: float, score: float, updated_at: str) -> SnapshotComputation:
+                return SnapshotComputation(
+                    symbol=symbol,
+                    display_name=f"测试{symbol}",
+                    latest_price=latest_price,
+                    ma_250=95.0,
+                    ma_30w=96.0,
+                    ma_60w=92.0,
+                    prev_ma_30w=95.0,
+                    prev_ma_60w=91.0,
+                    boll_mid=98.0,
+                    boll_lower=94.0,
+                    boll_upper=108.0,
+                    dividend_yield=3.8,
+                    quant_probability=78.0,
+                    quant_model_breakdown=json.dumps(
+                        [
+                            {"key": "trend_following", "label": "趋势跟随", "score": score},
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    trigger_state="量化盈利概率",
+                    trigger_detail="test",
+                    triggered_labels=("量化盈利概率",),
+                    weekly_crossed=False,
+                    updated_at=datetime.fromisoformat(updated_at),
+                )
+
+            monitor._sync_model_paper_trades("admin", build_snapshot("600519", 100.0, 82.0, "2026-03-01T10:00:00+00:00"))
+            monitor._sync_model_paper_trades("admin", build_snapshot("600519", 113.5, 88.0, "2026-03-05T10:00:00+00:00"))
+            take_profit_rows = list_model_paper_trades(database_file.name, "admin", symbol="600519", status="closed")
+            self.assertTrue(any("止盈退出" in str(row["exit_reason"]) for row in take_profit_rows))
+
+            monitor._sync_model_paper_trades("admin", build_snapshot("601318", 100.0, 82.0, "2026-03-01T10:00:00+00:00"))
+            monitor._sync_model_paper_trades("admin", build_snapshot("601318", 91.0, 82.0, "2026-03-03T10:00:00+00:00"))
+            stop_loss_rows = list_model_paper_trades(database_file.name, "admin", symbol="601318", status="closed")
+            self.assertTrue(any("止损退出" in str(row["exit_reason"]) for row in stop_loss_rows))
+
+            monitor._sync_model_paper_trades("admin", build_snapshot("600036", 100.0, 82.0, "2026-03-01T10:00:00+00:00"))
+            monitor._sync_model_paper_trades("admin", build_snapshot("600036", 102.0, 84.0, "2026-03-20T10:00:00+00:00"))
+            timeout_rows = list_model_paper_trades(database_file.name, "admin", symbol="600036", status="closed")
+            self.assertTrue(any("超期退出" in str(row["exit_reason"]) for row in timeout_rows))
+
     def test_dashboard_route_renders(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
             app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
@@ -238,7 +287,63 @@ class MonitorTests(unittest.TestCase):
                 response = client.get("/model-review")
                 self.assertEqual(response.status_code, 200)
                 self.assertIn("模型复盘", response.text)
+                self.assertIn("月度净值与回撤", response.text)
+                self.assertIn("离场规则统计", response.text)
                 self.assertIn("当前月份暂无纸面交易记录", response.text)
+
+    def test_model_review_payload_includes_curve_and_exit_stats(self) -> None:
+        payload = _build_model_review_payload(
+            [
+                {
+                    "model_key": "professional",
+                    "model_label": "专业组",
+                    "model_scope": "group",
+                    "symbol": "600519",
+                    "display_name": "贵州茅台",
+                    "status": "closed",
+                    "entry_price": 100.0,
+                    "latest_price": 112.0,
+                    "exit_price": 112.0,
+                    "entry_date": "2026-03-02",
+                    "latest_date": "2026-03-08",
+                    "exit_date": "2026-03-08",
+                    "holding_days": 6,
+                    "max_return_pct": 13.0,
+                    "max_drawdown_pct": 4.2,
+                    "realized_return_pct": 12.0,
+                    "unrealized_return_pct": 0.0,
+                    "entry_reason": "test",
+                    "exit_reason": "止盈退出：当前收益 12.00% ，达到止盈阈值 12.00% 。",
+                },
+                {
+                    "model_key": "adaptive",
+                    "model_label": "自适应组",
+                    "model_scope": "group",
+                    "symbol": "601318",
+                    "display_name": "中国平安",
+                    "status": "closed",
+                    "entry_price": 100.0,
+                    "latest_price": 92.0,
+                    "exit_price": 92.0,
+                    "entry_date": "2026-03-10",
+                    "latest_date": "2026-03-16",
+                    "exit_date": "2026-03-16",
+                    "holding_days": 6,
+                    "max_return_pct": 2.0,
+                    "max_drawdown_pct": 8.5,
+                    "realized_return_pct": -8.0,
+                    "unrealized_return_pct": 0.0,
+                    "entry_reason": "test",
+                    "exit_reason": "止损退出：当前收益 -8.00% ，触发止损阈值 -8.00% 。",
+                },
+            ],
+            month_start=date(2026, 3, 1),
+            month_end=date(2026, 3, 31),
+        )
+        self.assertTrue(payload["monthly_equity"]["net_value_chart"]["points"])
+        self.assertTrue(payload["monthly_equity"]["drawdown_chart"]["points"])
+        self.assertEqual(payload["exit_summary_rows"][0]["exit_label"], "止盈退出")
+        self.assertTrue(any(item["exit_label"] == "止损退出" for item in payload["exit_summary_rows"]))
 
     def test_login_page_hides_default_credentials(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
@@ -1712,6 +1817,50 @@ class MonitorTests(unittest.TestCase):
             {
                 "owner_username": "admin",
                 "trade_date": "2026-03-13",
+                "model_learning": {
+                    "overview_lines": [
+                        "近 180 天纸面交易里，专业组暂时学习领先，当前状态为学习有效。",
+                        "今日持仓决策里，专业组当前影响更大，贡献约 56.40% 。",
+                    ],
+                    "groups": [
+                        {
+                            "label": "专业组",
+                            "learning_status": "学习有效",
+                            "sample_size": 12,
+                            "open_count": 2,
+                            "hit_rate": 66.67,
+                            "avg_return_pct": 4.28,
+                            "max_drawdown_pct": 6.1,
+                            "impact_degree": "高",
+                            "contribution_pct": 56.4,
+                            "calibration_weight": 1.14,
+                            "impact_summary": "当前组内平均分 78.60，对今日最终量化结论贡献约 56.40% ，纸面交易调权系数 1.14。",
+                        },
+                        {
+                            "label": "自适应组",
+                            "learning_status": "温和有效",
+                            "sample_size": 9,
+                            "open_count": 3,
+                            "hit_rate": 55.56,
+                            "avg_return_pct": 1.92,
+                            "max_drawdown_pct": 7.8,
+                            "impact_degree": "中",
+                            "contribution_pct": 43.6,
+                            "calibration_weight": 1.03,
+                            "impact_summary": "当前组内平均分 72.40，对今日最终量化结论贡献约 43.60% ，纸面交易调权系数 1.03。",
+                        },
+                    ],
+                    "top_models": [
+                        {
+                            "label": "MSCI动量",
+                            "learning_status": "学习有效",
+                            "sample_size": 8,
+                            "hit_rate": 62.5,
+                            "avg_return_pct": 4.85,
+                            "max_drawdown_pct": 5.2,
+                        }
+                    ],
+                },
                 "portfolio_profile": {
                     "comprehensive_advice": "建议先控仓，再分批处理强弱仓位。",
                     "holding_ratio": 62.5,
@@ -1800,6 +1949,12 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("【高优先级股票 TOP3】", body)
         self.assertIn("【明日关注位】", body)
         self.assertIn("【风险红灯项】", body)
+        self.assertIn("【模型学习成效】", body)
+        self.assertIn("专业组：状态 学习有效", body)
+        self.assertIn("自适应组：状态 温和有效", body)
+        self.assertIn("影响程度：高", body)
+        self.assertIn("命中率 66.67%", body)
+        self.assertIn("【单模型领先表现】", body)
         self.assertIn("中国平安：动作 偏买入 ｜ 仓位 18.00% ｜ 买入 9/10 ｜ 卖出 3/10", body)
         self.assertIn("贵州茅台 风险等级偏高，需优先盯盘。", body)
         self.assertIn("贵州茅台：关注 1400.00 - 1470.00", body)

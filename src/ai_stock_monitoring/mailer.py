@@ -454,11 +454,103 @@ def build_login_unlock_email_body(username: str, verification_code: str, expires
     )
 
 
+def _build_model_learning_text_lines(model_learning: dict[str, Any]) -> list[str]:
+    groups = list(model_learning.get("groups") or [])
+    top_models = list(model_learning.get("top_models") or [])
+    lines: list[str] = []
+    if model_learning.get("overview_lines"):
+        lines.extend(["", "【模型学习成效】"])
+        lines.extend(f"- {item}" for item in model_learning.get("overview_lines") or [])
+    if groups:
+        if "【模型学习成效】" not in lines:
+            lines.extend(["", "【模型学习成效】"])
+        for item in groups:
+            lines.extend(
+                [
+                    f"- {item.get('label', '-')}"
+                    f"：状态 {item.get('learning_status', '-')}"
+                    f" ｜ 已闭环 {int(item.get('sample_size') or 0)} 笔"
+                    f" ｜ 在途 {int(item.get('open_count') or 0)} 笔"
+                    f" ｜ 命中率 {float(item.get('hit_rate') or 0.0):.2f}%"
+                    f" ｜ 平均收益 {float(item.get('avg_return_pct') or 0.0):.2f}%"
+                    f" ｜ 最大回撤 {float(item.get('max_drawdown_pct') or 0.0):.2f}%",
+                    f"  影响程度：{item.get('impact_degree', '-')}"
+                    f" ｜ 当前贡献 {float(item.get('contribution_pct') or 0.0):.2f}%"
+                    f" ｜ 调权系数 {float(item.get('calibration_weight') or 1.0):.2f}",
+                    f"  说明：{item.get('impact_summary', '-')}",
+                ]
+            )
+    if top_models:
+        lines.extend(["", "【单模型领先表现】"])
+        for item in top_models:
+            lines.append(
+                f"- {item.get('label', '-')}"
+                f"：状态 {item.get('learning_status', '-')}"
+                f" ｜ 样本 {int(item.get('sample_size') or 0)} 笔"
+                f" ｜ 命中率 {float(item.get('hit_rate') or 0.0):.2f}%"
+                f" ｜ 平均收益 {float(item.get('avg_return_pct') or 0.0):.2f}%"
+                f" ｜ 最大回撤 {float(item.get('max_drawdown_pct') or 0.0):.2f}%"
+            )
+    return lines
+
+
+def _render_model_learning_html(model_learning: dict[str, Any]) -> list[str]:
+    sections: list[str] = []
+    overview_lines = list(model_learning.get("overview_lines") or [])
+    groups = list(model_learning.get("groups") or [])
+    top_models = list(model_learning.get("top_models") or [])
+    if overview_lines:
+        sections.append(_render_email_section("模型学习成效", _render_bullet_list(overview_lines)))
+    elif groups:
+        sections.append(_render_email_section("模型学习成效", "<div style=\"font-size:14px;color:#334155;\">两套模型的样本正在继续积累。</div>"))
+    if groups:
+        blocks: list[str] = []
+        for item in groups:
+            impact_degree = str(item.get("impact_degree") or "-")
+            impact_color = "#047857" if impact_degree == "高" else "#b45309" if impact_degree == "中" else "#475569"
+            metrics = [
+                ("学习状态", str(item.get("learning_status", "-"))),
+                ("已闭环样本", f"{int(item.get('sample_size') or 0)} 笔"),
+                ("命中率", f"{float(item.get('hit_rate') or 0.0):.2f}%"),
+                ("平均收益", f"{float(item.get('avg_return_pct') or 0.0):.2f}%"),
+            ]
+            blocks.append(
+                "<div style=\"margin-bottom:14px;padding:14px 16px;border:1px solid #e5e7eb;border-radius:12px;background:#fafcff;\">"
+                f"<div style=\"font-size:16px;font-weight:700;color:#0f172a;margin-bottom:8px;\">{_escape_html(item.get('label', '-'))}</div>"
+                f"{_render_metric_cards(metrics)}"
+                f"<div style=\"margin-top:10px;font-size:13px;color:#475569;line-height:1.8;\">最大回撤：{float(item.get('max_drawdown_pct') or 0.0):.2f}% ｜ 在途交易：{int(item.get('open_count') or 0)} 笔</div>"
+                f"<div style=\"font-size:13px;color:{impact_color};line-height:1.8;font-weight:700;\">影响程度：{_escape_html(impact_degree)} ｜ 当前贡献 {float(item.get('contribution_pct') or 0.0):.2f}% ｜ 调权系数 {float(item.get('calibration_weight') or 1.0):.2f}</div>"
+                f"<div style=\"font-size:13px;color:#475569;line-height:1.8;\">{_escape_html(item.get('impact_summary', '-'))}</div>"
+                "</div>"
+            )
+        sections.append(_render_email_section("模型影响程度", "".join(blocks)))
+    if top_models:
+        sections.append(
+            _render_email_section(
+                "单模型领先表现",
+                _render_bullet_list(
+                    [
+                        (
+                            f"{item.get('label', '-')}｜状态 {item.get('learning_status', '-')}"
+                            f"｜样本 {int(item.get('sample_size') or 0)} 笔"
+                            f"｜命中率 {float(item.get('hit_rate') or 0.0):.2f}%"
+                            f"｜平均收益 {float(item.get('avg_return_pct') or 0.0):.2f}%"
+                            f"｜最大回撤 {float(item.get('max_drawdown_pct') or 0.0):.2f}%"
+                        )
+                        for item in top_models
+                    ]
+                ),
+            )
+        )
+    return sections
+
+
 
 def build_portfolio_review_email_body(payload: dict[str, Any]) -> str:
     """Render an after-close portfolio review email for current holdings."""
 
     portfolio_profile = payload["portfolio_profile"]
+    model_learning = dict(payload.get("model_learning") or {})
     active_positions = portfolio_profile.get("active_positions", [])
     priority_reduce_positions = portfolio_profile.get("priority_reduce_positions", [])
     priority_add_positions = portfolio_profile.get("priority_add_positions", [])
@@ -505,6 +597,8 @@ def build_portfolio_review_email_body(payload: dict[str, Any]) -> str:
         f"- 风险等级：{portfolio_profile.get('risk_level', '-')}",
         f"- 持仓风格：{portfolio_profile.get('holding_style', '-')}",
     ]
+
+    lines.extend(_build_model_learning_text_lines(model_learning))
 
     lines.extend(["", "【明日计划】"])
     lines.extend(f"- {item}" for item in tomorrow_plan)
@@ -571,6 +665,7 @@ def build_portfolio_review_email_body(payload: dict[str, Any]) -> str:
 
 def build_portfolio_review_email_html_body(payload: dict[str, Any]) -> str:
     portfolio_profile = payload["portfolio_profile"]
+    model_learning = dict(payload.get("model_learning") or {})
     active_positions = list(portfolio_profile.get("active_positions") or [])
     sections = [
         _render_email_section(
@@ -590,6 +685,7 @@ def build_portfolio_review_email_html_body(payload: dict[str, Any]) -> str:
             "" if (portfolio_profile.get("priority_reduce_positions") or portfolio_profile.get("priority_add_positions")) else "明日以观察为主，先等待关键价位或量价确认后再行动。",
         ])))),
     ]
+    sections[1:1] = _render_model_learning_html(model_learning)
     if portfolio_profile.get("overall_adjustment_suggestions"):
         sections.append(_render_email_section("总仓位调整", _render_bullet_list(list(portfolio_profile.get("overall_adjustment_suggestions") or []))))
     if portfolio_profile.get("priority_reduce_positions"):

@@ -52,6 +52,101 @@
     </div>
 </section>
 
+<section class="card" style="margin-bottom: 16px;">
+    <h2>月度净值与回撤</h2>
+    <p class="muted">按每笔纸面交易在平仓日或最近更新时间滚动计入，便于观察本月模型战绩的净值斜率与回撤压力。</p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;">
+        <div style="border:1px solid #dbeafe;border-radius:14px;padding:16px;background:#f8fbff;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:10px;gap:12px;">
+                <div>
+                    <div style="font-size:13px;color:#64748b;">月度净值曲线</div>
+                    <div style="font-size:24px;font-weight:700;color:#0f172a;">{{ '%.2f%%'|format(review_payload['monthly_equity']['net_value_change_pct']) }}</div>
+                </div>
+                <div style="font-size:12px;color:#64748b;">事件 {{ review_payload['monthly_equity']['event_count'] }} 笔</div>
+            </div>
+            <svg viewBox="0 0 108 100" width="100%" height="220" role="img" aria-label="月度净值曲线">
+                <defs>
+                    <linearGradient id="net-value-fill" x1="0" x2="0" y1="0" y2="1">
+                        <stop offset="0%" stop-color="#2563eb" stop-opacity="0.24"></stop>
+                        <stop offset="100%" stop-color="#2563eb" stop-opacity="0.02"></stop>
+                    </linearGradient>
+                </defs>
+                <line x1="10" y1="92" x2="98" y2="92" stroke="#cbd5e1" stroke-width="1"></line>
+                <line x1="10" y1="8" x2="10" y2="92" stroke="#cbd5e1" stroke-width="1"></line>
+                {% if review_payload['monthly_equity']['net_value_chart']['points'] %}
+                <polygon points="{{ review_payload['monthly_equity']['net_value_chart']['area'] }}" fill="url(#net-value-fill)"></polygon>
+                <polyline points="{{ review_payload['monthly_equity']['net_value_chart']['points'] }}" fill="none" stroke="{{ review_payload['monthly_equity']['net_value_chart']['stroke'] }}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></polyline>
+                {% endif %}
+            </svg>
+            <div style="display:flex;justify-content:space-between;font-size:12px;color:#64748b;">
+                <span>起点 1.00</span>
+                <span>最低 {{ review_payload['monthly_equity']['net_value_chart']['min_label'] }}</span>
+                <span>最新 {{ review_payload['monthly_equity']['net_value_chart']['latest_label'] }}</span>
+            </div>
+        </div>
+        <div style="border:1px solid #fee2e2;border-radius:14px;padding:16px;background:#fff8f8;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:10px;gap:12px;">
+                <div>
+                    <div style="font-size:13px;color:#64748b;">月度回撤曲线</div>
+                    <div style="font-size:24px;font-weight:700;color:#991b1b;">{{ '%.2f%%'|format(review_payload['monthly_equity']['max_drawdown_pct']) }}</div>
+                </div>
+                <div style="font-size:12px;color:#64748b;">峰值回撤</div>
+            </div>
+            <svg viewBox="0 0 108 100" width="100%" height="220" role="img" aria-label="月度回撤曲线">
+                <defs>
+                    <linearGradient id="drawdown-fill" x1="0" x2="0" y1="0" y2="1">
+                        <stop offset="0%" stop-color="#dc2626" stop-opacity="0.20"></stop>
+                        <stop offset="100%" stop-color="#dc2626" stop-opacity="0.02"></stop>
+                    </linearGradient>
+                </defs>
+                <line x1="10" y1="92" x2="98" y2="92" stroke="#fecaca" stroke-width="1"></line>
+                <line x1="10" y1="8" x2="10" y2="92" stroke="#fecaca" stroke-width="1"></line>
+                {% if review_payload['monthly_equity']['drawdown_chart']['points'] %}
+                <polygon points="{{ review_payload['monthly_equity']['drawdown_chart']['area'] }}" fill="url(#drawdown-fill)"></polygon>
+                <polyline points="{{ review_payload['monthly_equity']['drawdown_chart']['points'] }}" fill="none" stroke="{{ review_payload['monthly_equity']['drawdown_chart']['stroke'] }}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></polyline>
+                {% endif %}
+            </svg>
+            <div style="display:flex;justify-content:space-between;font-size:12px;color:#64748b;">
+                <span>最低 0.00</span>
+                <span>最高 {{ review_payload['monthly_equity']['drawdown_chart']['max_label'] }}%</span>
+                <span>最新 {{ review_payload['monthly_equity']['drawdown_chart']['latest_label'] }}%</span>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="card" style="margin-bottom: 16px;">
+    <h2>离场规则统计</h2>
+    <div class="table-scroll">
+        <table class="compact-table wide-table">
+            <thead>
+            <tr>
+                <th>离场类型</th>
+                <th>次数</th>
+                <th>胜率</th>
+                <th>平均收益</th>
+                <th>最大回撤</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in review_payload['exit_summary_rows'] %}
+            <tr>
+                <td>{{ item['exit_label'] }}</td>
+                <td>{{ item['count'] }}</td>
+                <td>{{ '%.2f%%'|format(item['win_rate']) }}</td>
+                <td class="{% if item['avg_return_pct'] > 0 %}pnl-profit{% elif item['avg_return_pct'] < 0 %}pnl-loss{% else %}muted{% endif %}">{{ '%.2f%%'|format(item['avg_return_pct']) }}</td>
+                <td class="danger-text">{{ '%.2f%%'|format(item['max_drawdown_pct']) }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5">当前月份暂无离场统计。</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
 <section class="card">
     <h2>纸面交易明细</h2>
     <div class="table-scroll">
@@ -66,6 +161,7 @@
                 <th>最新/离场价</th>
                 <th>最后更新</th>
                 <th>持有天数</th>
+                <th>离场标签</th>
                 <th>当前收益</th>
                 <th>最大收益</th>
                 <th>最大回撤</th>
@@ -83,6 +179,7 @@
                 <td>{{ '%.2f'|format(item['exit_price'] if item['status'] == 'closed' and item['exit_price'] is not none else item['latest_price']) }}</td>
                 <td class="nowrap">{{ item['last_active_at'] }}</td>
                 <td>{{ item['holding_days'] }}</td>
+                <td>{{ item['exit_category_label'] }}</td>
                 <td class="{% if item['current_return_pct'] > 0 %}pnl-profit{% elif item['current_return_pct'] < 0 %}pnl-loss{% else %}muted{% endif %}">{{ '%.2f%%'|format(item['current_return_pct']) }}</td>
                 <td class="{% if item['max_return_pct'] > 0 %}pnl-profit{% else %}muted{% endif %}">{{ '%.2f%%'|format(item['max_return_pct']) }}</td>
                 <td class="danger-text">{{ '%.2f%%'|format(item['max_drawdown_pct']) }}</td>
@@ -95,7 +192,7 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="12">当前月份暂无纸面交易明细。</td>
+                <td colspan="13">当前月份暂无纸面交易明细。</td>
             </tr>
             {% endfor %}
             </tbody>

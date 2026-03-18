@@ -1397,9 +1397,144 @@ def _resolve_review_month(month: str | None, timezone_name: str) -> tuple[str, d
     return selected.strftime("%Y-%m"), selected, next_month - timedelta(days=1)
 
 
+def _classify_model_trade_exit_reason(exit_reason: str | None, status: str) -> tuple[str, str]:
+    if status != "closed":
+        return "holding", "持有中"
+    text = str(exit_reason or "")
+    if "止盈" in text:
+        return "take_profit", "止盈退出"
+    if "止损" in text:
+        return "stop_loss", "止损退出"
+    if "超期" in text:
+        return "timeout", "超期退出"
+    if "模型已移出" in text or "自动结束" in text:
+        return "removed", "模型移出"
+    if "模型走弱" in text or "跌破离场阈值" in text:
+        return "signal", "模型走弱"
+    return "other", "其他"
+
+
+def _build_curve_chart_payload(
+    points: list[dict[str, object]],
+    value_key: str,
+    stroke: str,
+    fill: str,
+    *,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> dict[str, object]:
+    if not points:
+        return {
+            "points": "",
+            "area": "",
+            "stroke": stroke,
+            "fill": fill,
+            "min_label": "0.00",
+            "max_label": "0.00",
+            "latest_label": "0.00",
+        }
+
+    values = [float(item.get(value_key) or 0.0) for item in points]
+    resolved_min = min_value if min_value is not None else min(values)
+    resolved_max = max_value if max_value is not None else max(values)
+    if resolved_max <= resolved_min:
+        resolved_max = resolved_min + 1.0
+
+    left = 10.0
+    right = 98.0
+    top = 8.0
+    bottom = 92.0
+    width = right - left
+    height = bottom - top
+
+    rendered_points: list[str] = []
+    for index, item in enumerate(points):
+        value = float(item.get(value_key) or 0.0)
+        x = left if len(points) == 1 else left + width * index / max(len(points) - 1, 1)
+        y = bottom - ((value - resolved_min) / (resolved_max - resolved_min)) * height
+        rendered_points.append(f"{x:.2f},{y:.2f}")
+
+    return {
+        "points": " ".join(rendered_points),
+        "area": f"{left:.2f},{bottom:.2f} {' '.join(rendered_points)} {right:.2f},{bottom:.2f}",
+        "stroke": stroke,
+        "fill": fill,
+        "min_label": f"{resolved_min:.2f}",
+        "max_label": f"{resolved_max:.2f}",
+        "latest_label": f"{values[-1]:.2f}",
+    }
+
+
+def _build_monthly_equity_payload(trade_rows: list[dict[str, object]], month_start: date, month_end: date) -> dict[str, object]:
+    events: list[dict[str, object]] = []
+    for item in trade_rows:
+        last_active_at = str(item.get("last_active_at") or "")[:10]
+        if not last_active_at:
+            continue
+        if last_active_at < month_start.isoformat() or last_active_at > month_end.isoformat():
+            continue
+        events.append(
+            {
+                "date": last_active_at,
+                "return_pct": float(item.get("current_return_pct") or 0.0),
+                "model_label": str(item.get("model_label") or ""),
+                "symbol": str(item.get("symbol") or ""),
+                "status": str(item.get("status") or ""),
+            }
+        )
+    events.sort(key=lambda item: (str(item["date"]), str(item["model_label"]), str(item["symbol"])))
+
+    points: list[dict[str, object]] = [{"date": month_start.isoformat(), "net_value": 1.0, "drawdown_pct": 0.0}]
+    net_value = 1.0
+    peak_value = 1.0
+    max_drawdown_pct = 0.0
+
+    for event in events:
+        multiplier = max(0.2, 1.0 + float(event["return_pct"]) / 100.0)
+        net_value = round(net_value * multiplier, 4)
+        peak_value = max(peak_value, net_value)
+        drawdown_pct = round((peak_value - net_value) / peak_value * 100, 2) if peak_value > 0 else 0.0
+        max_drawdown_pct = max(max_drawdown_pct, drawdown_pct)
+        points.append(
+            {
+                "date": str(event["date"]),
+                "net_value": net_value,
+                "drawdown_pct": drawdown_pct,
+            }
+        )
+
+    if points[-1]["date"] != month_end.isoformat():
+        points.append(
+            {
+                "date": month_end.isoformat(),
+                "net_value": net_value,
+                "drawdown_pct": round(max_drawdown_pct if net_value < peak_value else points[-1]["drawdown_pct"], 2),
+            }
+        )
+
+    net_value_chart = _build_curve_chart_payload(points, "net_value", "#2563eb", "rgba(37,99,235,0.12)")
+    drawdown_chart = _build_curve_chart_payload(
+        points,
+        "drawdown_pct",
+        "#dc2626",
+        "rgba(220,38,38,0.12)",
+        min_value=0.0,
+        max_value=max(max_drawdown_pct, 1.0),
+    )
+    return {
+        "points": points,
+        "event_count": len(events),
+        "net_value_chart": net_value_chart,
+        "drawdown_chart": drawdown_chart,
+        "net_value_change_pct": round((net_value - 1.0) * 100, 2),
+        "max_drawdown_pct": round(max_drawdown_pct, 2),
+    }
+
+
 def _build_model_review_payload(rows: list[object], month_start: date, month_end: date) -> dict[str, object]:
     summary_map: dict[str, dict[str, object]] = {}
     trade_rows: list[dict[str, object]] = []
+    exit_summary_map: dict[str, dict[str, object]] = {}
 
     for row in rows:
         payload = dict(row)
@@ -1407,6 +1542,7 @@ def _build_model_review_payload(rows: list[object], month_start: date, month_end
         realized = payload.get("realized_return_pct")
         unrealized = payload.get("unrealized_return_pct")
         current_return_pct = float(realized if status == "closed" and realized is not None else unrealized or 0.0)
+        exit_category, exit_category_label = _classify_model_trade_exit_reason(payload.get("exit_reason"), status)
         key = str(payload.get("model_key") or "")
         summary = summary_map.setdefault(
             key,
@@ -1431,6 +1567,25 @@ def _build_model_review_payload(rows: list[object], month_start: date, month_end
             summary["closed_count"] = int(summary["closed_count"]) + 1
             if current_return_pct > 0:
                 summary["win_count"] = int(summary["win_count"]) + 1
+            exit_summary = exit_summary_map.setdefault(
+                exit_category,
+                {
+                    "exit_category": exit_category,
+                    "exit_label": exit_category_label,
+                    "count": 0,
+                    "win_count": 0,
+                    "return_sum": 0.0,
+                    "max_drawdown_pct": 0.0,
+                },
+            )
+            exit_summary["count"] = int(exit_summary["count"]) + 1
+            exit_summary["return_sum"] = float(exit_summary["return_sum"]) + current_return_pct
+            exit_summary["max_drawdown_pct"] = max(
+                float(exit_summary["max_drawdown_pct"]),
+                float(payload.get("max_drawdown_pct") or 0.0),
+            )
+            if current_return_pct > 0:
+                exit_summary["win_count"] = int(exit_summary["win_count"]) + 1
         else:
             summary["open_count"] = int(summary["open_count"]) + 1
 
@@ -1439,6 +1594,8 @@ def _build_model_review_payload(rows: list[object], month_start: date, month_end
                 **payload,
                 "current_return_pct": round(current_return_pct, 2),
                 "last_active_at": str(payload.get("exit_date") or payload.get("latest_date") or payload.get("entry_date") or ""),
+                "exit_category": exit_category,
+                "exit_category_label": exit_category_label,
             }
         )
 
@@ -1482,10 +1639,34 @@ def _build_model_review_payload(rows: list[object], month_start: date, month_end
             str(item["symbol"]),
         )
     )
+    exit_summary_rows: list[dict[str, object]] = []
+    exit_priority = {"take_profit": 0, "stop_loss": 1, "timeout": 2, "signal": 3, "removed": 4, "other": 9}
+    for item in exit_summary_map.values():
+        count = int(item["count"])
+        exit_summary_rows.append(
+            {
+                "exit_category": item["exit_category"],
+                "exit_label": item["exit_label"],
+                "count": count,
+                "win_rate": round(int(item["win_count"]) / max(count, 1) * 100, 2) if count else 0.0,
+                "avg_return_pct": round(float(item["return_sum"]) / max(count, 1), 2) if count else 0.0,
+                "max_drawdown_pct": round(float(item["max_drawdown_pct"]), 2),
+            }
+        )
+    exit_summary_rows.sort(
+        key=lambda item: (
+            exit_priority.get(str(item["exit_category"]), 99),
+            -int(item["count"]),
+            str(item["exit_label"]),
+        )
+    )
+    monthly_equity = _build_monthly_equity_payload(trade_rows, month_start, month_end)
     return {
         "month_label": f"{month_start.isoformat()} 至 {month_end.isoformat()}",
         "summary_rows": summary_rows,
         "trade_rows": trade_rows,
+        "exit_summary_rows": exit_summary_rows,
+        "monthly_equity": monthly_equity,
         "total_trades": len(trade_rows),
         "open_trades": sum(1 for item in trade_rows if str(item["status"]) == "open"),
         "closed_trades": sum(1 for item in trade_rows if str(item["status"]) == "closed"),

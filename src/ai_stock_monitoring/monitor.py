@@ -45,6 +45,10 @@ PAPER_TRADE_OPEN_THRESHOLD_MODEL = 72.0
 PAPER_TRADE_CLOSE_THRESHOLD_MODEL = 46.0
 PAPER_TRADE_OPEN_THRESHOLD_GROUP = 68.0
 PAPER_TRADE_CLOSE_THRESHOLD_GROUP = 50.0
+PAPER_TRADE_TAKE_PROFIT_PCT = 12.0
+PAPER_TRADE_STOP_LOSS_PCT = -8.0
+PAPER_TRADE_MAX_HOLDING_DAYS_MODEL = 12
+PAPER_TRADE_MAX_HOLDING_DAYS_GROUP = 20
 
 from .config import AppSettings
 from .database import (
@@ -78,7 +82,13 @@ from .mailer import (
 from .market_hours import MarketStatus, TradeCalendar, get_market_status
 from .providers import load_provider
 from .providers.base import PriceBar, Quote
-from .quant import DEFAULT_QUANT_MODELS, build_quant_signal, normalize_selected_models, normalize_strategy_params
+from .quant import (
+    DEFAULT_QUANT_MODELS,
+    PROFESSIONAL_MODEL_KEYS,
+    build_quant_signal,
+    normalize_selected_models,
+    normalize_strategy_params,
+)
 from .trade_advisor import build_portfolio_profile, build_position_summary, build_stock_comprehensive_advice
 
 
@@ -1146,6 +1156,7 @@ class StockMonitor:
                 snapshots,
                 float(portfolio_settings["total_investment_amount"] or 0.0),
             )
+            model_learning = self._build_model_learning_summary(owner_username, snapshots)
             email_result = send_message(
                 email_settings,
                 subject=f"[收盘持仓复盘] {owner_username} {marker}",
@@ -1154,6 +1165,7 @@ class StockMonitor:
                         "owner_username": owner_username,
                         "trade_date": marker,
                         "portfolio_profile": portfolio_profile,
+                        "model_learning": model_learning,
                     }
                 ),
                 html_body=build_portfolio_review_email_html_body(
@@ -1161,6 +1173,7 @@ class StockMonitor:
                         "owner_username": owner_username,
                         "trade_date": marker,
                         "portfolio_profile": portfolio_profile,
+                        "model_learning": model_learning,
                     }
                 ),
             )
@@ -1234,6 +1247,226 @@ class StockMonitor:
                 "avg_drawdown_pct": round(sum(drawdowns.get(key, [0.0])) / sample_size, 2),
             }
         return feedback
+
+    @staticmethod
+    def _feedback_group_weight(feedback: dict[str, float | int] | None) -> float:
+        if not feedback:
+            return 1.0
+        sample_size = int(feedback.get("sample_size") or 0)
+        if sample_size < 3:
+            return 1.0
+        hit_rate = float(feedback.get("hit_rate") or 0.0)
+        avg_return_pct = float(feedback.get("avg_return_pct") or 0.0)
+        confidence = min(1.0, sample_size / 12.0)
+        raw_weight = 1.0 + ((hit_rate / 100.0) - 0.5) * 0.45 + (avg_return_pct / 100.0) * 1.3
+        return round(max(0.85, min(1.35, 1.0 + (raw_weight - 1.0) * confidence)), 3)
+
+    @staticmethod
+    def _describe_learning_status(sample_size: int, hit_rate: float, avg_return_pct: float) -> str:
+        if sample_size < 3:
+            return "样本积累中"
+        if hit_rate >= 60.0 and avg_return_pct > 0:
+            return "学习有效"
+        if hit_rate >= 50.0 or avg_return_pct >= 0:
+            return "温和有效"
+        return "待继续纠偏"
+
+    @staticmethod
+    def _describe_impact_degree(contribution_pct: float, calibration_weight: float, sample_size: int) -> str:
+        if sample_size < 3 and contribution_pct < 52.0:
+            return "观察中"
+        if contribution_pct >= 55.0 or calibration_weight >= 1.12:
+            return "高"
+        if contribution_pct >= 45.0 or calibration_weight >= 1.0:
+            return "中"
+        return "低"
+
+    def _build_model_learning_summary(
+        self,
+        owner_username: str,
+        snapshots: list[dict[str, Any]],
+        lookback_days: int = 180,
+    ) -> dict[str, Any]:
+        date_from = (datetime.now(UTC).date() - timedelta(days=lookback_days)).isoformat()
+        rows = list_model_paper_trades(
+            self.settings.db_path,
+            owner_username,
+            date_from=date_from,
+        )
+        summary_map: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            payload = dict(row)
+            key = str(payload.get("model_key") or "")
+            if not key:
+                continue
+            summary = summary_map.setdefault(
+                key,
+                {
+                    "model_key": key,
+                    "model_label": str(payload.get("model_label") or key),
+                    "model_scope": str(payload.get("model_scope") or "model"),
+                    "closed_count": 0,
+                    "open_count": 0,
+                    "win_count": 0,
+                    "return_sum": 0.0,
+                    "max_drawdown_pct": 0.0,
+                },
+            )
+            status = str(payload.get("status") or "")
+            summary["max_drawdown_pct"] = max(
+                float(summary["max_drawdown_pct"]),
+                float(payload.get("max_drawdown_pct") or 0.0),
+            )
+            if status == "closed":
+                realized_return_pct = float(payload.get("realized_return_pct") or 0.0)
+                summary["closed_count"] = int(summary["closed_count"]) + 1
+                summary["return_sum"] = float(summary["return_sum"]) + realized_return_pct
+                if realized_return_pct > 0:
+                    summary["win_count"] = int(summary["win_count"]) + 1
+            elif status == "open":
+                summary["open_count"] = int(summary["open_count"]) + 1
+
+        current_group_scores: dict[str, list[float]] = {"professional": [], "adaptive": []}
+        for snapshot in snapshots:
+            try:
+                breakdown = json.loads(str(snapshot.get("quant_model_breakdown") or "[]"))
+            except json.JSONDecodeError:
+                breakdown = []
+            professional_scores = [
+                float(item.get("score") or 0.0)
+                for item in breakdown
+                if isinstance(item, dict) and str(item.get("key") or "") in PROFESSIONAL_MODEL_KEYS
+            ]
+            adaptive_scores = [
+                float(item.get("score") or 0.0)
+                for item in breakdown
+                if isinstance(item, dict) and str(item.get("key") or "") not in PROFESSIONAL_MODEL_KEYS
+            ]
+            if professional_scores:
+                current_group_scores["professional"].append(sum(professional_scores) / len(professional_scores))
+            if adaptive_scores:
+                current_group_scores["adaptive"].append(sum(adaptive_scores) / len(adaptive_scores))
+
+        groups: list[dict[str, Any]] = []
+        influence_scores: dict[str, float] = {}
+        for key, label in (("professional", "专业组"), ("adaptive", "自适应组")):
+            item = summary_map.get(
+                key,
+                {
+                    "model_label": label,
+                    "model_scope": "group",
+                    "closed_count": 0,
+                    "open_count": 0,
+                    "win_count": 0,
+                    "return_sum": 0.0,
+                    "max_drawdown_pct": 0.0,
+                },
+            )
+            sample_size = int(item.get("closed_count") or 0)
+            hit_rate = round(int(item.get("win_count") or 0) / max(sample_size, 1) * 100, 2) if sample_size else 0.0
+            avg_return_pct = round(float(item.get("return_sum") or 0.0) / max(sample_size, 1), 2) if sample_size else 0.0
+            current_score = round(
+                sum(current_group_scores[key]) / len(current_group_scores[key]),
+                2,
+            ) if current_group_scores[key] else 0.0
+            calibration_weight = self._feedback_group_weight(
+                {
+                    "sample_size": sample_size,
+                    "hit_rate": hit_rate,
+                    "avg_return_pct": avg_return_pct,
+                }
+            )
+            influence_scores[key] = current_score * calibration_weight if current_score > 0 else 0.0
+            groups.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "sample_size": sample_size,
+                    "open_count": int(item.get("open_count") or 0),
+                    "hit_rate": hit_rate,
+                    "avg_return_pct": avg_return_pct,
+                    "max_drawdown_pct": round(float(item.get("max_drawdown_pct") or 0.0), 2),
+                    "current_score": current_score,
+                    "calibration_weight": calibration_weight,
+                    "learning_status": self._describe_learning_status(sample_size, hit_rate, avg_return_pct),
+                }
+            )
+
+        total_influence = sum(influence_scores.values())
+        for item in groups:
+            contribution_pct = round(
+                influence_scores.get(str(item["key"]), 0.0) / total_influence * 100,
+                2,
+            ) if total_influence > 0 else 0.0
+            item["contribution_pct"] = contribution_pct
+            item["impact_degree"] = self._describe_impact_degree(
+                contribution_pct,
+                float(item["calibration_weight"]),
+                int(item["sample_size"]),
+            )
+            item["impact_summary"] = (
+                f"当前组内平均分 {float(item['current_score']):.2f}，"
+                f"对今日最终量化结论贡献约 {contribution_pct:.2f}% ，"
+                f"纸面交易调权系数 {float(item['calibration_weight']):.2f}。"
+            )
+
+        model_rows: list[dict[str, Any]] = []
+        for item in summary_map.values():
+            if str(item.get("model_scope") or "") != "model":
+                continue
+            sample_size = int(item.get("closed_count") or 0)
+            if sample_size <= 0:
+                continue
+            hit_rate = round(int(item.get("win_count") or 0) / sample_size * 100, 2)
+            avg_return_pct = round(float(item.get("return_sum") or 0.0) / sample_size, 2)
+            model_rows.append(
+                {
+                    "key": str(item.get("model_key") or ""),
+                    "label": str(item.get("model_label") or item.get("model_key") or ""),
+                    "sample_size": sample_size,
+                    "open_count": int(item.get("open_count") or 0),
+                    "hit_rate": hit_rate,
+                    "avg_return_pct": avg_return_pct,
+                    "max_drawdown_pct": round(float(item.get("max_drawdown_pct") or 0.0), 2),
+                    "learning_status": self._describe_learning_status(sample_size, hit_rate, avg_return_pct),
+                }
+            )
+        model_rows.sort(
+            key=lambda item: (
+                -float(item["avg_return_pct"]),
+                -float(item["hit_rate"]),
+                -int(item["sample_size"]),
+                str(item["label"]),
+            )
+        )
+
+        overview_lines: list[str] = []
+        if any(int(item["sample_size"]) > 0 for item in groups):
+            leader = max(
+                groups,
+                key=lambda item: (
+                    float(item["avg_return_pct"]),
+                    float(item["hit_rate"]),
+                    int(item["sample_size"]),
+                ),
+            )
+            overview_lines.append(
+                f"近 {lookback_days} 天纸面交易里，{leader['label']}暂时学习领先，当前状态为{leader['learning_status']}。"
+            )
+        if total_influence > 0:
+            dominant = max(groups, key=lambda item: float(item.get("contribution_pct") or 0.0))
+            overview_lines.append(
+                f"今日持仓决策里，{dominant['label']}当前影响更大，贡献约 {float(dominant['contribution_pct']):.2f}% 。"
+            )
+        if not overview_lines:
+            overview_lines.append("两套模型的纸面交易样本还在积累中，当前先以实时信号强弱为主。")
+
+        return {
+            "lookback_days": lookback_days,
+            "groups": groups,
+            "top_models": model_rows[:3],
+            "overview_lines": overview_lines,
+        }
 
     @staticmethod
     def _load_quant_breakdown(snapshot: SnapshotComputation) -> list[dict[str, Any]]:
@@ -1369,7 +1602,14 @@ class StockMonitor:
                 max_drawdown_pct=max_drawdown_pct,
                 unrealized_return_pct=current_return_pct,
             )
-            if score <= float(item["close_threshold"]):
+            exit_reason = self._resolve_paper_trade_exit_reason(
+                model_scope=str(item["model_scope"]),
+                score=score,
+                close_threshold=float(item["close_threshold"]),
+                holding_days=holding_days,
+                current_return_pct=current_return_pct,
+            )
+            if exit_reason:
                 close_model_paper_trade(
                     self.settings.db_path,
                     trade_id=int(trade["id"]),
@@ -1380,8 +1620,38 @@ class StockMonitor:
                     min_return_pct=min_return_pct,
                     max_drawdown_pct=max_drawdown_pct,
                     realized_return_pct=current_return_pct,
-                    exit_reason=f"量化评分 {score:.2f} 分，跌破离场阈值 {float(item['close_threshold']):.2f}。",
+                    exit_reason=exit_reason,
                 )
+
+    @staticmethod
+    def _resolve_paper_trade_exit_reason(
+        model_scope: str,
+        score: float,
+        close_threshold: float,
+        holding_days: int,
+        current_return_pct: float,
+    ) -> str | None:
+        max_holding_days = (
+            PAPER_TRADE_MAX_HOLDING_DAYS_GROUP if model_scope == "group" else PAPER_TRADE_MAX_HOLDING_DAYS_MODEL
+        )
+        if current_return_pct <= PAPER_TRADE_STOP_LOSS_PCT:
+            return (
+                f"止损退出：当前收益 {current_return_pct:.2f}% ，"
+                f"触发止损阈值 {PAPER_TRADE_STOP_LOSS_PCT:.2f}% 。"
+            )
+        if current_return_pct >= PAPER_TRADE_TAKE_PROFIT_PCT:
+            return (
+                f"止盈退出：当前收益 {current_return_pct:.2f}% ，"
+                f"达到止盈阈值 {PAPER_TRADE_TAKE_PROFIT_PCT:.2f}% 。"
+            )
+        if holding_days >= max_holding_days:
+            return (
+                f"超期退出：已持有 {holding_days} 天，"
+                f"达到最长持有周期 {max_holding_days} 天。"
+            )
+        if score <= close_threshold:
+            return f"模型走弱退出：量化评分 {score:.2f} 分，跌破离场阈值 {close_threshold:.2f}。"
+        return None
 
     def _process_intraday_signal(
         self,
