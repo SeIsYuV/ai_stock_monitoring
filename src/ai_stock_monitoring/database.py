@@ -82,6 +82,8 @@ def initialize_database(settings: AppSettings) -> None:
                 symbol TEXT NOT NULL,
                 display_name TEXT NOT NULL,
                 latest_price REAL NOT NULL,
+                latest_change_amount REAL NOT NULL DEFAULT 0,
+                latest_change_pct REAL NOT NULL DEFAULT 0,
                 ma_250 REAL NOT NULL,
                 ma_30w REAL NOT NULL,
                 ma_60w REAL NOT NULL,
@@ -492,6 +494,14 @@ def _ensure_schema_migrations(connection: sqlite3.Connection) -> None:
     if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "boll_lower"):
         connection.execute(
             "ALTER TABLE user_stock_snapshot ADD COLUMN boll_lower REAL NOT NULL DEFAULT 0"
+        )
+    if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "latest_change_amount"):
+        connection.execute(
+            "ALTER TABLE user_stock_snapshot ADD COLUMN latest_change_amount REAL NOT NULL DEFAULT 0"
+        )
+    if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "latest_change_pct"):
+        connection.execute(
+            "ALTER TABLE user_stock_snapshot ADD COLUMN latest_change_pct REAL NOT NULL DEFAULT 0"
         )
     if _table_exists(connection, "user_stock_snapshot") and not _column_exists(connection, "user_stock_snapshot", "boll_upper"):
         connection.execute(
@@ -1000,6 +1010,8 @@ def upsert_snapshot(
     symbol: str,
     display_name: str,
     latest_price: float,
+    latest_change_amount: float,
+    latest_change_pct: float,
     ma_250: float,
     ma_30w: float,
     ma_60w: float,
@@ -1025,15 +1037,17 @@ def upsert_snapshot(
         connection.execute(
             """
             INSERT INTO user_stock_snapshot (
-                owner_username, symbol, display_name, latest_price, ma_250, ma_30w, ma_60w,
+                owner_username, symbol, display_name, latest_price, latest_change_amount, latest_change_pct, ma_250, ma_30w, ma_60w,
                 boll_mid, boll_lower, boll_upper, dividend_yield, quant_probability, quant_model_breakdown,
                 trigger_state, trigger_detail, latest_volume_ratio, market_environment, market_bias_score,
                 industry_name, industry_environment, industry_bias_score, earnings_phase, earnings_days_to_window, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(owner_username, symbol) DO UPDATE SET
                 display_name = excluded.display_name,
                 latest_price = excluded.latest_price,
+                latest_change_amount = excluded.latest_change_amount,
+                latest_change_pct = excluded.latest_change_pct,
                 ma_250 = excluded.ma_250,
                 ma_30w = excluded.ma_30w,
                 ma_60w = excluded.ma_60w,
@@ -1060,6 +1074,8 @@ def upsert_snapshot(
                 symbol,
                 display_name,
                 latest_price,
+                latest_change_amount,
+                latest_change_pct,
                 ma_250,
                 ma_30w,
                 ma_60w,

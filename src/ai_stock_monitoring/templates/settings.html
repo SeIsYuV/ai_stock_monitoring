@@ -118,7 +118,13 @@
             <input type="number" name="adaptive_min_samples" min="4" max="80" step="1" value="{{ quant_strategy_params['adaptive_min_samples']|int }}">
             <label>目标收益阈值（%）</label>
             <input type="number" name="adaptive_target_return_pct" min="0" max="20" step="0.5" value="{{ '%.2f'|format(quant_strategy_params['adaptive_target_return_pct'] * 100) }}">
-            <p class="hint-text">当前组合借鉴了多因子量化里常见的趋势确认、均值回归、波动过滤、支撑强度、盈亏比过滤和 DCF 估值思路。启用“自适应学习校准”后，系统会在项目内用最近历史做滚动模拟交易，统计各子模型的命中率与平均收益，并自动微调它们在综合评分里的影响力。若更强调胜率，可提高动量阈值、降低波动率上限、提高最小盈亏比，并适度上调 DCF 折现率以提升安全边际。</p>
+            <label>近期样本优先窗口（天）</label>
+            <input type="number" name="adaptive_recent_window_days" min="10" max="120" step="5" value="{{ quant_strategy_params['adaptive_recent_window_days']|int }}">
+            <label>近期样本权重（%）</label>
+            <input type="number" name="adaptive_recent_emphasis_pct" min="10" max="90" step="5" value="{{ '%.2f'|format(quant_strategy_params['adaptive_recent_emphasis'] * 100) }}">
+            <label>稳定性惩罚强度（%）</label>
+            <input type="number" name="adaptive_stability_penalty_pct" min="0" max="100" step="5" value="{{ '%.2f'|format(quant_strategy_params['adaptive_stability_penalty'] * 100) }}">
+            <p class="hint-text">当前组合借鉴了多因子量化里常见的趋势确认、均值回归、波动过滤、支撑强度、盈亏比过滤和 DCF 估值思路。启用“自适应学习校准”后，系统会在项目内用最近历史做滚动模拟交易，统计各子模型的命中率与平均收益，并自动微调它们在综合评分里的影响力。现在还会提高近期样本的学习权重，并对收益波动过大的模型施加稳定性惩罚。若更强调胜率，可提高动量阈值、降低波动率上限、提高最小盈亏比，并适度上调 DCF 折现率以提升安全边际。</p>
             <button type="submit" class="secondary">保存量化设置</button>
         </form>
     </div>

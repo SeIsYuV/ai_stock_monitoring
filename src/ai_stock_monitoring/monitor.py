@@ -120,6 +120,8 @@ class SnapshotComputation:
     triggered_labels: tuple[str, ...]
     weekly_crossed: bool
     updated_at: datetime
+    latest_change_amount: float = 0.0
+    latest_change_pct: float = 0.0
     latest_volume_ratio: float = 1.0
     market_environment: str = "中性"
     market_bias_score: float = 0.0
@@ -317,6 +319,9 @@ def compute_snapshot_metrics(
 ) -> SnapshotComputation:
     daily_closes = [item.close_price for item in daily_bars]
     weekly_closes = [item.close_price for item in weekly_bars]
+    previous_close = daily_closes[-2] if len(daily_closes) >= 2 else (daily_closes[-1] if daily_closes else quote.latest_price)
+    latest_change_amount = round(quote.latest_price - previous_close, 2)
+    latest_change_pct = round((latest_change_amount / previous_close) * 100, 2) if previous_close else 0.0
 
     ma_250 = calculate_simple_moving_average(daily_closes, 250)
     boll_mid = calculate_simple_moving_average(weekly_closes, 20)
@@ -356,7 +361,7 @@ def compute_snapshot_metrics(
 
     trigger_state = "、".join(triggered_labels) if triggered_labels else "正常"
     trigger_detail = (
-        f"现价 {quote.latest_price:.2f} | 周收盘 {weekly_close:.2f} | 250日线 {ma_250:.2f} | "
+        f"现价 {quote.latest_price:.2f} | 涨跌 {latest_change_amount:+.2f} / {latest_change_pct:+.2f}% | 周收盘 {weekly_close:.2f} | 250日线 {ma_250:.2f} | "
         f"30周/60周 {ma_30w:.2f}/{ma_60w:.2f} | "
         f"周BOLL上/中/下轨 {boll_upper:.2f}/{boll_mid:.2f}/{boll_lower:.2f} | 股息率 {dividend_yield:.2f}% | "
         f"量化综合盈利概率 {quant_probability:.2f}%"
@@ -365,6 +370,8 @@ def compute_snapshot_metrics(
         symbol=symbol,
         display_name=quote.name,
         latest_price=quote.latest_price,
+        latest_change_amount=latest_change_amount,
+        latest_change_pct=latest_change_pct,
         ma_250=ma_250,
         ma_30w=ma_30w,
         ma_60w=ma_60w,
@@ -690,6 +697,8 @@ class StockMonitor:
             symbol=snapshot.symbol,
             display_name=snapshot.display_name,
             latest_price=snapshot.latest_price,
+            latest_change_amount=snapshot.latest_change_amount,
+            latest_change_pct=snapshot.latest_change_pct,
             ma_250=snapshot.ma_250,
             ma_30w=snapshot.ma_30w,
             ma_60w=snapshot.ma_60w,
@@ -724,6 +733,8 @@ class StockMonitor:
             symbol=str(row["symbol"]),
             display_name=str(row["display_name"] or row["symbol"]),
             latest_price=float(row["latest_price"] or 0.0),
+            latest_change_amount=float(row["latest_change_amount"] or 0.0),
+            latest_change_pct=float(row["latest_change_pct"] or 0.0),
             ma_250=float(row["ma_250"] or 0.0),
             ma_30w=float(row["ma_30w"] or 0.0),
             ma_60w=float(row["ma_60w"] or 0.0),
@@ -823,6 +834,8 @@ class StockMonitor:
                     symbol=snapshot.symbol,
                     display_name=snapshot.display_name,
                     latest_price=snapshot.latest_price,
+                    latest_change_amount=snapshot.latest_change_amount,
+                    latest_change_pct=snapshot.latest_change_pct,
                     ma_250=snapshot.ma_250,
                     ma_30w=snapshot.ma_30w,
                     ma_60w=snapshot.ma_60w,
@@ -1187,6 +1200,8 @@ class StockMonitor:
             "symbol": snapshot.symbol,
             "display_name": snapshot.display_name,
             "latest_price": snapshot.latest_price,
+            "latest_change_amount": snapshot.latest_change_amount,
+            "latest_change_pct": snapshot.latest_change_pct,
             "ma_250": snapshot.ma_250,
             "ma_30w": snapshot.ma_30w,
             "ma_60w": snapshot.ma_60w,

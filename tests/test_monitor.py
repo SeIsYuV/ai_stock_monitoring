@@ -269,6 +269,7 @@ class MonitorTests(unittest.TestCase):
                 self.assertTrue("买入｜" in dashboard_response.text or "卖出｜" in dashboard_response.text)
                 self.assertIn("买点", dashboard_response.text)
                 self.assertIn("卖点", dashboard_response.text)
+                self.assertIn("涨跌幅", dashboard_response.text)
                 self.assertIn("大盘", dashboard_response.text)
                 self.assertIn("量能比", dashboard_response.text)
                 self.assertIn("dashboard-current-time", dashboard_response.text)
@@ -790,6 +791,8 @@ class MonitorTests(unittest.TestCase):
                     symbol=snapshot.symbol,
                     display_name=snapshot.display_name,
                     latest_price=snapshot.latest_price,
+                    latest_change_amount=snapshot.latest_change_amount,
+                    latest_change_pct=snapshot.latest_change_pct,
                     ma_250=snapshot.ma_250,
                     ma_30w=snapshot.ma_30w,
                     ma_60w=snapshot.ma_60w,
@@ -1955,6 +1958,8 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("影响程度：高", body)
         self.assertIn("命中率 66.67%", body)
         self.assertIn("【单模型领先表现】", body)
+        self.assertIn("以下为模型学习附录，可单独阅读。", body)
+        self.assertGreater(body.rfind("【模型学习成效】"), body.rfind("【风险红灯项】"))
         self.assertIn("中国平安：动作 偏买入 ｜ 仓位 18.00% ｜ 买入 9/10 ｜ 卖出 3/10", body)
         self.assertIn("贵州茅台 风险等级偏高，需优先盯盘。", body)
         self.assertIn("贵州茅台：关注 1400.00 - 1470.00", body)

@@ -96,6 +96,7 @@
             <tr>
                 <th>股票</th>
                 <th>{{ price_column_label }}</th>
+                <th>涨跌幅</th>
                 <th>250日线</th>
                 <th>30周/60周</th>
                 <th>周BOLL上/中/下轨</th>
@@ -116,6 +117,12 @@
                     <div class="muted">大盘 {{ item.get('market_environment', '中性') }} ｜ 行业 {{ item.get('industry_name') or '-' }}</div>
                 </td>
                 <td>{{ '%.2f'|format(item['latest_price']) if item['latest_price'] is not none else '-' }}</td>
+                <td>
+                    <div class="{% if item.get('latest_change_pct', 0) > 0 %}pnl-profit{% elif item.get('latest_change_pct', 0) < 0 %}pnl-loss{% else %}muted{% endif %}">
+                        {{ '%+.2f%%'|format(item.get('latest_change_pct', 0)) }}
+                    </div>
+                    <div class="muted">{{ '%+.2f'|format(item.get('latest_change_amount', 0)) }}</div>
+                </td>
                 <td>{{ '%.2f'|format(item['ma_250']) if item['ma_250'] is not none else '-' }}</td>
                 <td>
                     {% if item['ma_30w'] is not none %}
@@ -240,7 +247,7 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="13">当前账号还没有监控股票。</td>
+                <td colspan="12">当前账号还没有监控股票。</td>
             </tr>
             {% endfor %}
             </tbody>

@@ -817,6 +817,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 "symbol": snapshot.symbol,
                 "display_name": snapshot.display_name,
                 "latest_price": snapshot.latest_price,
+                "latest_change_amount": snapshot.latest_change_amount,
+                "latest_change_pct": snapshot.latest_change_pct,
                 "ma_250": snapshot.ma_250,
                 "ma_30w": snapshot.ma_30w,
                 "ma_60w": snapshot.ma_60w,
@@ -940,6 +942,9 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         adaptive_holding_days: int = Form(10),
         adaptive_min_samples: int = Form(12),
         adaptive_target_return_pct: float = Form(3.0),
+        adaptive_recent_window_days: int = Form(45),
+        adaptive_recent_emphasis_pct: float = Form(65.0),
+        adaptive_stability_penalty_pct: float = Form(35.0),
     ) -> RedirectResponse:
         current_user = _require_login(request, resolved_settings)
         if isinstance(current_user, RedirectResponse):
@@ -964,6 +969,9 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 "adaptive_holding_days": adaptive_holding_days,
                 "adaptive_min_samples": adaptive_min_samples,
                 "adaptive_target_return_pct": adaptive_target_return_pct / 100,
+                "adaptive_recent_window_days": adaptive_recent_window_days,
+                "adaptive_recent_emphasis": adaptive_recent_emphasis_pct / 100,
+                "adaptive_stability_penalty": adaptive_stability_penalty_pct / 100,
             }
         )
         save_quant_settings(

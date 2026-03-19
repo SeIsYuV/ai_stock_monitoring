@@ -458,6 +458,9 @@ def _build_model_learning_text_lines(model_learning: dict[str, Any]) -> list[str
     groups = list(model_learning.get("groups") or [])
     top_models = list(model_learning.get("top_models") or [])
     lines: list[str] = []
+    if not (model_learning.get("overview_lines") or groups or top_models):
+        return lines
+    lines.extend(["", "~" * 24, "以下为模型学习附录，可单独阅读。"])
     if model_learning.get("overview_lines"):
         lines.extend(["", "【模型学习成效】"])
         lines.extend(f"- {item}" for item in model_learning.get("overview_lines") or [])
@@ -499,6 +502,14 @@ def _render_model_learning_html(model_learning: dict[str, Any]) -> list[str]:
     overview_lines = list(model_learning.get("overview_lines") or [])
     groups = list(model_learning.get("groups") or [])
     top_models = list(model_learning.get("top_models") or [])
+    if not (overview_lines or groups or top_models):
+        return sections
+    sections.append(
+        "<div style=\"margin:28px 0 18px;border-top:2px dashed #cbd5e1;padding-top:18px;\">"
+        "<div style=\"font-size:12px;letter-spacing:0.08em;text-transform:uppercase;color:#64748b;\">模型学习附录</div>"
+        "<div style=\"margin-top:6px;font-size:13px;color:#64748b;line-height:1.7;\">以下内容单独汇总专业组、自适应组和领先单模型的学习结果与影响程度。</div>"
+        "</div>"
+    )
     if overview_lines:
         sections.append(_render_email_section("模型学习成效", _render_bullet_list(overview_lines)))
     elif groups:
@@ -598,8 +609,6 @@ def build_portfolio_review_email_body(payload: dict[str, Any]) -> str:
         f"- 持仓风格：{portfolio_profile.get('holding_style', '-')}",
     ]
 
-    lines.extend(_build_model_learning_text_lines(model_learning))
-
     lines.extend(["", "【明日计划】"])
     lines.extend(f"- {item}" for item in tomorrow_plan)
 
@@ -659,6 +668,7 @@ def build_portfolio_review_email_body(payload: dict[str, Any]) -> str:
         lines.extend(["", "【风险红灯项】"])
         lines.extend(f"- {item}" for item in dict.fromkeys(red_flag_items))
 
+    lines.extend(_build_model_learning_text_lines(model_learning))
     lines.extend(["", "本系统仅为监控参考，不构成任何投资建议。"])
     return "\n".join(lines)
 
@@ -685,7 +695,6 @@ def build_portfolio_review_email_html_body(payload: dict[str, Any]) -> str:
             "" if (portfolio_profile.get("priority_reduce_positions") or portfolio_profile.get("priority_add_positions")) else "明日以观察为主，先等待关键价位或量价确认后再行动。",
         ])))),
     ]
-    sections[1:1] = _render_model_learning_html(model_learning)
     if portfolio_profile.get("overall_adjustment_suggestions"):
         sections.append(_render_email_section("总仓位调整", _render_bullet_list(list(portfolio_profile.get("overall_adjustment_suggestions") or []))))
     if portfolio_profile.get("priority_reduce_positions"):
@@ -713,6 +722,7 @@ def build_portfolio_review_email_html_body(payload: dict[str, Any]) -> str:
         sections.append(_render_email_section("专业综合分析", _render_bullet_list(list(portfolio_profile.get("professional_advice") or []))))
     if portfolio_profile.get("risk_reasons"):
         sections.append(_render_email_section("风险红灯项", _render_bullet_list(list(portfolio_profile.get("risk_reasons") or []), color="#991b1b")))
+    sections.extend(_render_model_learning_html(model_learning))
     sections.append("<div style=\"margin-top:10px;font-size:12px;color:#94a3b8;line-height:1.7;\">本系统仅为监控参考，不构成任何投资建议。</div>")
     return _render_email_shell(
         title=f"{payload['owner_username']} 收盘持仓复盘",

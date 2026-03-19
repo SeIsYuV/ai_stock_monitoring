@@ -61,6 +61,9 @@ DEFAULT_QUANT_STRATEGY_PARAMS: dict[str, float | bool] = {
     "adaptive_holding_days": 10,
     "adaptive_min_samples": 12,
     "adaptive_target_return_pct": 0.03,
+    "adaptive_recent_window_days": 45,
+    "adaptive_recent_emphasis": 0.65,
+    "adaptive_stability_penalty": 0.35,
 }
 
 
@@ -169,6 +172,12 @@ def normalize_strategy_params(raw_params: Mapping[str, object] | None) -> dict[s
             params["adaptive_min_samples"] = max(4, min(80, int(float(raw_params["adaptive_min_samples"]))))
         if "adaptive_target_return_pct" in raw_params:
             params["adaptive_target_return_pct"] = max(0.0, min(0.20, float(raw_params["adaptive_target_return_pct"])))
+        if "adaptive_recent_window_days" in raw_params:
+            params["adaptive_recent_window_days"] = max(10, min(120, int(float(raw_params["adaptive_recent_window_days"]))))
+        if "adaptive_recent_emphasis" in raw_params:
+            params["adaptive_recent_emphasis"] = max(0.1, min(0.9, float(raw_params["adaptive_recent_emphasis"])))
+        if "adaptive_stability_penalty" in raw_params:
+            params["adaptive_stability_penalty"] = max(0.0, min(1.0, float(raw_params["adaptive_stability_penalty"])))
     if float(params["dcf_terminal_growth"]) >= float(params["dcf_discount_rate"]) - 0.01:
         params["dcf_terminal_growth"] = round(float(params["dcf_discount_rate"]) - 0.02, 4)
     return params
@@ -335,6 +344,9 @@ def _simulate_adaptive_learning(
     lookback_days = int(params["adaptive_lookback_days"])
     min_samples = int(params["adaptive_min_samples"])
     target_return = float(params["adaptive_target_return_pct"])
+    recent_window_days = int(params["adaptive_recent_window_days"])
+    recent_emphasis = float(params["adaptive_recent_emphasis"])
+    stability_penalty = float(params["adaptive_stability_penalty"])
     if len(daily_bars) <= holding_days + 25:
         return EnsembleLearningProfiles(model_profiles={}, group_profiles={})
 
@@ -397,10 +409,24 @@ def _simulate_adaptive_learning(
 
     adaptive_profiles: dict[str, AdaptiveLearningProfile] = {}
     for model_key, sample_returns in samples_by_model.items():
-        adaptive_profiles[model_key] = _build_learning_profile(sample_returns, min_samples, target_return)
+        adaptive_profiles[model_key] = _build_learning_profile(
+            sample_returns,
+            min_samples,
+            target_return,
+            recent_window_days=recent_window_days,
+            recent_emphasis=recent_emphasis,
+            stability_penalty=stability_penalty,
+        )
 
     group_profiles = {
-        group_key: _build_learning_profile(sample_returns, min_samples, target_return)
+        group_key: _build_learning_profile(
+            sample_returns,
+            min_samples,
+            target_return,
+            recent_window_days=recent_window_days,
+            recent_emphasis=recent_emphasis,
+            stability_penalty=stability_penalty,
+        )
         for group_key, sample_returns in group_samples.items()
     }
     return EnsembleLearningProfiles(
@@ -439,20 +465,33 @@ def _build_learning_profile(
     sample_returns: list[float],
     min_samples: int,
     target_return: float,
+    *,
+    recent_window_days: int,
+    recent_emphasis: float,
+    stability_penalty: float,
 ) -> AdaptiveLearningProfile:
     sample_size = len(sample_returns)
     if sample_size < min_samples:
         return AdaptiveLearningProfile(sample_size=sample_size)
     hit_rate = sum(1 for value in sample_returns if value >= target_return) / sample_size
     avg_return = sum(sample_returns) / sample_size
+    recent_returns = sample_returns[-max(1, recent_window_days):]
+    recent_hit_rate = sum(1 for value in recent_returns if value >= target_return) / max(len(recent_returns), 1)
+    recent_avg_return = sum(recent_returns) / max(len(recent_returns), 1)
+    blended_hit_rate = hit_rate * (1.0 - recent_emphasis) + recent_hit_rate * recent_emphasis
+    blended_avg_return = avg_return * (1.0 - recent_emphasis) + recent_avg_return * recent_emphasis
+    variance = sum((value - avg_return) ** 2 for value in sample_returns) / sample_size if sample_size > 1 else 0.0
+    return_volatility = math.sqrt(max(variance, 0.0))
+    stability_factor = max(0.82, min(1.05, 1.0 - return_volatility * stability_penalty * 4.0))
     confidence = min(1.0, sample_size / max(min_samples * 2, 1))
-    raw_weight = 1.0 + (hit_rate - 0.5) * 0.9 + avg_return * 2.5
+    raw_weight = 1.0 + (blended_hit_rate - 0.5) * 0.95 + blended_avg_return * 2.8
+    raw_weight *= stability_factor
     blended_weight = 1.0 + (raw_weight - 1.0) * confidence
     return AdaptiveLearningProfile(
         weight=round(max(0.75, min(1.35, blended_weight)), 3),
         sample_size=sample_size,
-        hit_rate=round(hit_rate * 100, 2),
-        avg_return_pct=round(avg_return * 100, 2),
+        hit_rate=round(blended_hit_rate * 100, 2),
+        avg_return_pct=round(blended_avg_return * 100, 2),
     )
 
 
@@ -1126,6 +1165,9 @@ def _build_summary(
         learning_clause = (
             f" 自适应层已根据最近 {int(params['adaptive_lookback_days'])} 个交易日的滚动模拟结果，"
             f"按 {int(params['adaptive_holding_days'])} 日持有周期自动校准各子模型权重。"
+            f" 其中最近 {int(params['adaptive_recent_window_days'])} 个样本窗口会以"
+            f" {float(params['adaptive_recent_emphasis']) * 100:.0f}% 的权重优先参与学习，"
+            f"波动过大的模型还会按稳定性系数自动降权。"
         )
         if (
             professional_profile is not None and professional_profile.sample_size > 0
