@@ -1139,11 +1139,30 @@ def build_portfolio_profile(
         item["sell_recommendation_level_label"] = display_advice["sell_recommendation_level_label"]
         item["comprehensive_advice"] = display_advice["comprehensive_advice"]
         item["comprehensive_advice_title"] = display_advice["comprehensive_advice_title"]
+        item["advice_conclusion_line"] = display_advice["advice_conclusion_line"]
+        item["advice_buy_line"] = display_advice["advice_buy_line"]
+        item["advice_sell_line"] = display_advice["advice_sell_line"]
+        item["advice_dcf_line"] = display_advice["advice_dcf_line"]
         item["model_consensus"] = display_advice["model_consensus"]
         item["decision_summary"] = display_advice["decision_summary"]
         item["decision_reason_lines"] = display_advice["decision_reason_lines"]
         item["buy_signal_summary"] = display_advice["buy_signal_summary"]
         item["sell_signal_summary"] = display_advice["sell_signal_summary"]
+        item["buy_price_plan"] = list(display_advice["buy_price_plan"])
+        item["sell_price_plan"] = list(display_advice["sell_price_plan"])
+        item["watch_price_plan"] = list(display_advice["watch_price_plan"])
+        specific_advice_lines: list[str] = []
+        for advice_line in (
+            display_advice["decision_summary"],
+            *display_advice["decision_reason_lines"],
+            *(display_advice["buy_price_plan"][:1]),
+            *(display_advice["sell_price_plan"][:1]),
+            *(display_advice["watch_price_plan"][:1]),
+        ):
+            cleaned_line = str(advice_line or "").strip()
+            if cleaned_line and cleaned_line not in specific_advice_lines:
+                specific_advice_lines.append(cleaned_line)
+        item["specific_advice_lines"] = specific_advice_lines[:5]
         item.update(risk_info)
 
     holding_items.sort(key=lambda entry: (-entry["weight_pct"], entry["symbol"]))

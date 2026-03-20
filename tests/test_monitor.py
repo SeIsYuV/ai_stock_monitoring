@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from src.ai_stock_monitoring.app import _build_model_review_payload, _format_snapshot_timestamp, create_app
 from src.ai_stock_monitoring.config import AppSettings
-from src.ai_stock_monitoring.database import add_trade_record, get_alert_history, get_login_unlock_code, get_snapshot, get_snapshots, get_user, initialize_database, list_model_paper_trades, list_recent_login_events, list_trade_records, upsert_snapshot
+from src.ai_stock_monitoring.database import add_trade_record, create_user, get_alert_history, get_connection, get_login_unlock_code, get_portfolio_settings, get_snapshot, get_snapshots, get_user, initialize_database, list_model_paper_trades, list_recent_login_events, list_trade_records, upsert_snapshot
 from src.ai_stock_monitoring.mailer import build_alert_email_body, build_alert_email_html_body, build_portfolio_review_email_body
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
 from src.ai_stock_monitoring.monitor import (
@@ -201,6 +201,17 @@ class MonitorTests(unittest.TestCase):
             target = next(item for item in snapshots if item["symbol"] == "600519")
             self.assertEqual(float(target["latest_change_amount"]), 2.0)
             self.assertEqual(float(target["latest_change_pct"]), 2.02)
+
+    def test_get_portfolio_settings_self_heals_missing_user_config_row(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            settings = AppSettings(db_path=database_file.name, provider_name="mock")
+            initialize_database(settings)
+            create_user(database_file.name, "alice", "hash")
+            with get_connection(database_file.name) as connection:
+                connection.execute("DELETE FROM user_portfolio_settings WHERE owner_username = ?", ("alice",))
+            row = get_portfolio_settings(database_file.name, "alice")
+            self.assertEqual(row["owner_username"], "alice")
+            self.assertEqual(float(row["total_investment_amount"]), 0.0)
 
     def test_model_paper_trades_open_and_close_from_snapshot_scores(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
@@ -524,6 +535,11 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("sell_recommendation_level", profile["active_positions"][0])
         self.assertIn("recommended_buy_price_range", profile["active_positions"][0])
         self.assertIn("recommended_sell_price_range", profile["active_positions"][0])
+        self.assertTrue(profile["active_positions"][0]["advice_conclusion_line"])
+        self.assertTrue(profile["active_positions"][0]["advice_buy_line"])
+        self.assertTrue(profile["active_positions"][0]["advice_sell_line"])
+        self.assertTrue(profile["active_positions"][0]["advice_dcf_line"])
+        self.assertTrue(profile["active_positions"][0]["specific_advice_lines"])
         self.assertTrue(profile["overall_adjustment_suggestions"])
         self.assertIn(profile["risk_level"], {"低", "中", "高"})
         self.assertTrue(profile["comprehensive_advice"])

@@ -652,6 +652,12 @@ def create_user(db_path: str, username: str, password_hash: str, is_admin: bool 
         _ensure_user_config_rows(connection, username, now)
 
 
+def _ensure_user_config_rows_for_db_path(db_path: str, username: str) -> None:
+    now = datetime.now(UTC).isoformat()
+    with get_connection(db_path) as connection:
+        _ensure_user_config_rows(connection, username, now)
+
+
 def list_users(db_path: str) -> list[sqlite3.Row]:
     with get_connection(db_path) as connection:
         return list(
@@ -713,6 +719,13 @@ def get_portfolio_settings(db_path: str, owner_username: str) -> sqlite3.Row:
             (owner_username,),
         ).fetchone()
     if row is None:
+        _ensure_user_config_rows_for_db_path(db_path, owner_username)
+        with get_connection(db_path) as connection:
+            row = connection.execute(
+                "SELECT owner_username, total_investment_amount, updated_at FROM user_portfolio_settings WHERE owner_username = ?",
+                (owner_username,),
+            ).fetchone()
+    if row is None:
         raise RuntimeError("Portfolio settings not initialized")
     return row
 
@@ -736,6 +749,13 @@ def get_email_settings(db_path: str, owner_username: str) -> sqlite3.Row:
             "SELECT owner_username, recipient_email, smtp_server, sender_email, sender_password, updated_at FROM user_email_settings WHERE owner_username = ?",
             (owner_username,),
         ).fetchone()
+    if row is None:
+        _ensure_user_config_rows_for_db_path(db_path, owner_username)
+        with get_connection(db_path) as connection:
+            row = connection.execute(
+                "SELECT owner_username, recipient_email, smtp_server, sender_email, sender_password, updated_at FROM user_email_settings WHERE owner_username = ?",
+                (owner_username,),
+            ).fetchone()
     if row is None:
         raise RuntimeError("Email settings not initialized")
     return row
@@ -767,6 +787,13 @@ def get_quant_settings(db_path: str, owner_username: str) -> sqlite3.Row:
             "SELECT owner_username, enabled, probability_threshold, selected_models, strategy_params, updated_at FROM user_quant_settings WHERE owner_username = ?",
             (owner_username,),
         ).fetchone()
+    if row is None:
+        _ensure_user_config_rows_for_db_path(db_path, owner_username)
+        with get_connection(db_path) as connection:
+            row = connection.execute(
+                "SELECT owner_username, enabled, probability_threshold, selected_models, strategy_params, updated_at FROM user_quant_settings WHERE owner_username = ?",
+                (owner_username,),
+            ).fetchone()
     if row is None:
         raise RuntimeError("Quant settings not initialized")
     return row

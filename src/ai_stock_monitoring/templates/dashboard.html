@@ -74,6 +74,30 @@
             </div>
         </div>
     </div>
+    <div class="soft-panel" style="margin-top: 14px;">
+        <h3 style="margin-bottom: 10px;">逐股投资建议</h3>
+        <div style="display: grid; gap: 10px;">
+            {% for item in portfolio_profile['active_positions'] %}
+            <div style="border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 14px; background: #ffffff;">
+                <div style="display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 6px;">
+                    <div>
+                        <strong>{{ item['symbol'] }} {{ item['display_name'] }}</strong>
+                        <div class="muted">仓位 {{ '%.2f%%'|format(item['weight_pct']) }} ｜ {{ item['position_style'] }}</div>
+                    </div>
+                    <div class="action-{{ item['action_color'] }}">{{ item['action'] }}</div>
+                </div>
+                <div style="font-size: 13px; color: #334155; line-height: 1.7;">{{ item.get('decision_summary', item.get('advice_conclusion_line', '暂无建议')) }}</div>
+                {% if item.get('specific_advice_lines') %}
+                <div style="margin-top: 8px; display: grid; gap: 4px;">
+                    {% for advice_line in item.get('specific_advice_lines', [])[:3] %}
+                    <div style="font-size: 12px; color: #64748b; line-height: 1.6;">{{ advice_line }}</div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </div>
     {% else %}
     <p>{{ portfolio_profile['comprehensive_advice'] }}</p>
     <p class="muted">{{ portfolio_profile['analysis_note'] }}</p>
