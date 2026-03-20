@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from src.ai_stock_monitoring.app import _build_model_review_payload, _format_snapshot_timestamp, create_app
 from src.ai_stock_monitoring.config import AppSettings
-from src.ai_stock_monitoring.database import add_trade_record, get_alert_history, get_login_unlock_code, get_snapshot, get_user, initialize_database, list_model_paper_trades, list_recent_login_events, list_trade_records, upsert_snapshot
+from src.ai_stock_monitoring.database import add_trade_record, get_alert_history, get_login_unlock_code, get_snapshot, get_snapshots, get_user, initialize_database, list_model_paper_trades, list_recent_login_events, list_trade_records, upsert_snapshot
 from src.ai_stock_monitoring.mailer import build_alert_email_body, build_alert_email_html_body, build_portfolio_review_email_body
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
 from src.ai_stock_monitoring.monitor import (
@@ -18,6 +18,7 @@ from src.ai_stock_monitoring.monitor import (
     calculate_bollinger_lower_band,
     calculate_bollinger_upper_band,
     calculate_simple_moving_average,
+    compute_snapshot_metrics,
     get_weekly_cross_direction,
     has_effective_breakout_above_ma60w,
     has_weekly_crossed,
@@ -124,6 +125,34 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(status.is_market_open)
         self.assertEqual(status.label, "监控中（A股 9:30-15:00）")
 
+    def test_compute_snapshot_metrics_prefers_previous_close_when_latest_daily_close_matches_quote(self) -> None:
+        quote = Quote(
+            symbol="600519",
+            name="贵州茅台",
+            latest_price=101.0,
+            updated_at=datetime.fromisoformat("2026-03-20T10:00:00+08:00"),
+        )
+        daily_bars = [
+            PriceBar(date(2026, 3, 18), 98.0, 100.0, 97.5, 99.0, 1000),
+            PriceBar(date(2026, 3, 19), 99.5, 101.5, 99.0, 101.0, 1000),
+        ]
+        weekly_bars = [
+            PriceBar(date(2026, 2, 27), 95.0, 100.0, 94.0, 99.0, 1000),
+            PriceBar(date(2026, 3, 6), 98.0, 102.0, 97.0, 100.0, 1000),
+            PriceBar(date(2026, 3, 13), 99.0, 103.0, 98.0, 101.0, 1000),
+        ]
+        snapshot = compute_snapshot_metrics(
+            symbol="600519",
+            quote=quote,
+            daily_bars=daily_bars,
+            weekly_bars=weekly_bars,
+            dividend_yield=3.2,
+            quant_probability=72.0,
+            quant_model_breakdown="[]",
+        )
+        self.assertEqual(snapshot.latest_change_amount, 2.0)
+        self.assertEqual(snapshot.latest_change_pct, 2.02)
+
     def test_monitor_summary(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
             settings = AppSettings(db_path=database_file.name, provider_name="mock")
@@ -142,6 +171,36 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(normal_snapshot.latest_price, 10.0)
             self.assertEqual(forced_snapshot.latest_price, 11.0)
             self.assertEqual(monitor.provider.invalidated_symbols, ["600519"])
+
+    def test_get_snapshots_returns_latest_change_fields_for_dashboard(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            settings = AppSettings(db_path=database_file.name, provider_name="mock")
+            initialize_database(settings)
+            upsert_snapshot(
+                db_path=database_file.name,
+                owner_username="admin",
+                symbol="600519",
+                display_name="贵州茅台",
+                latest_price=101.0,
+                latest_change_amount=2.0,
+                latest_change_pct=2.02,
+                ma_250=95.0,
+                ma_30w=96.0,
+                ma_60w=92.0,
+                boll_mid=98.0,
+                boll_lower=94.0,
+                boll_upper=108.0,
+                dividend_yield=3.8,
+                quant_probability=78.0,
+                quant_model_breakdown="[]",
+                trigger_state="正常",
+                trigger_detail="test",
+                updated_at="2026-03-20T10:00:00+08:00",
+            )
+            snapshots = get_snapshots(database_file.name, "admin")
+            target = next(item for item in snapshots if item["symbol"] == "600519")
+            self.assertEqual(float(target["latest_change_amount"]), 2.0)
+            self.assertEqual(float(target["latest_change_pct"]), 2.02)
 
     def test_model_paper_trades_open_and_close_from_snapshot_scores(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
@@ -1959,6 +2018,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("命中率 66.67%", body)
         self.assertIn("【单模型领先表现】", body)
         self.assertIn("以下为模型学习附录，可单独阅读。", body)
+        self.assertIn("学习动作：", body)
         self.assertGreater(body.rfind("【模型学习成效】"), body.rfind("【风险红灯项】"))
         self.assertIn("中国平安：动作 偏买入 ｜ 仓位 18.00% ｜ 买入 9/10 ｜ 卖出 3/10", body)
         self.assertIn("贵州茅台 风险等级偏高，需优先盯盘。", body)

@@ -474,6 +474,7 @@ def _build_model_learning_text_lines(model_learning: dict[str, Any]) -> list[str
                     f"：状态 {item.get('learning_status', '-')}"
                     f" ｜ 已闭环 {int(item.get('sample_size') or 0)} 笔"
                     f" ｜ 在途 {int(item.get('open_count') or 0)} 笔"
+                    f" ｜ 滚动模拟 {float(item.get('simulated_sample_size') or 0.0):.1f} 笔"
                     f" ｜ 命中率 {float(item.get('hit_rate') or 0.0):.2f}%"
                     f" ｜ 平均收益 {float(item.get('avg_return_pct') or 0.0):.2f}%"
                     f" ｜ 最大回撤 {float(item.get('max_drawdown_pct') or 0.0):.2f}%",
@@ -483,6 +484,8 @@ def _build_model_learning_text_lines(model_learning: dict[str, Any]) -> list[str
                     f"  说明：{item.get('impact_summary', '-')}",
                 ]
             )
+            for process_line in item.get("process_lines", []):
+                lines.append(f"  学习动作：{process_line}")
     if top_models:
         lines.extend(["", "【单模型领先表现】"])
         for item in top_models:
@@ -522,9 +525,18 @@ def _render_model_learning_html(model_learning: dict[str, Any]) -> list[str]:
             metrics = [
                 ("学习状态", str(item.get("learning_status", "-"))),
                 ("已闭环样本", f"{int(item.get('sample_size') or 0)} 笔"),
+                ("滚动模拟样本", f"{float(item.get('simulated_sample_size') or 0.0):.1f} 笔"),
                 ("命中率", f"{float(item.get('hit_rate') or 0.0):.2f}%"),
                 ("平均收益", f"{float(item.get('avg_return_pct') or 0.0):.2f}%"),
             ]
+            process_html = ""
+            if item.get("process_lines"):
+                process_html = (
+                    "<div style=\"margin-top:10px;\">"
+                    "<div style=\"font-size:12px;font-weight:700;color:#334155;margin-bottom:6px;\">学习动作</div>"
+                    f"{_render_bullet_list(list(item.get('process_lines') or []))}"
+                    "</div>"
+                )
             blocks.append(
                 "<div style=\"margin-bottom:14px;padding:14px 16px;border:1px solid #e5e7eb;border-radius:12px;background:#fafcff;\">"
                 f"<div style=\"font-size:16px;font-weight:700;color:#0f172a;margin-bottom:8px;\">{_escape_html(item.get('label', '-'))}</div>"
@@ -532,6 +544,7 @@ def _render_model_learning_html(model_learning: dict[str, Any]) -> list[str]:
                 f"<div style=\"margin-top:10px;font-size:13px;color:#475569;line-height:1.8;\">最大回撤：{float(item.get('max_drawdown_pct') or 0.0):.2f}% ｜ 在途交易：{int(item.get('open_count') or 0)} 笔</div>"
                 f"<div style=\"font-size:13px;color:{impact_color};line-height:1.8;font-weight:700;\">影响程度：{_escape_html(impact_degree)} ｜ 当前贡献 {float(item.get('contribution_pct') or 0.0):.2f}% ｜ 调权系数 {float(item.get('calibration_weight') or 1.0):.2f}</div>"
                 f"<div style=\"font-size:13px;color:#475569;line-height:1.8;\">{_escape_html(item.get('impact_summary', '-'))}</div>"
+                f"{process_html}"
                 "</div>"
             )
         sections.append(_render_email_section("模型影响程度", "".join(blocks)))

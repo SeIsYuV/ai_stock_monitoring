@@ -965,6 +965,8 @@ def get_snapshots(db_path: str, owner_username: str) -> list[sqlite3.Row]:
                        ms.symbol,
                        COALESCE(ss.display_name, ms.display_name, '') AS display_name,
                        ss.latest_price,
+                       ss.latest_change_amount,
+                       ss.latest_change_pct,
                        ss.ma_250,
                        ss.ma_30w,
                        ss.ma_60w,

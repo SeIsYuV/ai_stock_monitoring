@@ -1140,6 +1140,10 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             date_to=month_end.isoformat(),
         )
         review_payload = _build_model_review_payload(rows, month_start, month_end)
+        learning_payload = app.state.monitor._build_model_learning_summary(
+            current_user["username"],
+            [dict(item) for item in get_snapshots(resolved_settings.db_path, current_user["username"])],
+        )
         return templates.TemplateResponse(
             request,
             "model_review.html",
@@ -1153,6 +1157,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 month_start=month_start.isoformat(),
                 month_end=month_end.isoformat(),
                 review_payload=review_payload,
+                learning_payload=learning_payload,
             ),
         )
 

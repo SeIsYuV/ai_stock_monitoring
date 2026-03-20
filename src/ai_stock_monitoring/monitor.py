@@ -319,7 +319,13 @@ def compute_snapshot_metrics(
 ) -> SnapshotComputation:
     daily_closes = [item.close_price for item in daily_bars]
     weekly_closes = [item.close_price for item in weekly_bars]
-    previous_close = daily_closes[-2] if len(daily_closes) >= 2 else (daily_closes[-1] if daily_closes else quote.latest_price)
+    previous_close = quote.latest_price
+    if daily_bars:
+        latest_daily_bar = daily_bars[-1]
+        if len(daily_bars) >= 2 and abs(float(latest_daily_bar.close_price) - float(quote.latest_price)) <= 0.011:
+            previous_close = float(daily_bars[-2].close_price)
+        else:
+            previous_close = float(latest_daily_bar.close_price)
     latest_change_amount = round(quote.latest_price - previous_close, 2)
     latest_change_pct = round((latest_change_amount / previous_close) * 100, 2) if previous_close else 0.0
 
@@ -1342,6 +1348,9 @@ class StockMonitor:
                 summary["open_count"] = int(summary["open_count"]) + 1
 
         current_group_scores: dict[str, list[float]] = {"professional": [], "adaptive": []}
+        current_group_sim_samples: dict[str, list[int]] = {"professional": [], "adaptive": []}
+        current_group_process_ops: dict[str, list[dict[str, Any]]] = {"professional": [], "adaptive": []}
+        fallback_model_rows: list[dict[str, Any]] = []
         for snapshot in snapshots:
             try:
                 breakdown = json.loads(str(snapshot.get("quant_model_breakdown") or "[]"))
@@ -1361,6 +1370,44 @@ class StockMonitor:
                 current_group_scores["professional"].append(sum(professional_scores) / len(professional_scores))
             if adaptive_scores:
                 current_group_scores["adaptive"].append(sum(adaptive_scores) / len(adaptive_scores))
+            for item in breakdown:
+                if not isinstance(item, dict):
+                    continue
+                model_key = str(item.get("key") or "")
+                group_key = "professional" if model_key in PROFESSIONAL_MODEL_KEYS else "adaptive"
+                adaptive_sample_size = int(item.get("adaptive_sample_size") or 0)
+                adaptive_weight = float(item.get("adaptive_weight") or 1.0)
+                base_score = item.get("base_score")
+                adjusted_score = float(item.get("score") or 0.0)
+                delta_score = round(adjusted_score - float(base_score or adjusted_score), 2)
+                if adaptive_sample_size > 0:
+                    current_group_sim_samples[group_key].append(adaptive_sample_size)
+                    current_group_process_ops[group_key].append(
+                        {
+                            "symbol": str(snapshot.get("symbol") or ""),
+                            "display_name": str(snapshot.get("display_name") or snapshot.get("symbol") or ""),
+                            "model_label": str(item.get("label") or model_key or "模型"),
+                            "base_score": round(float(base_score or adjusted_score), 2),
+                            "adjusted_score": adjusted_score,
+                            "delta_score": delta_score,
+                            "adaptive_weight": adaptive_weight,
+                            "sample_size": adaptive_sample_size,
+                            "hit_rate": float(item.get("adaptive_hit_rate") or 0.0),
+                            "avg_return_pct": float(item.get("adaptive_avg_return_pct") or 0.0),
+                        }
+                    )
+                    fallback_model_rows.append(
+                        {
+                            "key": model_key,
+                            "label": str(item.get("label") or model_key or ""),
+                            "sample_size": adaptive_sample_size,
+                            "open_count": 0,
+                            "hit_rate": float(item.get("adaptive_hit_rate") or 0.0),
+                            "avg_return_pct": float(item.get("adaptive_avg_return_pct") or 0.0),
+                            "max_drawdown_pct": 0.0,
+                            "learning_status": "滚动模拟学习中",
+                        }
+                    )
 
         groups: list[dict[str, Any]] = []
         influence_scores: dict[str, float] = {}
@@ -1378,6 +1425,9 @@ class StockMonitor:
                 },
             )
             sample_size = int(item.get("closed_count") or 0)
+            open_count = int(item.get("open_count") or 0)
+            simulated_samples = current_group_sim_samples[key]
+            simulated_sample_size = round(sum(simulated_samples) / len(simulated_samples), 1) if simulated_samples else 0.0
             hit_rate = round(int(item.get("win_count") or 0) / max(sample_size, 1) * 100, 2) if sample_size else 0.0
             avg_return_pct = round(float(item.get("return_sum") or 0.0) / max(sample_size, 1), 2) if sample_size else 0.0
             current_score = round(
@@ -1397,13 +1447,20 @@ class StockMonitor:
                     "key": key,
                     "label": label,
                     "sample_size": sample_size,
-                    "open_count": int(item.get("open_count") or 0),
+                    "open_count": open_count,
+                    "simulated_sample_size": simulated_sample_size,
                     "hit_rate": hit_rate,
                     "avg_return_pct": avg_return_pct,
                     "max_drawdown_pct": round(float(item.get("max_drawdown_pct") or 0.0), 2),
                     "current_score": current_score,
                     "calibration_weight": calibration_weight,
-                    "learning_status": self._describe_learning_status(sample_size, hit_rate, avg_return_pct),
+                    "learning_status": (
+                        self._describe_learning_status(sample_size, hit_rate, avg_return_pct)
+                        if sample_size > 0
+                        else "滚动模拟学习中" if simulated_sample_size > 0
+                        else "纸面交易运行中" if open_count > 0
+                        else "样本积累中"
+                    ),
                 }
             )
 
@@ -1419,10 +1476,37 @@ class StockMonitor:
                 float(item["calibration_weight"]),
                 int(item["sample_size"]),
             )
+            process_rows = sorted(
+                current_group_process_ops[str(item["key"])],
+                key=lambda current: (
+                    -abs(float(current["delta_score"])),
+                    -int(current["sample_size"]),
+                    str(current["symbol"]),
+                ),
+            )[:5]
+            process_lines: list[str] = []
+            if float(item["simulated_sample_size"]) > 0:
+                process_lines.append(
+                    f"滚动模拟正在学习，当前组内滚动样本均值约 {float(item['simulated_sample_size']):.1f} 笔。"
+                )
+            if int(item["open_count"]) > 0 and int(item["sample_size"]) == 0:
+                process_lines.append(
+                    f"纸面交易已开仓 {int(item['open_count'])} 笔，但尚未出现止盈/止损/超期/模型走弱离场，所以已闭环样本暂为 0。"
+                )
+            for process_item in process_rows:
+                direction = "上调" if float(process_item["delta_score"]) >= 0 else "下调"
+                process_lines.append(
+                    f"{process_item['display_name']} {process_item['model_label']}：基础分 {float(process_item['base_score']):.2f}，"
+                    f"权重 {float(process_item['adaptive_weight']):.2f}，{direction}至 {float(process_item['adjusted_score']):.2f}；"
+                    f"滚动样本 {int(process_item['sample_size'])} 笔，命中率 {float(process_item['hit_rate']):.2f}% ，"
+                    f"平均收益 {float(process_item['avg_return_pct']):.2f}%。"
+                )
+            item["process_lines"] = process_lines
             item["impact_summary"] = (
                 f"当前组内平均分 {float(item['current_score']):.2f}，"
                 f"对今日最终量化结论贡献约 {contribution_pct:.2f}% ，"
-                f"纸面交易调权系数 {float(item['calibration_weight']):.2f}。"
+                f"纸面交易调权系数 {float(item['calibration_weight']):.2f}，"
+                f"滚动模拟样本均值 {float(item['simulated_sample_size']):.1f}。"
             )
 
         model_rows: list[dict[str, Any]] = []
@@ -1446,6 +1530,13 @@ class StockMonitor:
                     "learning_status": self._describe_learning_status(sample_size, hit_rate, avg_return_pct),
                 }
             )
+        if not model_rows:
+            deduped_fallbacks: dict[str, dict[str, Any]] = {}
+            for item in fallback_model_rows:
+                existing = deduped_fallbacks.get(str(item["key"]))
+                if existing is None or float(item["sample_size"]) > float(existing["sample_size"]):
+                    deduped_fallbacks[str(item["key"])] = item
+            model_rows.extend(deduped_fallbacks.values())
         model_rows.sort(
             key=lambda item: (
                 -float(item["avg_return_pct"]),
@@ -1467,6 +1558,11 @@ class StockMonitor:
             )
             overview_lines.append(
                 f"近 {lookback_days} 天纸面交易里，{leader['label']}暂时学习领先，当前状态为{leader['learning_status']}。"
+            )
+        elif any(float(item["simulated_sample_size"]) > 0 for item in groups):
+            leader = max(groups, key=lambda item: float(item.get("simulated_sample_size") or 0.0))
+            overview_lines.append(
+                f"{leader['label']}正在用滚动模拟持续学习，当前组内滚动样本均值约 {float(leader['simulated_sample_size']):.1f} 笔。"
             )
         if total_influence > 0:
             dominant = max(groups, key=lambda item: float(item.get("contribution_pct") or 0.0))

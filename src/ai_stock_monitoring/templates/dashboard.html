@@ -268,6 +268,7 @@
 
 <script>
     (function () {
+        const scrollStorageKey = 'dashboard-scroll-state';
         const timeElement = document.getElementById('dashboard-current-time');
         const footerTimeElement = document.getElementById('dashboard-footer-current-time');
         const countdownElement = document.getElementById('dashboard-refresh-countdown');
@@ -313,8 +314,45 @@
             }
         }
 
+        function restoreScrollState() {
+            try {
+                const rawState = window.sessionStorage.getItem(scrollStorageKey);
+                if (!rawState) {
+                    return;
+                }
+                const state = JSON.parse(rawState);
+                window.sessionStorage.removeItem(scrollStorageKey);
+                window.requestAnimationFrame(function () {
+                    window.scrollTo(Number(state.scrollX || 0), Number(state.scrollY || 0));
+                    document.querySelectorAll('.table-scroll').forEach(function (element, index) {
+                        const leftValues = Array.isArray(state.tableScrollLeft) ? state.tableScrollLeft : [];
+                        element.scrollLeft = Number(leftValues[index] || 0);
+                    });
+                });
+            } catch (_error) {
+                window.sessionStorage.removeItem(scrollStorageKey);
+            }
+        }
+
+        function saveScrollState() {
+            try {
+                const state = {
+                    scrollX: window.scrollX,
+                    scrollY: window.scrollY,
+                    tableScrollLeft: Array.from(document.querySelectorAll('.table-scroll')).map(function (element) {
+                        return element.scrollLeft;
+                    }),
+                };
+                window.sessionStorage.setItem(scrollStorageKey, JSON.stringify(state));
+            } catch (_error) {
+                // ignore sessionStorage failures
+            }
+        }
+
         let hasAutoReloaded = false;
+        restoreScrollState();
         render();
+        window.addEventListener('beforeunload', saveScrollState);
         window.setInterval(function () {
             currentTime = new Date(currentTime.getTime() + 1000);
             if (nextRefreshSeconds !== null) {
@@ -323,6 +361,7 @@
             render();
             if (!hasAutoReloaded && nextRefreshSeconds === 0) {
                 hasAutoReloaded = true;
+                saveScrollState();
                 window.setTimeout(function () {
                     window.location.reload();
                 }, 300);
