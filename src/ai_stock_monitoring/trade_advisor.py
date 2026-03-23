@@ -12,8 +12,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import json
 import math
+import re
 from typing import Any, Mapping, Sequence
 
 import requests
@@ -66,6 +68,9 @@ SIGNAL_CATEGORY_MAPPING: dict[str, str] = {
     "择时量化": "quant",
     "风险控制卖出": "quant",
 }
+
+REAL_TRADE_TIMEOUT_DAYS = 30
+REAL_TRADE_FEEDBACK_MIN_SCORE = 55.0
 
 
 def split_trigger_signals(trigger_state: str | None) -> list[str]:
@@ -1393,6 +1398,487 @@ def build_position_summary(trades: Sequence[Mapping[str, Any]]) -> dict[str, Any
         "trade_count": len(trades),
         "invalid_sell_quantity": invalid_sell_quantity,
     }
+
+
+def _parse_datetime_value(raw_value: object) -> datetime | None:
+    text = str(raw_value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _extract_price_candidates(text: object) -> list[float]:
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        return []
+    return [float(item) for item in re.findall(r"\d+(?:\.\d+)?", raw_text)]
+
+
+def _resolve_reference_price(payload: Mapping[str, Any], side: str) -> tuple[float | None, str]:
+    preferred_keys = (
+        ("suggested_add_price", "建议加仓价")
+        if side == "buy"
+        else ("suggested_reduce_price", "建议减仓价")
+    )
+    range_keys = (
+        ("recommended_buy_price_range", "推荐买入区间")
+        if side == "buy"
+        else ("recommended_sell_price_range", "推荐卖出区间")
+    )
+    direct_value = float(payload.get(preferred_keys[0]) or 0.0)
+    if direct_value > 0:
+        return round(direct_value, 4), preferred_keys[1]
+    range_text = str(payload.get(range_keys[0]) or "").strip()
+    numbers = _extract_price_candidates(range_text)
+    if len(numbers) >= 2:
+        return round((numbers[0] + numbers[1]) / 2, 4), range_keys[1]
+    if numbers:
+        return round(numbers[0], 4), range_keys[1]
+    return None, ""
+
+
+def _build_analysis_lookup(
+    analysis_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    grouped_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in analysis_rows:
+        payload = dict(row)
+        symbol = str(payload.get("symbol") or "")
+        created_at = _parse_datetime_value(payload.get("created_at"))
+        if not symbol or created_at is None:
+            continue
+        try:
+            market_snapshot = json.loads(str(payload.get("market_snapshot") or "{}"))
+        except json.JSONDecodeError:
+            market_snapshot = {}
+        try:
+            analysis_json = json.loads(str(payload.get("analysis_json") or "{}"))
+        except json.JSONDecodeError:
+            analysis_json = {}
+        buy_reference, buy_reference_label = _resolve_reference_price({**market_snapshot, **analysis_json}, "buy")
+        sell_reference, sell_reference_label = _resolve_reference_price({**market_snapshot, **analysis_json}, "sell")
+        stop_loss_reference = float(
+            analysis_json.get("suggested_stop_loss_price")
+            or market_snapshot.get("suggested_stop_loss_price")
+            or 0.0
+        )
+        try:
+            quant_breakdown = json.loads(str(market_snapshot.get("quant_model_breakdown") or "[]"))
+        except json.JSONDecodeError:
+            quant_breakdown = []
+        model_scores = {
+            str(item.get("key") or ""): float(item.get("score") or 0.0)
+            for item in quant_breakdown
+            if isinstance(item, dict) and str(item.get("key") or "")
+        }
+        professional_scores = [
+            score for key, score in model_scores.items() if key in {"msci_momentum", "quality_stability"}
+        ]
+        adaptive_scores = [
+            score for key, score in model_scores.items() if key not in {"msci_momentum", "quality_stability"}
+        ]
+        grouped_rows[symbol].append(
+            {
+                "created_at": created_at,
+                "buy_reference_price": buy_reference,
+                "buy_reference_label": buy_reference_label,
+                "sell_reference_price": sell_reference,
+                "sell_reference_label": sell_reference_label,
+                "stop_loss_reference_price": round(stop_loss_reference, 4) if stop_loss_reference > 0 else None,
+                "quant_probability": float(market_snapshot.get("quant_probability") or 0.0),
+                "model_scores": model_scores,
+                "group_scores": {
+                    "professional": round(sum(professional_scores) / len(professional_scores), 2) if professional_scores else 0.0,
+                    "adaptive": round(sum(adaptive_scores) / len(adaptive_scores), 2) if adaptive_scores else 0.0,
+                },
+            }
+        )
+    for symbol_rows in grouped_rows.values():
+        symbol_rows.sort(key=lambda item: item["created_at"])
+    return grouped_rows
+
+
+def _find_latest_analysis_context(
+    analysis_lookup: Mapping[str, Sequence[Mapping[str, Any]]],
+    symbol: str,
+    trade_time: datetime | None,
+) -> dict[str, Any] | None:
+    if trade_time is None:
+        return None
+    matched: dict[str, Any] | None = None
+    for item in analysis_lookup.get(symbol, []):
+        created_at = item.get("created_at")
+        if not isinstance(created_at, datetime):
+            continue
+        if created_at <= trade_time:
+            matched = dict(item)
+            continue
+        break
+    return matched
+
+
+def _classify_real_trade_exit(
+    *,
+    exit_note: str,
+    holding_days: int,
+    net_return_pct: float,
+    exit_price: float,
+    sell_reference_price: float | None,
+    stop_loss_reference_price: float | None,
+    timeout_days: int,
+) -> tuple[str, str, str]:
+    normalized_note = exit_note.strip()
+    if "止盈" in normalized_note:
+        return "take_profit", "止盈退出", "备注包含止盈指令。"
+    if "止损" in normalized_note:
+        return "stop_loss", "止损退出", "备注包含止损指令。"
+    if "超期" in normalized_note or "到期" in normalized_note:
+        return "timeout", "超期退出", "备注标记为超期退出。"
+    if sell_reference_price and exit_price >= sell_reference_price * 0.995:
+        return "take_profit", "止盈退出", f"卖价接近或达到计划卖出参考 {sell_reference_price:.2f}。"
+    if stop_loss_reference_price and exit_price <= stop_loss_reference_price * 1.005:
+        return "stop_loss", "止损退出", f"卖价已触及计划止损参考 {stop_loss_reference_price:.2f}。"
+    if net_return_pct >= 8.0:
+        return "take_profit", "止盈退出", f"本轮净收益 {net_return_pct:.2f}% ，达到止盈归类阈值。"
+    if net_return_pct <= -5.0:
+        return "stop_loss", "止损退出", f"本轮净收益 {net_return_pct:.2f}% ，达到止损归类阈值。"
+    if holding_days >= timeout_days:
+        return "timeout", "超期退出", f"持有 {holding_days} 天，超过对账超期阈值 {timeout_days} 天。"
+    if normalized_note:
+        return "manual", "主动调仓", f"备注：{normalized_note}"
+    return "manual", "主动调仓", "本次离场未命中止盈/止损/超期规则，按主动调仓处理。"
+
+
+def _build_feedback_rows(samples_by_key: Mapping[str, list[dict[str, float]]]) -> dict[str, dict[str, float | int]]:
+    feedback: dict[str, dict[str, float | int]] = {}
+    for key, samples in samples_by_key.items():
+        if not samples:
+            continue
+        sample_size = len(samples)
+        hit_rate = sum(1 for item in samples if float(item["return_pct"]) > 0) / sample_size * 100
+        feedback[key] = {
+            "sample_size": sample_size,
+            "real_sample_size": sample_size,
+            "hit_rate": round(hit_rate, 2),
+            "avg_return_pct": round(sum(float(item["return_pct"]) for item in samples) / sample_size, 2),
+            "avg_holding_days": round(sum(float(item["holding_days"]) for item in samples) / sample_size, 1),
+            "avg_drawdown_pct": round(sum(max(0.0, -float(item["return_pct"])) for item in samples) / sample_size, 2),
+            "avg_buy_slippage_pct": round(
+                sum(float(item["buy_slippage_pct"]) for item in samples if item["buy_slippage_pct"] is not None)
+                / max(sum(1 for item in samples if item["buy_slippage_pct"] is not None), 1),
+                2,
+            ),
+            "avg_sell_slippage_pct": round(
+                sum(float(item["sell_slippage_pct"]) for item in samples if item["sell_slippage_pct"] is not None)
+                / max(sum(1 for item in samples if item["sell_slippage_pct"] is not None), 1),
+                2,
+            ),
+        }
+    return feedback
+
+
+def build_trade_reconciliation(
+    trade_records: Sequence[Mapping[str, Any]],
+    analysis_rows: Sequence[Mapping[str, Any]] | None = None,
+    snapshots: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    timeout_days: int = REAL_TRADE_TIMEOUT_DAYS,
+) -> dict[str, Any]:
+    grouped_trades: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for trade in trade_records:
+        grouped_trades[str(trade["symbol"])].append(trade)
+
+    analysis_lookup = _build_analysis_lookup(analysis_rows or [])
+    snapshot_map = {str(item["symbol"]): dict(item) for item in (snapshots or [])}
+    execution_rows: list[dict[str, Any]] = []
+    closed_round_trips: list[dict[str, Any]] = []
+    open_lots: list[dict[str, Any]] = []
+
+    for symbol, rows in grouped_trades.items():
+        sorted_rows = sorted(
+            rows,
+            key=lambda item: (
+                _parse_datetime_value(item.get("traded_at")) or datetime.min.replace(tzinfo=UTC),
+                int(item.get("id") or 0),
+            ),
+        )
+        display_name = str(snapshot_map.get(symbol, {}).get("display_name") or symbol)
+        buy_lots: list[dict[str, Any]] = []
+        for trade in sorted_rows:
+            trade_time = _parse_datetime_value(trade.get("traded_at"))
+            side = str(trade.get("side") or "")
+            quantity = int(trade.get("quantity") or 0)
+            price = float(trade.get("price") or 0.0)
+            commission_fee = float(trade.get("commission_fee") or max(price * quantity * 0.0003, 5.0))
+            analysis_context = _find_latest_analysis_context(analysis_lookup, symbol, trade_time)
+            reference_key = "buy_reference_price" if side == "buy" else "sell_reference_price"
+            reference_label_key = "buy_reference_label" if side == "buy" else "sell_reference_label"
+            reference_price = float(analysis_context.get(reference_key) or 0.0) if analysis_context else 0.0
+            reference_label = str(analysis_context.get(reference_label_key) or "") if analysis_context else ""
+            slippage_pct = round((price - reference_price) / reference_price * 100, 2) if reference_price > 0 else None
+            execution_rows.append(
+                {
+                    "trade_id": int(trade.get("id") or 0),
+                    "symbol": symbol,
+                    "display_name": display_name,
+                    "side": side,
+                    "price": price,
+                    "quantity": quantity,
+                    "commission_fee": round(commission_fee, 2),
+                    "traded_at": str(trade.get("traded_at") or ""),
+                    "note": str(trade.get("note") or ""),
+                    "reference_price": round(reference_price, 4) if reference_price > 0 else None,
+                    "reference_label": reference_label,
+                    "slippage_pct": slippage_pct,
+                    "analysis_created_at": analysis_context.get("created_at").isoformat() if analysis_context and analysis_context.get("created_at") else "",
+                }
+            )
+            if side == "buy":
+                buy_lots.append(
+                    {
+                        "symbol": symbol,
+                        "display_name": display_name,
+                        "remaining_quantity": quantity,
+                        "entry_price": price,
+                        "entry_commission_remaining": commission_fee,
+                        "entry_time": trade_time,
+                        "entry_note": str(trade.get("note") or ""),
+                        "buy_slippage_pct": slippage_pct,
+                        "buy_reference_price": round(reference_price, 4) if reference_price > 0 else None,
+                        "buy_reference_label": reference_label,
+                        "stop_loss_reference_price": (
+                            float(analysis_context.get("stop_loss_reference_price") or 0.0) if analysis_context else 0.0
+                        ) or None,
+                        "entry_quant_probability": float(analysis_context.get("quant_probability") or 0.0) if analysis_context else 0.0,
+                        "entry_model_scores": dict(analysis_context.get("model_scores") or {}) if analysis_context else {},
+                        "entry_group_scores": dict(analysis_context.get("group_scores") or {}) if analysis_context else {},
+                        "entry_analysis_created_at": analysis_context.get("created_at").isoformat() if analysis_context and analysis_context.get("created_at") else "",
+                    }
+                )
+                continue
+
+            sell_quantity_remaining = quantity
+            sell_fee_remaining = commission_fee
+            while sell_quantity_remaining > 0 and buy_lots:
+                lot = buy_lots[0]
+                lot_quantity_remaining = int(lot["remaining_quantity"])
+                if lot_quantity_remaining <= 0:
+                    buy_lots.pop(0)
+                    continue
+                matched_quantity = min(sell_quantity_remaining, lot_quantity_remaining)
+                entry_fee_alloc = float(lot["entry_commission_remaining"]) * matched_quantity / lot_quantity_remaining
+                sell_fee_alloc = sell_fee_remaining * matched_quantity / sell_quantity_remaining if sell_quantity_remaining > 0 else 0.0
+                entry_amount = price * 0  # keep expression local and explicit below
+                entry_amount = float(lot["entry_price"]) * matched_quantity + entry_fee_alloc
+                exit_amount = price * matched_quantity - sell_fee_alloc
+                net_pnl = round(exit_amount - entry_amount, 2)
+                net_return_pct = round(net_pnl / entry_amount * 100, 2) if entry_amount > 0 else 0.0
+                entry_time = lot.get("entry_time")
+                holding_days = 0
+                if isinstance(entry_time, datetime) and trade_time is not None:
+                    holding_days = max(0, (trade_time.date() - entry_time.date()).days)
+                exit_category, exit_label, exit_reason = _classify_real_trade_exit(
+                    exit_note=str(trade.get("note") or ""),
+                    holding_days=holding_days,
+                    net_return_pct=net_return_pct,
+                    exit_price=price,
+                    sell_reference_price=round(reference_price, 4) if reference_price > 0 else None,
+                    stop_loss_reference_price=lot.get("stop_loss_reference_price"),
+                    timeout_days=timeout_days,
+                )
+                closed_round_trips.append(
+                    {
+                        "symbol": symbol,
+                        "display_name": display_name,
+                        "quantity": matched_quantity,
+                        "entry_at": entry_time.isoformat() if isinstance(entry_time, datetime) else "",
+                        "exit_at": trade_time.isoformat() if trade_time is not None else "",
+                        "entry_price": round(float(lot["entry_price"]), 5),
+                        "exit_price": round(price, 5),
+                        "entry_amount": round(entry_amount, 2),
+                        "exit_amount": round(exit_amount, 2),
+                        "commission_fee": round(entry_fee_alloc + sell_fee_alloc, 2),
+                        "net_pnl": net_pnl,
+                        "net_return_pct": net_return_pct,
+                        "holding_days": holding_days,
+                        "exit_category": exit_category,
+                        "exit_label": exit_label,
+                        "exit_reason": exit_reason,
+                        "buy_slippage_pct": lot.get("buy_slippage_pct"),
+                        "sell_slippage_pct": slippage_pct,
+                        "buy_reference_price": lot.get("buy_reference_price"),
+                        "sell_reference_price": round(reference_price, 4) if reference_price > 0 else None,
+                        "buy_reference_label": lot.get("buy_reference_label") or "",
+                        "sell_reference_label": reference_label,
+                        "stop_loss_reference_price": lot.get("stop_loss_reference_price"),
+                        "entry_quant_probability": float(lot.get("entry_quant_probability") or 0.0),
+                        "entry_model_scores": dict(lot.get("entry_model_scores") or {}),
+                        "entry_group_scores": dict(lot.get("entry_group_scores") or {}),
+                        "entry_analysis_created_at": str(lot.get("entry_analysis_created_at") or ""),
+                        "exit_analysis_created_at": analysis_context.get("created_at").isoformat() if analysis_context and analysis_context.get("created_at") else "",
+                    }
+                )
+                lot["remaining_quantity"] = lot_quantity_remaining - matched_quantity
+                lot["entry_commission_remaining"] = max(0.0, float(lot["entry_commission_remaining"]) - entry_fee_alloc)
+                sell_quantity_remaining -= matched_quantity
+                sell_fee_remaining = max(0.0, sell_fee_remaining - sell_fee_alloc)
+                if int(lot["remaining_quantity"]) <= 0:
+                    buy_lots.pop(0)
+            # oversold quantities are still preserved in raw execution rows; reconciliation only closes matched lots
+
+        latest_snapshot_price = float(snapshot_map.get(symbol, {}).get("latest_price") or 0.0)
+        for lot in buy_lots:
+            remaining_quantity = int(lot["remaining_quantity"])
+            if remaining_quantity <= 0:
+                continue
+            entry_price = float(lot["entry_price"])
+            latest_price = latest_snapshot_price or entry_price
+            unrealized_pnl = round((latest_price - entry_price) * remaining_quantity, 2)
+            unrealized_return_pct = round((latest_price - entry_price) / entry_price * 100, 2) if entry_price > 0 else 0.0
+            entry_time = lot.get("entry_time")
+            holding_days = 0
+            if isinstance(entry_time, datetime):
+                holding_days = max(0, (datetime.now(UTC).date() - entry_time.date()).days)
+            open_lots.append(
+                {
+                    "symbol": symbol,
+                    "display_name": display_name,
+                    "quantity": remaining_quantity,
+                    "entry_at": entry_time.isoformat() if isinstance(entry_time, datetime) else "",
+                    "entry_price": round(entry_price, 5),
+                    "latest_price": round(latest_price, 5),
+                    "market_value": round(latest_price * remaining_quantity, 2),
+                    "holding_days": holding_days,
+                    "buy_slippage_pct": lot.get("buy_slippage_pct"),
+                    "buy_reference_price": lot.get("buy_reference_price"),
+                    "buy_reference_label": lot.get("buy_reference_label") or "",
+                    "stop_loss_reference_price": lot.get("stop_loss_reference_price"),
+                    "unrealized_pnl": unrealized_pnl,
+                    "unrealized_return_pct": unrealized_return_pct,
+                }
+            )
+
+    closed_round_trips.sort(
+        key=lambda item: (
+            str(item.get("exit_at") or ""),
+            str(item.get("symbol") or ""),
+        ),
+        reverse=True,
+    )
+    open_lots.sort(
+        key=lambda item: (
+            -int(item.get("holding_days") or 0),
+            str(item.get("symbol") or ""),
+        )
+    )
+    execution_rows.sort(
+        key=lambda item: (
+            str(item.get("traded_at") or ""),
+            int(item.get("trade_id") or 0),
+        ),
+        reverse=True,
+    )
+
+    exit_summary_map: dict[str, dict[str, Any]] = {}
+    for item in closed_round_trips:
+        summary = exit_summary_map.setdefault(
+            str(item["exit_category"]),
+            {
+                "exit_category": str(item["exit_category"]),
+                "exit_label": str(item["exit_label"]),
+                "count": 0,
+                "win_count": 0,
+                "net_pnl": 0.0,
+                "return_sum": 0.0,
+            },
+        )
+        summary["count"] = int(summary["count"]) + 1
+        summary["net_pnl"] = float(summary["net_pnl"]) + float(item["net_pnl"])
+        summary["return_sum"] = float(summary["return_sum"]) + float(item["net_return_pct"])
+        if float(item["net_pnl"]) > 0:
+            summary["win_count"] = int(summary["win_count"]) + 1
+
+    exit_summaries = [
+        {
+            "exit_category": item["exit_category"],
+            "exit_label": item["exit_label"],
+            "count": int(item["count"]),
+            "win_rate": round(int(item["win_count"]) / max(int(item["count"]), 1) * 100, 2),
+            "avg_return_pct": round(float(item["return_sum"]) / max(int(item["count"]), 1), 2),
+            "net_pnl": round(float(item["net_pnl"]), 2),
+        }
+        for item in exit_summary_map.values()
+    ]
+    exit_priority = {"take_profit": 0, "stop_loss": 1, "timeout": 2, "manual": 3}
+    exit_summaries.sort(
+        key=lambda item: (
+            exit_priority.get(str(item["exit_category"]), 9),
+            -int(item["count"]),
+            str(item["exit_label"]),
+        )
+    )
+
+    closed_count = len(closed_round_trips)
+    winning_count = sum(1 for item in closed_round_trips if float(item["net_pnl"]) > 0)
+    realized_pnl_total = round(sum(float(item["net_pnl"]) for item in closed_round_trips), 2)
+    buy_slippage_values = [float(item["buy_slippage_pct"]) for item in closed_round_trips if item.get("buy_slippage_pct") is not None]
+    sell_slippage_values = [float(item["sell_slippage_pct"]) for item in closed_round_trips if item.get("sell_slippage_pct") is not None]
+    summary = {
+        "closed_round_trips": closed_count,
+        "open_lots": len(open_lots),
+        "win_rate": round(winning_count / max(closed_count, 1) * 100, 2) if closed_count else 0.0,
+        "realized_pnl": realized_pnl_total,
+        "avg_return_pct": round(sum(float(item["net_return_pct"]) for item in closed_round_trips) / max(closed_count, 1), 2) if closed_count else 0.0,
+        "avg_holding_days": round(sum(int(item["holding_days"]) for item in closed_round_trips) / max(closed_count, 1), 1) if closed_count else 0.0,
+        "total_commission_fee": round(sum(float(item["commission_fee"]) for item in execution_rows), 2),
+        "avg_buy_slippage_pct": round(sum(buy_slippage_values) / len(buy_slippage_values), 2) if buy_slippage_values else None,
+        "avg_sell_slippage_pct": round(sum(sell_slippage_values) / len(sell_slippage_values), 2) if sell_slippage_values else None,
+        "exit_summaries": exit_summaries,
+    }
+    return {
+        "summary": summary,
+        "closed_round_trips": closed_round_trips,
+        "open_lots": open_lots,
+        "execution_rows": execution_rows,
+    }
+
+
+def build_real_trade_feedback(
+    trade_records: Sequence[Mapping[str, Any]],
+    analysis_rows: Sequence[Mapping[str, Any]] | None = None,
+    snapshots: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    lookback_days: int = 180,
+    as_of: datetime | None = None,
+) -> dict[str, dict[str, float | int]]:
+    reconciliation = build_trade_reconciliation(trade_records, analysis_rows, snapshots)
+    cutoff_date = (as_of or datetime.now(UTC)).date()
+    grouped_samples: dict[str, list[dict[str, float]]] = defaultdict(list)
+    for item in reconciliation["closed_round_trips"]:
+        exit_at = _parse_datetime_value(item.get("exit_at"))
+        if exit_at is None:
+            continue
+        if (cutoff_date - exit_at.date()).days > lookback_days:
+            continue
+        sample_payload = {
+            "return_pct": float(item.get("net_return_pct") or 0.0),
+            "holding_days": float(item.get("holding_days") or 0.0),
+            "buy_slippage_pct": item.get("buy_slippage_pct"),
+            "sell_slippage_pct": item.get("sell_slippage_pct"),
+        }
+        for key, score in dict(item.get("entry_group_scores") or {}).items():
+            if float(score or 0.0) >= REAL_TRADE_FEEDBACK_MIN_SCORE:
+                grouped_samples[str(key)].append(sample_payload)
+        for key, score in dict(item.get("entry_model_scores") or {}).items():
+            if float(score or 0.0) >= REAL_TRADE_FEEDBACK_MIN_SCORE:
+                grouped_samples[str(key)].append(sample_payload)
+    return _build_feedback_rows(grouped_samples)
 
 
 class TradeAdvisor:

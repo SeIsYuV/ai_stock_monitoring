@@ -481,6 +481,7 @@ def _build_model_learning_text_lines(model_learning: dict[str, Any]) -> list[str
                     f"- {item.get('label', '-')}"
                     f"：状态 {item.get('learning_status', '-')}"
                     f" ｜ 已闭环 {int(item.get('sample_size') or 0)} 笔"
+                    f"（纸面 {int(item.get('paper_sample_size') or 0)} / 真实 {int(item.get('real_sample_size') or 0)}）"
                     f" ｜ 在途 {int(item.get('open_count') or 0)} 笔"
                     f" ｜ 滚动模拟 {float(item.get('simulated_sample_size') or 0.0):.1f} 笔"
                     f" ｜ 命中率 {float(item.get('hit_rate') or 0.0):.2f}%"
@@ -533,6 +534,7 @@ def _render_model_learning_html(model_learning: dict[str, Any]) -> list[str]:
             metrics = [
                 ("学习状态", str(item.get("learning_status", "-"))),
                 ("已闭环样本", f"{int(item.get('sample_size') or 0)} 笔"),
+                ("样本来源", f"纸面 {int(item.get('paper_sample_size') or 0)} / 真实 {int(item.get('real_sample_size') or 0)}"),
                 ("滚动模拟样本", f"{float(item.get('simulated_sample_size') or 0.0):.1f} 笔"),
                 ("命中率", f"{float(item.get('hit_rate') or 0.0):.2f}%"),
                 ("平均收益", f"{float(item.get('avg_return_pct') or 0.0):.2f}%"),

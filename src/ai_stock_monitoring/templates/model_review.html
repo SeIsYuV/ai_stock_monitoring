@@ -3,7 +3,7 @@
 {% block content %}
 <section class="card" style="margin-bottom: 16px;">
     <h1>模型复盘</h1>
-    <p>这里展示账号 {{ current_user['username'] }} 的纸面交易战绩，用来对照专业组、自适应组和单模型的真实表现。</p>
+    <p>这里展示账号 {{ current_user['username'] }} 的纸面交易战绩，并叠加真实交易闭环反馈，用来对照专业组、自适应组和单模型的学习效果。</p>
     <form method="get" action="/model-review">
         <label>复盘月份</label>
         <input type="month" name="month" value="{{ selected_month }}">
@@ -17,7 +17,7 @@
             <div style="font-weight:700;color:#0f172a;margin-bottom:6px;">{{ item['label'] }}</div>
             <div class="muted" style="line-height:1.7;">
                 当前状态：{{ item['learning_status'] }}<br>
-                已闭环样本：{{ item['sample_size'] }} 笔 ｜ 开放中：{{ item['open_count'] }} 笔<br>
+                已闭环样本：{{ item['sample_size'] }} 笔（纸面 {{ item.get('paper_sample_size', 0) }} / 真实 {{ item.get('real_sample_size', 0) }}）｜ 开放中：{{ item['open_count'] }} 笔<br>
                 滚动模拟样本均值：{{ '%.1f'|format(item['simulated_sample_size']) }} 笔
             </div>
             {% if item['process_lines'] %}

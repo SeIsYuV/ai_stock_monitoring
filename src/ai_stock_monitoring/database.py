@@ -1516,6 +1516,22 @@ def get_latest_trade_analysis(db_path: str, owner_username: str, symbol: str | N
         return connection.execute(query, parameters).fetchone()
 
 
+def list_trade_analyses(db_path: str, owner_username: str, symbol: str | None = None) -> list[sqlite3.Row]:
+    query = """
+        SELECT id, owner_username, symbol, analysis_provider, model_name, position_summary, market_snapshot,
+               analysis_json, status, error_message, created_at
+        FROM user_trade_analysis
+        WHERE owner_username = ?
+    """
+    parameters: list[str] = [owner_username]
+    if symbol:
+        query += " AND symbol = ?"
+        parameters.append(symbol)
+    query += " ORDER BY datetime(created_at) ASC, id ASC"
+    with get_connection(db_path) as connection:
+        return list(connection.execute(query, parameters).fetchall())
+
+
 def get_open_model_paper_trade(
     db_path: str,
     owner_username: str,

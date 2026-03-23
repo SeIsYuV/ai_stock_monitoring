@@ -51,6 +51,7 @@ from .database import (
     initialize_database,
     list_model_paper_trades,
     list_recent_login_events,
+    list_trade_analyses,
     list_trade_records,
     list_trade_records_for_symbol,
     list_users,
@@ -77,7 +78,13 @@ from .mailer import (
 from .monitor import StockMonitor, parse_stock_symbols
 from .quant import available_quant_models, normalize_selected_models, normalize_strategy_params
 from .security import hash_password, password_hash_needs_rehash, verify_password
-from .trade_advisor import TradeAdvisor, build_portfolio_profile, build_position_summary, build_stock_comprehensive_advice
+from .trade_advisor import (
+    TradeAdvisor,
+    build_portfolio_profile,
+    build_position_summary,
+    build_stock_comprehensive_advice,
+    build_trade_reconciliation,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -408,6 +415,11 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         )
         total_trade_records = len(trade_records)
         all_trade_records = list_trade_records(resolved_settings.db_path, owner_username, None)
+        trade_analyses = list_trade_analyses(
+            resolved_settings.db_path,
+            owner_username,
+            selected_symbol or None,
+        )
         snapshots = get_snapshots(resolved_settings.db_path, owner_username)
         latest_analysis_row = get_latest_trade_analysis(
             resolved_settings.db_path,
@@ -424,6 +436,11 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             latest_analysis = _serialize_latest_analysis_row(latest_analysis_row)
 
         portfolio_profile = build_portfolio_profile(all_trade_records, snapshots, float(portfolio_settings["total_investment_amount"] or 0.0))
+        trade_reconciliation = build_trade_reconciliation(
+            trade_records,
+            trade_analyses,
+            snapshots,
+        )
 
         return templates.TemplateResponse(
             request,
@@ -441,6 +458,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 position_summary=position_summary,
                 portfolio_profile=portfolio_profile,
                 portfolio_settings=portfolio_settings,
+                trade_reconciliation=trade_reconciliation,
                 trade_pagination={
                     "page": 1,
                     "page_size": max(total_trade_records, 1),
@@ -504,6 +522,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         worksheet.title = "交易流水"
         worksheet.append(["成交时间", "股票代码", "方向", "价格", "手续费", "数量", "备注", "录入时间"])
         trade_records = list_trade_records(resolved_settings.db_path, owner_username, selected_symbol)
+        trade_analyses = list_trade_analyses(resolved_settings.db_path, owner_username, selected_symbol)
+        snapshots = get_snapshots(resolved_settings.db_path, owner_username)
         for trade in trade_records:
             worksheet.append(
                 [
@@ -518,9 +538,50 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 ]
             )
 
+        reconciliation = build_trade_reconciliation(trade_records, trade_analyses, snapshots)
+        reconcile_sheet = workbook.create_sheet(title="交易对账")
+        reconcile_sheet.append(["已闭环回合", reconciliation["summary"]["closed_round_trips"]])
+        reconcile_sheet.append(["开放批次", reconciliation["summary"]["open_lots"]])
+        reconcile_sheet.append(["胜率(%)", reconciliation["summary"]["win_rate"]])
+        reconcile_sheet.append(["已实现盈亏", reconciliation["summary"]["realized_pnl"]])
+        reconcile_sheet.append(["平均收益(%)", reconciliation["summary"]["avg_return_pct"]])
+        reconcile_sheet.append(["平均持有天数", reconciliation["summary"]["avg_holding_days"]])
+        reconcile_sheet.append(["累计手续费", reconciliation["summary"]["total_commission_fee"]])
+        reconcile_sheet.append([
+            "平均买入滑点(%)",
+            reconciliation["summary"]["avg_buy_slippage_pct"]
+            if reconciliation["summary"]["avg_buy_slippage_pct"] is not None
+            else "",
+        ])
+        reconcile_sheet.append([
+            "平均卖出滑点(%)",
+            reconciliation["summary"]["avg_sell_slippage_pct"]
+            if reconciliation["summary"]["avg_sell_slippage_pct"] is not None
+            else "",
+        ])
+        reconcile_sheet.append([])
+        reconcile_sheet.append(["股票", "数量", "入场时间", "离场时间", "入场价", "离场价", "手续费", "净收益", "收益率(%)", "持有天数", "离场类型", "离场原因"])
+        for item in reconciliation["closed_round_trips"]:
+            reconcile_sheet.append(
+                [
+                    f"{item['symbol']} {item['display_name']}",
+                    int(item["quantity"]),
+                    item["entry_at"],
+                    item["exit_at"],
+                    float(item["entry_price"]),
+                    float(item["exit_price"]),
+                    float(item["commission_fee"]),
+                    float(item["net_pnl"]),
+                    float(item["net_return_pct"]),
+                    int(item["holding_days"]),
+                    item["exit_label"],
+                    item["exit_reason"],
+                ]
+            )
+
         portfolio_profile = build_portfolio_profile(
             list_trade_records(resolved_settings.db_path, owner_username, None),
-            get_snapshots(resolved_settings.db_path, owner_username),
+            snapshots,
         )
         latest_analysis_row = get_latest_trade_analysis(resolved_settings.db_path, owner_username, selected_symbol)
         if latest_analysis_row is not None:

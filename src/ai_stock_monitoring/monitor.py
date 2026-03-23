@@ -65,6 +65,7 @@ from .database import (
     get_snapshot,
     get_signal_state,
     list_users,
+    list_trade_analyses,
     list_model_paper_trades,
     list_pending_signal_states,
     list_trade_records,
@@ -92,7 +93,12 @@ from .quant import (
     normalize_selected_models,
     normalize_strategy_params,
 )
-from .trade_advisor import build_portfolio_profile, build_position_summary, build_stock_comprehensive_advice
+from .trade_advisor import (
+    build_portfolio_profile,
+    build_position_summary,
+    build_real_trade_feedback,
+    build_stock_comprehensive_advice,
+)
 
 
 @dataclass(frozen=True)
@@ -1411,11 +1417,68 @@ class StockMonitor:
                 continue
             feedback[key] = {
                 "sample_size": sample_size,
+                "paper_sample_size": sample_size,
+                "real_sample_size": 0,
                 "hit_rate": round(sum(1 for value in returns if value > 0) / sample_size * 100, 2),
                 "avg_return_pct": round(sum(returns) / sample_size, 2),
                 "avg_drawdown_pct": round(sum(drawdowns.get(key, [0.0])) / sample_size, 2),
             }
-        return feedback
+        real_feedback = build_real_trade_feedback(
+            list_trade_records(self.settings.db_path, owner_username, None),
+            list_trade_analyses(self.settings.db_path, owner_username, None),
+            get_snapshots(self.settings.db_path, owner_username),
+            lookback_days=lookback_days,
+        )
+        merged_feedback: dict[str, dict[str, float | int]] = {}
+        for key in sorted(set(feedback) | set(real_feedback)):
+            paper_item = feedback.get(key, {})
+            real_item = real_feedback.get(key, {})
+            paper_sample_size = int(paper_item.get("paper_sample_size") or paper_item.get("sample_size") or 0)
+            real_sample_size = int(real_item.get("real_sample_size") or real_item.get("sample_size") or 0)
+            effective_sample_size = paper_sample_size + int(round(real_sample_size * 2.0))
+            weighted_base = float(paper_sample_size) + float(real_sample_size) * 1.6
+            if weighted_base <= 0:
+                continue
+            merged_feedback[key] = {
+                "sample_size": effective_sample_size,
+                "paper_sample_size": paper_sample_size,
+                "real_sample_size": real_sample_size,
+                "hit_rate": round(
+                    (
+                        float(paper_item.get("hit_rate") or 0.0) * paper_sample_size
+                        + float(real_item.get("hit_rate") or 0.0) * real_sample_size * 1.6
+                    )
+                    / weighted_base,
+                    2,
+                ),
+                "avg_return_pct": round(
+                    (
+                        float(paper_item.get("avg_return_pct") or 0.0) * paper_sample_size
+                        + float(real_item.get("avg_return_pct") or 0.0) * real_sample_size * 1.6
+                    )
+                    / weighted_base,
+                    2,
+                ),
+                "avg_drawdown_pct": round(
+                    (
+                        float(paper_item.get("avg_drawdown_pct") or 0.0) * paper_sample_size
+                        + float(real_item.get("avg_drawdown_pct") or 0.0) * real_sample_size * 1.6
+                    )
+                    / weighted_base,
+                    2,
+                ),
+                "avg_holding_days": round(
+                    (
+                        float(paper_item.get("avg_holding_days") or 0.0) * paper_sample_size
+                        + float(real_item.get("avg_holding_days") or 0.0) * real_sample_size * 1.6
+                    )
+                    / weighted_base,
+                    1,
+                ),
+                "avg_buy_slippage_pct": round(float(real_item.get("avg_buy_slippage_pct") or 0.0), 2) if real_sample_size else 0.0,
+                "avg_sell_slippage_pct": round(float(real_item.get("avg_sell_slippage_pct") or 0.0), 2) if real_sample_size else 0.0,
+            }
+        return merged_feedback
 
     @staticmethod
     def _feedback_group_weight(feedback: dict[str, float | int] | None) -> float:
@@ -1462,6 +1525,7 @@ class StockMonitor:
             owner_username,
             date_from=date_from,
         )
+        feedback_map = self._resolve_owner_model_feedback(owner_username, lookback_days)
         summary_map: dict[str, dict[str, Any]] = {}
         for row in rows:
             payload = dict(row)
@@ -1572,34 +1636,33 @@ class StockMonitor:
                     "max_drawdown_pct": 0.0,
                 },
             )
-            sample_size = int(item.get("closed_count") or 0)
+            feedback_item = feedback_map.get(key, {})
+            paper_sample_size = int(item.get("closed_count") or 0)
+            real_sample_size = int(feedback_item.get("real_sample_size") or 0)
+            sample_size = paper_sample_size + real_sample_size
             open_count = int(item.get("open_count") or 0)
             simulated_samples = current_group_sim_samples[key]
             simulated_sample_size = round(sum(simulated_samples) / len(simulated_samples), 1) if simulated_samples else 0.0
-            hit_rate = round(int(item.get("win_count") or 0) / max(sample_size, 1) * 100, 2) if sample_size else 0.0
-            avg_return_pct = round(float(item.get("return_sum") or 0.0) / max(sample_size, 1), 2) if sample_size else 0.0
+            hit_rate = float(feedback_item.get("hit_rate") or 0.0) if sample_size else 0.0
+            avg_return_pct = float(feedback_item.get("avg_return_pct") or 0.0) if sample_size else 0.0
             current_score = round(
                 sum(current_group_scores[key]) / len(current_group_scores[key]),
                 2,
             ) if current_group_scores[key] else 0.0
-            calibration_weight = self._feedback_group_weight(
-                {
-                    "sample_size": sample_size,
-                    "hit_rate": hit_rate,
-                    "avg_return_pct": avg_return_pct,
-                }
-            )
+            calibration_weight = self._feedback_group_weight(feedback_item or {"sample_size": sample_size, "hit_rate": hit_rate, "avg_return_pct": avg_return_pct})
             influence_scores[key] = current_score * calibration_weight if current_score > 0 else 0.0
             groups.append(
                 {
                     "key": key,
                     "label": label,
                     "sample_size": sample_size,
+                    "paper_sample_size": paper_sample_size,
+                    "real_sample_size": real_sample_size,
                     "open_count": open_count,
                     "simulated_sample_size": simulated_sample_size,
                     "hit_rate": hit_rate,
                     "avg_return_pct": avg_return_pct,
-                    "max_drawdown_pct": round(float(item.get("max_drawdown_pct") or 0.0), 2),
+                    "max_drawdown_pct": round(max(float(item.get("max_drawdown_pct") or 0.0), float(feedback_item.get("avg_drawdown_pct") or 0.0)), 2),
                     "current_score": current_score,
                     "calibration_weight": calibration_weight,
                     "learning_status": (
@@ -1637,6 +1700,10 @@ class StockMonitor:
                 process_lines.append(
                     f"滚动模拟正在学习，当前组内滚动样本均值约 {float(item['simulated_sample_size']):.1f} 笔。"
                 )
+            if int(item["paper_sample_size"]) > 0 or int(item["real_sample_size"]) > 0:
+                process_lines.append(
+                    f"闭环样本由纸面交易 {int(item['paper_sample_size'])} 笔 + 真实交易 {int(item['real_sample_size'])} 笔组成。"
+                )
             if int(item["open_count"]) > 0 and int(item["sample_size"]) == 0:
                 process_lines.append(
                     f"纸面交易已开仓 {int(item['open_count'])} 笔，但尚未出现止盈/止损/超期/模型走弱离场，所以已闭环样本暂为 0。"
@@ -1654,27 +1721,34 @@ class StockMonitor:
                 f"当前组内平均分 {float(item['current_score']):.2f}，"
                 f"对今日最终量化结论贡献约 {contribution_pct:.2f}% ，"
                 f"纸面交易调权系数 {float(item['calibration_weight']):.2f}，"
-                f"滚动模拟样本均值 {float(item['simulated_sample_size']):.1f}。"
+                f"滚动模拟样本均值 {float(item['simulated_sample_size']):.1f}，"
+                f"真实闭环样本 {int(item['real_sample_size'])} 笔。"
             )
 
         model_rows: list[dict[str, Any]] = []
         for item in summary_map.values():
             if str(item.get("model_scope") or "") != "model":
                 continue
-            sample_size = int(item.get("closed_count") or 0)
+            key = str(item.get("model_key") or "")
+            feedback_item = feedback_map.get(key, {})
+            paper_sample_size = int(item.get("closed_count") or 0)
+            real_sample_size = int(feedback_item.get("real_sample_size") or 0)
+            sample_size = paper_sample_size + real_sample_size
             if sample_size <= 0:
                 continue
-            hit_rate = round(int(item.get("win_count") or 0) / sample_size * 100, 2)
-            avg_return_pct = round(float(item.get("return_sum") or 0.0) / sample_size, 2)
+            hit_rate = float(feedback_item.get("hit_rate") or 0.0)
+            avg_return_pct = float(feedback_item.get("avg_return_pct") or 0.0)
             model_rows.append(
                 {
-                    "key": str(item.get("model_key") or ""),
+                    "key": key,
                     "label": str(item.get("model_label") or item.get("model_key") or ""),
                     "sample_size": sample_size,
+                    "paper_sample_size": paper_sample_size,
+                    "real_sample_size": real_sample_size,
                     "open_count": int(item.get("open_count") or 0),
                     "hit_rate": hit_rate,
                     "avg_return_pct": avg_return_pct,
-                    "max_drawdown_pct": round(float(item.get("max_drawdown_pct") or 0.0), 2),
+                    "max_drawdown_pct": round(max(float(item.get("max_drawdown_pct") or 0.0), float(feedback_item.get("avg_drawdown_pct") or 0.0)), 2),
                     "learning_status": self._describe_learning_status(sample_size, hit_rate, avg_return_pct),
                 }
             )
@@ -1695,6 +1769,7 @@ class StockMonitor:
         )
 
         overview_lines: list[str] = []
+        real_trade_sample_total = sum(int(item.get("real_sample_size") or 0) for item in groups)
         if any(int(item["sample_size"]) > 0 for item in groups):
             leader = max(
                 groups,
@@ -1716,6 +1791,10 @@ class StockMonitor:
             dominant = max(groups, key=lambda item: float(item.get("contribution_pct") or 0.0))
             overview_lines.append(
                 f"今日持仓决策里，{dominant['label']}当前影响更大，贡献约 {float(dominant['contribution_pct']):.2f}% 。"
+            )
+        if real_trade_sample_total > 0:
+            overview_lines.append(
+                f"最近 {lookback_days} 天已纳入真实交易闭环样本 {real_trade_sample_total} 笔，用来和纸面交易结果一起纠偏模型权重。"
             )
         if not overview_lines:
             overview_lines.append("两套模型的纸面交易样本还在积累中，当前先以实时信号强弱为主。")

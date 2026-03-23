@@ -30,7 +30,7 @@ from src.ai_stock_monitoring.monitor import (
 from src.ai_stock_monitoring.quant import build_quant_signal
 from src.ai_stock_monitoring.providers.base import MarketDataProvider, PriceBar, Quote
 from src.ai_stock_monitoring.security import verify_password
-from src.ai_stock_monitoring.trade_advisor import build_market_action_summary, build_portfolio_profile, build_position_summary, build_recommended_price_plan, build_stock_comprehensive_advice
+from src.ai_stock_monitoring.trade_advisor import build_market_action_summary, build_portfolio_profile, build_position_summary, build_real_trade_feedback, build_recommended_price_plan, build_stock_comprehensive_advice, build_trade_reconciliation
 
 
 class RefreshAwareProvider(MarketDataProvider):
@@ -562,6 +562,91 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(profile["closed_positions"])
         self.assertEqual(profile["closed_positions"][0]["symbol"], "600519")
         self.assertEqual(profile["closed_positions"][0]["total_commission_fee"], 10.0)
+
+    def test_build_trade_reconciliation_tracks_round_trips_slippage_and_exit_reason(self) -> None:
+        trades = [
+            {"id": 1, "symbol": "600519", "side": "buy", "price": 100.0, "quantity": 100, "commission_fee": 5.0, "traded_at": "2026-03-01T10:00:00+08:00", "note": "按计划建仓"},
+            {"id": 2, "symbol": "600519", "side": "sell", "price": 111.0, "quantity": 100, "commission_fee": 5.0, "traded_at": "2026-03-12T10:00:00+08:00", "note": "止盈兑现"},
+        ]
+        analysis_rows = [
+            {
+                "symbol": "600519",
+                "created_at": "2026-03-01T09:30:00+08:00",
+                "market_snapshot": json.dumps(
+                    {
+                        "quant_probability": 76.0,
+                        "quant_model_breakdown": [
+                            {"key": "trend_following", "score": 72},
+                            {"key": "weekly_resonance", "score": 68},
+                            {"key": "support_strength", "score": 66},
+                            {"key": "msci_momentum", "score": 74},
+                            {"key": "quality_stability", "score": 71},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                "analysis_json": json.dumps(
+                    {
+                        "suggested_add_price": 99.0,
+                        "suggested_reduce_price": 110.0,
+                        "suggested_stop_loss_price": 94.0,
+                        "recommended_buy_price_range": "98.00 - 100.00",
+                        "recommended_sell_price_range": "109.00 - 111.00",
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        ]
+        snapshots = [{"symbol": "600519", "display_name": "贵州茅台", "latest_price": 111.0}]
+        reconciliation = build_trade_reconciliation(trades, analysis_rows, snapshots)
+        self.assertEqual(reconciliation["summary"]["closed_round_trips"], 1)
+        self.assertEqual(reconciliation["closed_round_trips"][0]["exit_category"], "take_profit")
+        self.assertAlmostEqual(reconciliation["closed_round_trips"][0]["buy_slippage_pct"], 1.01, places=2)
+        self.assertAlmostEqual(reconciliation["closed_round_trips"][0]["sell_slippage_pct"], 0.91, places=2)
+        self.assertEqual(reconciliation["execution_rows"][0]["reference_label"], "建议减仓价")
+
+    def test_build_real_trade_feedback_uses_closed_round_trips(self) -> None:
+        trades = [
+            {"id": 1, "symbol": "600519", "side": "buy", "price": 100.0, "quantity": 100, "commission_fee": 5.0, "traded_at": "2026-03-01T10:00:00+08:00", "note": ""},
+            {"id": 2, "symbol": "600519", "side": "sell", "price": 112.0, "quantity": 100, "commission_fee": 5.0, "traded_at": "2026-03-08T10:00:00+08:00", "note": "止盈"},
+        ]
+        analysis_rows = [
+            {
+                "symbol": "600519",
+                "created_at": "2026-03-01T09:30:00+08:00",
+                "market_snapshot": json.dumps(
+                    {
+                        "quant_probability": 78.0,
+                        "quant_model_breakdown": [
+                            {"key": "trend_following", "score": 72},
+                            {"key": "weekly_resonance", "score": 69},
+                            {"key": "support_strength", "score": 67},
+                            {"key": "msci_momentum", "score": 75},
+                            {"key": "quality_stability", "score": 73},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                "analysis_json": json.dumps(
+                    {
+                        "suggested_add_price": 99.5,
+                        "suggested_reduce_price": 111.0,
+                        "suggested_stop_loss_price": 95.0,
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        ]
+        feedback = build_real_trade_feedback(
+            trades,
+            analysis_rows,
+            [{"symbol": "600519", "display_name": "贵州茅台", "latest_price": 112.0}],
+            as_of=datetime.fromisoformat("2026-03-10T00:00:00+00:00"),
+        )
+        self.assertIn("professional", feedback)
+        self.assertIn("adaptive", feedback)
+        self.assertGreater(int(feedback["professional"]["real_sample_size"]), 0)
+        self.assertGreater(float(feedback["professional"]["avg_return_pct"]), 0.0)
 
     def test_build_stock_comprehensive_advice_includes_prices_and_dcf_reason(self) -> None:
         advice = build_stock_comprehensive_advice(

@@ -285,6 +285,228 @@
 </section>
 {% endif %}
 
+{% if trade_reconciliation %}
+<section class="card" style="margin-bottom: 16px;">
+    <h2>真实交易对账</h2>
+    <p class="muted">这里把真实买卖按 FIFO 回合重建，用来追踪每次入场、持有、退出的真实执行质量。</p>
+    <div class="metric-grid" style="margin-bottom: 16px;">
+        <div class="metric-card">
+            <strong>已闭环回合</strong>
+            <span class="muted">{{ trade_reconciliation['summary']['closed_round_trips'] }}</span>
+        </div>
+        <div class="metric-card">
+            <strong>开放批次</strong>
+            <span class="muted">{{ trade_reconciliation['summary']['open_lots'] }}</span>
+        </div>
+        <div class="metric-card">
+            <strong>胜率</strong>
+            <span class="muted">{{ '%.2f%%'|format(trade_reconciliation['summary']['win_rate']) }}</span>
+        </div>
+        <div class="metric-card">
+            <strong>已实现盈亏</strong>
+            <span class="{% if trade_reconciliation['summary']['realized_pnl'] > 0 %}pnl-profit{% elif trade_reconciliation['summary']['realized_pnl'] < 0 %}pnl-loss{% else %}muted{% endif %}">
+                {{ '%.2f'|format(trade_reconciliation['summary']['realized_pnl']) }}
+            </span>
+        </div>
+        <div class="metric-card">
+            <strong>平均收益</strong>
+            <span class="{% if trade_reconciliation['summary']['avg_return_pct'] > 0 %}pnl-profit{% elif trade_reconciliation['summary']['avg_return_pct'] < 0 %}pnl-loss{% else %}muted{% endif %}">
+                {{ '%.2f%%'|format(trade_reconciliation['summary']['avg_return_pct']) }}
+            </span>
+        </div>
+        <div class="metric-card">
+            <strong>平均持有天数</strong>
+            <span class="muted">{{ trade_reconciliation['summary']['avg_holding_days'] }}</span>
+        </div>
+        <div class="metric-card">
+            <strong>累计手续费</strong>
+            <span class="muted">{{ '%.2f'|format(trade_reconciliation['summary']['total_commission_fee']) }}</span>
+        </div>
+        <div class="metric-card">
+            <strong>平均买入滑点</strong>
+            <span class="{% if trade_reconciliation['summary']['avg_buy_slippage_pct'] is not none and trade_reconciliation['summary']['avg_buy_slippage_pct'] <= 0 %}pnl-profit{% elif trade_reconciliation['summary']['avg_buy_slippage_pct'] is not none and trade_reconciliation['summary']['avg_buy_slippage_pct'] > 0 %}pnl-loss{% else %}muted{% endif %}">
+                {{ '%.2f%%'|format(trade_reconciliation['summary']['avg_buy_slippage_pct']) if trade_reconciliation['summary']['avg_buy_slippage_pct'] is not none else '-' }}
+            </span>
+        </div>
+        <div class="metric-card">
+            <strong>平均卖出滑点</strong>
+            <span class="{% if trade_reconciliation['summary']['avg_sell_slippage_pct'] is not none and trade_reconciliation['summary']['avg_sell_slippage_pct'] >= 0 %}pnl-profit{% elif trade_reconciliation['summary']['avg_sell_slippage_pct'] is not none and trade_reconciliation['summary']['avg_sell_slippage_pct'] < 0 %}pnl-loss{% else %}muted{% endif %}">
+                {{ '%.2f%%'|format(trade_reconciliation['summary']['avg_sell_slippage_pct']) if trade_reconciliation['summary']['avg_sell_slippage_pct'] is not none else '-' }}
+            </span>
+        </div>
+    </div>
+
+    {% if trade_reconciliation['summary']['exit_summaries'] %}
+    <h3>离场规则统计</h3>
+    <div class="table-scroll" style="margin-bottom: 16px;">
+        <table class="compact-table wide-table">
+            <thead>
+            <tr>
+                <th>离场类型</th>
+                <th>次数</th>
+                <th>胜率</th>
+                <th>平均收益</th>
+                <th>净收益</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in trade_reconciliation['summary']['exit_summaries'] %}
+            <tr>
+                <td>{{ item['exit_label'] }}</td>
+                <td>{{ item['count'] }}</td>
+                <td>{{ '%.2f%%'|format(item['win_rate']) }}</td>
+                <td class="{% if item['avg_return_pct'] > 0 %}pnl-profit{% elif item['avg_return_pct'] < 0 %}pnl-loss{% else %}muted{% endif %}">{{ '%.2f%%'|format(item['avg_return_pct']) }}</td>
+                <td class="{% if item['net_pnl'] > 0 %}pnl-profit{% elif item['net_pnl'] < 0 %}pnl-loss{% else %}muted{% endif %}">{{ '%.2f'|format(item['net_pnl']) }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <h3>回合级对账</h3>
+    <div class="table-scroll" style="margin-bottom: 16px;">
+        <table class="compact-table wide-table">
+            <thead>
+            <tr>
+                <th>股票</th>
+                <th>数量</th>
+                <th>入场</th>
+                <th>离场</th>
+                <th>入场价</th>
+                <th>离场价</th>
+                <th>手续费</th>
+                <th>净收益</th>
+                <th>收益率</th>
+                <th>持有天数</th>
+                <th>买入滑点</th>
+                <th>卖出滑点</th>
+                <th>离场类型</th>
+                <th>离场原因</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in trade_reconciliation['closed_round_trips'] %}
+            <tr>
+                <td>{{ item['symbol'] }} {{ item['display_name'] }}</td>
+                <td>{{ item['quantity'] }}</td>
+                <td>{{ format_full_timestamp(item['entry_at']) }}</td>
+                <td>{{ format_full_timestamp(item['exit_at']) }}</td>
+                <td>{{ '%.5f'|format(item['entry_price']) }}</td>
+                <td>{{ '%.5f'|format(item['exit_price']) }}</td>
+                <td>{{ '%.2f'|format(item['commission_fee']) }}</td>
+                <td class="{% if item['net_pnl'] > 0 %}pnl-profit{% elif item['net_pnl'] < 0 %}pnl-loss{% else %}muted{% endif %}">{{ '%.2f'|format(item['net_pnl']) }}</td>
+                <td class="{% if item['net_return_pct'] > 0 %}pnl-profit{% elif item['net_return_pct'] < 0 %}pnl-loss{% else %}muted{% endif %}">{{ '%.2f%%'|format(item['net_return_pct']) }}</td>
+                <td>{{ item['holding_days'] }}</td>
+                <td class="{% if item['buy_slippage_pct'] is not none and item['buy_slippage_pct'] <= 0 %}pnl-profit{% elif item['buy_slippage_pct'] is not none and item['buy_slippage_pct'] > 0 %}pnl-loss{% else %}muted{% endif %}">
+                    {{ '%.2f%%'|format(item['buy_slippage_pct']) if item['buy_slippage_pct'] is not none else '-' }}
+                    <div class="muted">{{ item['buy_reference_label'] or '无计划参考' }}</div>
+                </td>
+                <td class="{% if item['sell_slippage_pct'] is not none and item['sell_slippage_pct'] >= 0 %}pnl-profit{% elif item['sell_slippage_pct'] is not none and item['sell_slippage_pct'] < 0 %}pnl-loss{% else %}muted{% endif %}">
+                    {{ '%.2f%%'|format(item['sell_slippage_pct']) if item['sell_slippage_pct'] is not none else '-' }}
+                    <div class="muted">{{ item['sell_reference_label'] or '无计划参考' }}</div>
+                </td>
+                <td>{{ item['exit_label'] }}</td>
+                <td>{{ item['exit_reason'] }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="14">当前筛选范围内还没有形成完整买卖回合。</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if trade_reconciliation['open_lots'] %}
+    <h3>未平仓批次</h3>
+    <div class="table-scroll" style="margin-bottom: 16px;">
+        <table class="compact-table wide-table">
+            <thead>
+            <tr>
+                <th>股票</th>
+                <th>数量</th>
+                <th>入场时间</th>
+                <th>入场价</th>
+                <th>最新价</th>
+                <th>浮盈亏</th>
+                <th>收益率</th>
+                <th>持有天数</th>
+                <th>买入滑点</th>
+                <th>止损参考</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in trade_reconciliation['open_lots'] %}
+            <tr>
+                <td>{{ item['symbol'] }} {{ item['display_name'] }}</td>
+                <td>{{ item['quantity'] }}</td>
+                <td>{{ format_full_timestamp(item['entry_at']) }}</td>
+                <td>{{ '%.5f'|format(item['entry_price']) }}</td>
+                <td>{{ '%.5f'|format(item['latest_price']) }}</td>
+                <td class="{% if item['unrealized_pnl'] > 0 %}pnl-profit{% elif item['unrealized_pnl'] < 0 %}pnl-loss{% else %}muted{% endif %}">{{ '%.2f'|format(item['unrealized_pnl']) }}</td>
+                <td class="{% if item['unrealized_return_pct'] > 0 %}pnl-profit{% elif item['unrealized_return_pct'] < 0 %}pnl-loss{% else %}muted{% endif %}">{{ '%.2f%%'|format(item['unrealized_return_pct']) }}</td>
+                <td>{{ item['holding_days'] }}</td>
+                <td class="{% if item['buy_slippage_pct'] is not none and item['buy_slippage_pct'] <= 0 %}pnl-profit{% elif item['buy_slippage_pct'] is not none and item['buy_slippage_pct'] > 0 %}pnl-loss{% else %}muted{% endif %}">
+                    {{ '%.2f%%'|format(item['buy_slippage_pct']) if item['buy_slippage_pct'] is not none else '-' }}
+                </td>
+                <td>{{ '%.2f'|format(item['stop_loss_reference_price']) if item['stop_loss_reference_price'] else '-' }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
+    <h3>逐笔执行偏差</h3>
+    <div class="table-scroll">
+        <table class="compact-table wide-table">
+            <thead>
+            <tr>
+                <th>成交时间</th>
+                <th>股票</th>
+                <th>方向</th>
+                <th>成交价</th>
+                <th>计划参考价</th>
+                <th>滑点</th>
+                <th>手续费</th>
+                <th>数量</th>
+                <th>备注</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in trade_reconciliation['execution_rows'] %}
+            <tr>
+                <td>{{ format_full_timestamp(item['traded_at']) }}</td>
+                <td>{{ item['symbol'] }} {{ item['display_name'] }}</td>
+                <td>{{ '买入' if item['side'] == 'buy' else '卖出' }}</td>
+                <td>{{ '%.5f'|format(item['price']) }}</td>
+                <td>
+                    {% if item['reference_price'] is not none %}
+                    {{ '%.5f'|format(item['reference_price']) }}
+                    <div class="muted">{{ item['reference_label'] or '计划参考价' }}</div>
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+                <td class="{% if item['slippage_pct'] is none %}muted{% elif item['side'] == 'buy' and item['slippage_pct'] <= 0 %}pnl-profit{% elif item['side'] == 'sell' and item['slippage_pct'] >= 0 %}pnl-profit{% else %}pnl-loss{% endif %}">
+                    {{ '%.2f%%'|format(item['slippage_pct']) if item['slippage_pct'] is not none else '-' }}
+                </td>
+                <td>{{ '%.2f'|format(item['commission_fee']) }}</td>
+                <td>{{ item['quantity'] }}</td>
+                <td>{{ item['note'] or '-' }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="9">当前筛选范围内还没有执行记录。</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
+
 {% if latest_analysis %}
 <section class="card" style="margin-bottom: 16px;">
     <h2>最新分析</h2>
