@@ -1351,6 +1351,15 @@ class StockMonitor:
             return self._send_daily_review_email(owner_username, resolved_date, force=force)
         return self._send_periodic_review_email(owner_username, period_type, resolved_date, force=force)
 
+    @staticmethod
+    def _review_email_enabled(email_settings: Any) -> bool:
+        return bool(
+            email_settings["recipient_email"]
+            and email_settings["smtp_server"]
+            and email_settings["sender_email"]
+            and email_settings["sender_password"]
+        )
+
     def _send_daily_review_email(
         self,
         owner_username: str,
@@ -1366,6 +1375,9 @@ class StockMonitor:
         job_state = get_job_state(self.settings.db_path, owner_username, "post_close_holding_review")
         if not force and job_state and job_state["last_run_marker"] == marker:
             return EmailDeliveryResult(False, "已发送", "当日收盘复盘邮件已发送")
+        email_settings = get_email_settings(self.settings.db_path, owner_username)
+        if not self._review_email_enabled(email_settings):
+            return EmailDeliveryResult(False, "跳过", "当前账号未启用复盘邮件")
         snapshots = self._collect_owner_snapshots_for_review(owner_username)
         portfolio_settings = get_portfolio_settings(self.settings.db_path, owner_username)
         portfolio_profile = build_portfolio_profile(
@@ -1374,7 +1386,6 @@ class StockMonitor:
             float(portfolio_settings["total_investment_amount"] or 0.0),
         )
         model_learning = self._build_model_learning_summary(owner_username, snapshots)
-        email_settings = get_email_settings(self.settings.db_path, owner_username)
         email_result = send_message(
             email_settings,
             subject=f"[收盘持仓复盘] {owner_username} {marker}",
@@ -1422,6 +1433,9 @@ class StockMonitor:
         job_state = get_job_state(self.settings.db_path, owner_username, job_name)
         if not force and job_state and job_state["last_run_marker"] == marker:
             return EmailDeliveryResult(False, "已发送", f"{period_label_map.get(period_type, period_type)}邮件已发送")
+        email_settings = get_email_settings(self.settings.db_path, owner_username)
+        if not self._review_email_enabled(email_settings):
+            return EmailDeliveryResult(False, "跳过", "当前账号未启用复盘邮件")
         snapshots = self._collect_owner_snapshots_for_review(owner_username)
         portfolio_settings = get_portfolio_settings(self.settings.db_path, owner_username)
         portfolio_profile = build_portfolio_profile(
@@ -1471,7 +1485,6 @@ class StockMonitor:
             trade_reconciliation=trade_reconciliation,
             model_learning=model_learning,
         )
-        email_settings = get_email_settings(self.settings.db_path, owner_username)
         email_result = send_message(
             email_settings,
             subject=f"[{period_label_map.get(period_type, period_type)}] {owner_username} {start_date.isoformat()}~{end_date.isoformat()}",
