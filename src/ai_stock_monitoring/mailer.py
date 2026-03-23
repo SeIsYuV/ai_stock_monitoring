@@ -160,7 +160,7 @@ def _render_positions_table(active_positions: list[dict[str, Any]]) -> str:
 
 
 def _alert_direction(trigger_type: str) -> str:
-    if trigger_type in {"BOLL上轨卖出", "低股息率卖出", "量化走弱卖出", "30周线下穿60周线"}:
+    if trigger_type in {"BOLL上轨卖出", "低股息率卖出", "量化走弱卖出", "30周线下穿60周线", "风险控制卖出"}:
         return "sell"
     return "buy"
 
@@ -201,10 +201,18 @@ def _build_alert_metric_summary(payload: dict[str, Any]) -> dict[str, str]:
         probability = float(indicator_values.get("quant_probability") or 0.0)
         threshold = float(indicator_values.get("probability_threshold") or 0.0)
         return {"threshold_label": "量化阈值", "threshold_value": f"{threshold:.2f}%", "deviation_label": "当前概率", "deviation_value": f"{probability:.2f}%"}
+    if trigger_type == "择时量化":
+        timing_score = float(indicator_values.get("timing_quant_score") or 0.0)
+        probability = float(indicator_values.get("quant_probability") or 0.0)
+        return {"threshold_label": "择时分", "threshold_value": f"{timing_score:.2f}", "deviation_label": "量化总概率", "deviation_value": f"{probability:.2f}%"}
     if trigger_type == "量化走弱卖出":
         probability = float(indicator_values.get("quant_probability") or 0.0)
         threshold = float(indicator_values.get("sell_probability_threshold") or 0.0)
         return {"threshold_label": "走弱阈值", "threshold_value": f"{threshold:.2f}%", "deviation_label": "当前概率", "deviation_value": f"{probability:.2f}%"}
+    if trigger_type == "风险控制卖出":
+        risk_score = float(indicator_values.get("risk_control_score") or 0.0)
+        probability = float(indicator_values.get("quant_probability") or 0.0)
+        return {"threshold_label": "风控分", "threshold_value": f"{risk_score:.2f}", "deviation_label": "量化总概率", "deviation_value": f"{probability:.2f}%"}
     if trigger_type == "股息率":
         dividend_yield = float(indicator_values.get("dividend_yield") or 0.0)
         return {"threshold_label": "股息率门槛", "threshold_value": "4.50%", "deviation_label": "当前股息率", "deviation_value": f"{dividend_yield:.2f}%"}

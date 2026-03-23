@@ -30,6 +30,7 @@ BUY_SIGNAL_WEIGHTS: dict[str, int] = {
     "30周线上穿60周线": 3,
     "有效突破60周线": 3,
     "量化盈利概率": 4,
+    "择时量化": 4,
 }
 
 SELL_SIGNAL_WEIGHTS: dict[str, int] = {
@@ -37,6 +38,7 @@ SELL_SIGNAL_WEIGHTS: dict[str, int] = {
     "30周线下穿60周线": 3,
     "低股息率卖出": 2,
     "量化走弱卖出": 4,
+    "风险控制卖出": 4,
 }
 
 BUY_SIGNAL_SET = set(BUY_SIGNAL_WEIGHTS)
@@ -61,6 +63,8 @@ SIGNAL_CATEGORY_MAPPING: dict[str, str] = {
     "低股息率卖出": "dividend",
     "量化盈利概率": "quant",
     "量化走弱卖出": "quant",
+    "择时量化": "quant",
+    "风险控制卖出": "quant",
 }
 
 
@@ -1035,6 +1039,7 @@ def build_portfolio_profile(
 
     snapshot_map = {str(item["symbol"]): dict(item) for item in snapshots}
     holding_items: list[dict[str, Any]] = []
+    closed_items: list[dict[str, Any]] = []
     total_market_value = 0.0
     total_cost_basis = 0.0
     total_realized_pnl = 0.0
@@ -1048,6 +1053,20 @@ def build_portfolio_profile(
         total_sell_amount += float(position_summary["total_sell_amount"])
         position_quantity = int(position_summary["position_quantity"])
         if position_quantity <= 0:
+            if float(position_summary["total_sell_amount"]) > 0:
+                snapshot = _neutral_snapshot_from_position(symbol, position_summary, snapshot_map.get(symbol))
+                closed_items.append(
+                    {
+                        "symbol": symbol,
+                        "display_name": str(snapshot.get("display_name") or symbol),
+                        "realized_pnl": float(position_summary["realized_pnl"]),
+                        "total_buy_amount": float(position_summary["total_buy_amount"]),
+                        "total_sell_amount": float(position_summary["total_sell_amount"]),
+                        "total_commission_fee": float(position_summary.get("total_commission_fee") or 0.0),
+                        "trade_count": int(position_summary["trade_count"]),
+                        "last_traded_at": max((str(item.get("traded_at") or "") for item in rows), default=""),
+                    }
+                )
             continue
 
         snapshot = _neutral_snapshot_from_position(symbol, position_summary, snapshot_map.get(symbol))
@@ -1097,6 +1116,7 @@ def build_portfolio_profile(
             "total_unrealized_pnl_pct": 0.0,
             "total_realized_pnl": round(total_realized_pnl, 2),
             "active_positions": [],
+            "closed_positions": closed_items,
             "comprehensive_advice": "当前没有持仓，建议先等待更明确的买入信号，再逐步建立试探仓位。",
             "overall_adjustment_suggestions": ["当前空仓，建议先从小仓位试探，不必急于满仓。"],
             "priority_reduce_positions": [],
@@ -1166,6 +1186,13 @@ def build_portfolio_profile(
         item.update(risk_info)
 
     holding_items.sort(key=lambda entry: (-entry["weight_pct"], entry["symbol"]))
+    closed_items.sort(
+        key=lambda entry: (
+            str(entry.get("last_traded_at") or ""),
+            str(entry.get("symbol") or ""),
+        ),
+        reverse=True,
+    )
 
     weighted_quant_probability = round(
         sum(item["quant_probability"] * item["weight_pct"] for item in holding_items) / 100,
@@ -1288,6 +1315,7 @@ def build_portfolio_profile(
         "total_unrealized_pnl_pct": total_unrealized_pnl_pct,
         "total_realized_pnl": round(total_realized_pnl, 2),
         "active_positions": holding_items,
+        "closed_positions": closed_items,
         "comprehensive_advice": comprehensive_advice,
         "target_holding_ratio_mid": adjustment_advice["target_holding_ratio_mid"],
         "overall_adjustment_suggestions": adjustment_advice["overall_suggestions"],
@@ -1322,6 +1350,7 @@ def build_position_summary(trades: Sequence[Mapping[str, Any]]) -> dict[str, Any
     realized_pnl = 0.0
     total_buy_amount = 0.0
     total_sell_amount = 0.0
+    total_commission_fee = 0.0
     invalid_sell_quantity = 0
 
     for trade in trades:
@@ -1329,21 +1358,24 @@ def build_position_summary(trades: Sequence[Mapping[str, Any]]) -> dict[str, Any
         quantity = int(trade["quantity"])
         price = float(trade["price"])
         amount = price * quantity
+        commission_fee = float(trade.get("commission_fee") or max(amount * 0.0003, 5.0))
+        total_commission_fee += commission_fee
 
         if side == "buy":
-            total_buy_amount += amount
-            cost_basis_total += amount
+            total_buy_amount += amount + commission_fee
+            cost_basis_total += amount + commission_fee
             position_quantity += quantity
             continue
 
-        total_sell_amount += amount
+        total_sell_amount += amount - commission_fee
         if position_quantity <= 0:
             invalid_sell_quantity += quantity
             continue
 
         matched_quantity = min(quantity, position_quantity)
         average_cost = cost_basis_total / position_quantity if position_quantity else 0.0
-        realized_pnl += (price - average_cost) * matched_quantity
+        matched_fee = commission_fee * (matched_quantity / quantity) if quantity > 0 else 0.0
+        realized_pnl += (price - average_cost) * matched_quantity - matched_fee
         cost_basis_total -= average_cost * matched_quantity
         position_quantity -= matched_quantity
         if quantity > matched_quantity:
@@ -1357,6 +1389,7 @@ def build_position_summary(trades: Sequence[Mapping[str, Any]]) -> dict[str, Any
         "realized_pnl": round(realized_pnl, 2),
         "total_buy_amount": round(total_buy_amount, 2),
         "total_sell_amount": round(total_sell_amount, 2),
+        "total_commission_fee": round(total_commission_fee, 2),
         "trade_count": len(trades),
         "invalid_sell_quantity": invalid_sell_quantity,
     }

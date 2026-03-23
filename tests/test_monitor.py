@@ -8,12 +8,14 @@ from fastapi.testclient import TestClient
 
 from src.ai_stock_monitoring.app import _build_model_review_payload, _format_snapshot_timestamp, create_app
 from src.ai_stock_monitoring.config import AppSettings
-from src.ai_stock_monitoring.database import add_trade_record, create_user, get_alert_history, get_connection, get_login_unlock_code, get_portfolio_settings, get_snapshot, get_snapshots, get_user, initialize_database, list_model_paper_trades, list_recent_login_events, list_trade_records, upsert_snapshot
+from src.ai_stock_monitoring.database import add_trade_record, create_user, get_alert_history, get_connection, get_login_unlock_code, get_monitored_stocks, get_portfolio_settings, get_snapshot, get_snapshots, get_user, initialize_database, list_model_paper_trades, list_recent_login_events, list_trade_records, upsert_snapshot
 from src.ai_stock_monitoring.mailer import build_alert_email_body, build_alert_email_html_body, build_portfolio_review_email_body
 from src.ai_stock_monitoring.market_hours import TradeCalendar, get_market_status
 from src.ai_stock_monitoring.monitor import (
     SnapshotComputation,
     StockMonitor,
+    build_risk_control_signal,
+    build_timing_quant_signal,
     build_quant_sell_signal,
     calculate_bollinger_lower_band,
     calculate_bollinger_upper_band,
@@ -545,6 +547,22 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(profile["comprehensive_advice"])
         self.assertTrue(profile["active_positions"][0]["comprehensive_advice"])
 
+    def test_build_position_summary_and_closed_positions_include_commission(self) -> None:
+        trades = [
+            {"symbol": "600519", "side": "buy", "price": 100.0, "quantity": 100, "commission_fee": 5.0, "traded_at": "2026-03-01T10:00:00+08:00"},
+            {"symbol": "600519", "side": "sell", "price": 112.0, "quantity": 100, "commission_fee": 5.0, "traded_at": "2026-03-10T10:00:00+08:00"},
+        ]
+        summary = build_position_summary(trades)
+        self.assertEqual(summary["position_quantity"], 0)
+        self.assertEqual(summary["total_commission_fee"], 10.0)
+        self.assertAlmostEqual(summary["realized_pnl"], 1190.0, places=2)
+
+        profile = build_portfolio_profile(trades, [])
+        self.assertFalse(profile["active_positions"])
+        self.assertTrue(profile["closed_positions"])
+        self.assertEqual(profile["closed_positions"][0]["symbol"], "600519")
+        self.assertEqual(profile["closed_positions"][0]["total_commission_fee"], 10.0)
+
     def test_build_stock_comprehensive_advice_includes_prices_and_dcf_reason(self) -> None:
         advice = build_stock_comprehensive_advice(
             {
@@ -579,6 +597,42 @@ class MonitorTests(unittest.TestCase):
         self.assertLessEqual(advice["sell_recommendation_level"], 10)
         self.assertIsNone(advice["dcf_intrinsic_value"])
         self.assertIn("DCF", advice["dcf_reason"])
+
+    def test_timing_and_risk_control_signals_from_quant_breakdown(self) -> None:
+        snapshot = SnapshotComputation(
+            symbol="600519",
+            display_name="贵州茅台",
+            latest_price=100.0,
+            ma_250=95.0,
+            ma_30w=96.0,
+            ma_60w=92.0,
+            prev_ma_30w=95.0,
+            prev_ma_60w=91.0,
+            boll_mid=98.0,
+            boll_lower=94.0,
+            boll_upper=108.0,
+            dividend_yield=3.8,
+            quant_probability=78.0,
+            quant_model_breakdown=json.dumps(
+                [
+                    {"key": "trend_following", "label": "趋势跟随", "score": 82},
+                    {"key": "weekly_resonance", "label": "周线共振", "score": 79},
+                    {"key": "support_strength", "label": "支撑强度", "score": 77},
+                    {"key": "volatility_filter", "label": "波动过滤", "score": 68},
+                    {"key": "risk_reward", "label": "盈亏比", "score": 66},
+                ],
+                ensure_ascii=False,
+            ),
+            trigger_state="择时量化",
+            trigger_detail="test",
+            triggered_labels=("择时量化",),
+            weekly_crossed=False,
+            updated_at=datetime.fromisoformat("2026-03-20T10:00:00+08:00"),
+        )
+        timing_signal = build_timing_quant_signal(snapshot)
+        risk_signal = build_risk_control_signal(snapshot)
+        self.assertTrue(timing_signal.should_alert)
+        self.assertFalse(risk_signal.should_alert)
 
     def test_enhanced_quant_models_are_in_snapshot_breakdown(self) -> None:
         monitor = StockMonitor(AppSettings(provider_name="mock"))
@@ -624,6 +678,26 @@ class MonitorTests(unittest.TestCase):
                 self.assertIn("DCF 代理内在价值", response.text)
                 self.assertIn("大盘环境", response.text)
                 self.assertIn("财报节奏", response.text)
+
+    def test_add_stock_falls_back_to_provider_profile_name_when_refresh_fails(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock"))
+            with TestClient(app) as client:
+                client.post(
+                    "/login",
+                    data={"username": "admin", "password": "admin123"},
+                    follow_redirects=False,
+                )
+                with patch.object(app.state.monitor, "refresh_symbol_snapshot", side_effect=RuntimeError("refresh failed")):
+                    with patch.object(app.state.monitor.provider, "get_symbol_profile", return_value={"display_name": "贵州茅台"}):
+                        response = client.post(
+                            "/stocks",
+                            data={"symbols_text": "600519"},
+                            follow_redirects=False,
+                        )
+                self.assertEqual(response.status_code, 303)
+                monitored_rows = get_monitored_stocks(database_file.name, "admin")
+                self.assertEqual(monitored_rows[0]["display_name"], "贵州茅台")
 
     def test_trades_analysis_route_renders(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
@@ -1845,6 +1919,53 @@ class MonitorTests(unittest.TestCase):
                     mocked_send.return_value.error = None
                     app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T15:10:00+08:00"))
                     app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T15:20:00+08:00"))
+                review_calls = [call for call in mocked_send.call_args_list if "收盘持仓复盘" in call.kwargs.get("subject", "")]
+                self.assertEqual(len(review_calls), 1)
+
+    def test_post_close_holding_review_still_sends_after_position_is_fully_cleared(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".db") as database_file:
+            app = create_app(AppSettings(db_path=database_file.name, provider_name="mock", default_symbols=()))
+            with TestClient(app) as client:
+                client.post("/login", data={"username": "admin", "password": "admin123"}, follow_redirects=False)
+                client.post("/stocks", data={"symbols_text": "600519"}, follow_redirects=False)
+                client.post(
+                    "/settings/email",
+                    data={
+                        "recipient_email": "to@example.com",
+                        "smtp_server": "smtp.qq.com",
+                        "sender_email": "from@example.com",
+                        "sender_password": "secret",
+                    },
+                    follow_redirects=False,
+                )
+                client.post(
+                    "/trades",
+                    data={
+                        "symbol": "600519",
+                        "side": "buy",
+                        "price": "100",
+                        "quantity": "100",
+                        "note": "建仓",
+                    },
+                    follow_redirects=False,
+                )
+                client.post(
+                    "/trades",
+                    data={
+                        "symbol": "600519",
+                        "side": "sell",
+                        "price": "110",
+                        "quantity": "100",
+                        "note": "清仓",
+                    },
+                    follow_redirects=False,
+                )
+                self.assertEqual(get_monitored_stocks(database_file.name, "admin"), [])
+                with patch("src.ai_stock_monitoring.monitor.send_message") as mocked_send:
+                    mocked_send.return_value.success = True
+                    mocked_send.return_value.status = "发送成功"
+                    mocked_send.return_value.error = None
+                    app.state.monitor.run_cycle(datetime.fromisoformat("2026-03-12T15:10:00+08:00"))
                 review_calls = [call for call in mocked_send.call_args_list if "收盘持仓复盘" in call.kwargs.get("subject", "")]
                 self.assertEqual(len(review_calls), 1)
 

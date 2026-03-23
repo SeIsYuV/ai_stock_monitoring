@@ -36,9 +36,11 @@ SELL_ALERT_STRONG_LEVEL = 7
 SELL_ALERT_BOLL_EXTENSION_RATIO = 1.02
 SELL_ALERT_LOW_DIVIDEND_MAX_QUANT = 55.0
 WEEKLY_SUPPORT_TRIGGER_TYPES = {"30周/60周均线", "30周线上穿60周线", "有效突破60周线"}
-BUY_TRIGGER_TYPES = {"250日线", "BOLL中轨", "BOLL下轨", "股息率", "30周/60周均线", "30周线上穿60周线", "有效突破60周线", "量化盈利概率"}
+BUY_TRIGGER_TYPES = {"250日线", "BOLL中轨", "BOLL下轨", "股息率", "30周/60周均线", "30周线上穿60周线", "有效突破60周线", "量化盈利概率", "择时量化"}
 PRICE_SUPPORT_TRIGGER_TYPES = {"250日线", "BOLL中轨", "BOLL下轨"}
-SELL_TRIGGER_TYPES = {"BOLL上轨卖出", "低股息率卖出", "量化走弱卖出"}
+SELL_TRIGGER_TYPES = {"BOLL上轨卖出", "低股息率卖出", "量化走弱卖出", "风险控制卖出"}
+TIMING_QUANT_TRIGGER_THRESHOLD = 76.0
+RISK_CONTROL_SELL_THRESHOLD = 40.0
 WEEKLY_BREAKOUT_MIN_CLOSE_RATIO = 1.01
 WEEKLY_BREAKOUT_MIN_LOW_RATIO = 0.995
 PAPER_TRADE_OPEN_THRESHOLD_MODEL = 72.0
@@ -62,6 +64,7 @@ from .database import (
     get_quant_settings,
     get_snapshot,
     get_signal_state,
+    list_users,
     list_model_paper_trades,
     list_pending_signal_states,
     list_trade_records,
@@ -96,6 +99,20 @@ from .trade_advisor import build_portfolio_profile, build_position_summary, buil
 class QuantSellSignal:
     should_alert: bool
     confirmation_count: int
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TimingQuantSignal:
+    should_alert: bool
+    score: float
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RiskControlSignal:
+    should_alert: bool
+    score: float
     reasons: tuple[str, ...]
 
 
@@ -262,6 +279,68 @@ def build_quant_sell_signal(snapshot: SnapshotComputation) -> QuantSellSignal:
     )
 
 
+def _parse_quant_breakdown_scores(raw_breakdown: str) -> dict[str, float]:
+    try:
+        payload = json.loads(raw_breakdown or "[]")
+    except json.JSONDecodeError:
+        return {}
+    scores: dict[str, float] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        model_key = str(item.get("key") or "")
+        if not model_key:
+            continue
+        scores[model_key] = float(item.get("score") or 0.0)
+    return scores
+
+
+def build_timing_quant_signal(snapshot: SnapshotComputation) -> TimingQuantSignal:
+    model_scores = _parse_quant_breakdown_scores(snapshot.quant_model_breakdown)
+    timing_components = [
+        model_scores.get("trend_following", 0.0),
+        model_scores.get("weekly_resonance", 0.0),
+        model_scores.get("support_strength", 0.0),
+    ]
+    timing_score = round(sum(timing_components) / max(len(timing_components), 1), 2)
+    reasons: list[str] = [f"择时综合分 {timing_score:.2f}"]
+    if model_scores.get("trend_following", 0.0) >= TIMING_QUANT_TRIGGER_THRESHOLD:
+        reasons.append(f"趋势跟随 {model_scores.get('trend_following', 0.0):.2f}")
+    if model_scores.get("weekly_resonance", 0.0) >= TIMING_QUANT_TRIGGER_THRESHOLD - 4:
+        reasons.append(f"周线共振 {model_scores.get('weekly_resonance', 0.0):.2f}")
+    if snapshot.quant_probability >= BUY_ALERT_MIN_QUANT_PROBABILITY:
+        reasons.append(f"量化总概率 {snapshot.quant_probability:.2f}%")
+    should_alert = (
+        timing_score >= TIMING_QUANT_TRIGGER_THRESHOLD
+        and model_scores.get("trend_following", 0.0) >= TIMING_QUANT_TRIGGER_THRESHOLD
+        and snapshot.quant_probability >= BUY_ALERT_MIN_QUANT_PROBABILITY
+    )
+    return TimingQuantSignal(should_alert=should_alert, score=timing_score, reasons=tuple(reasons))
+
+
+def build_risk_control_signal(snapshot: SnapshotComputation) -> RiskControlSignal:
+    model_scores = _parse_quant_breakdown_scores(snapshot.quant_model_breakdown)
+    weakest_components = [
+        model_scores.get("trend_following", 100.0),
+        model_scores.get("volatility_filter", 100.0),
+        model_scores.get("risk_reward", 100.0),
+    ]
+    risk_score = round(sum(weakest_components) / max(len(weakest_components), 1), 2)
+    reasons: list[str] = [f"风控综合分 {risk_score:.2f}"]
+    if model_scores.get("trend_following", 100.0) <= RISK_CONTROL_SELL_THRESHOLD:
+        reasons.append(f"趋势跟随转弱 {model_scores.get('trend_following', 0.0):.2f}")
+    if model_scores.get("volatility_filter", 100.0) <= RISK_CONTROL_SELL_THRESHOLD:
+        reasons.append(f"波动过滤偏弱 {model_scores.get('volatility_filter', 0.0):.2f}")
+    if snapshot.quant_probability <= 45.0:
+        reasons.append(f"量化总概率仅 {snapshot.quant_probability:.2f}%")
+    should_alert = (
+        risk_score <= RISK_CONTROL_SELL_THRESHOLD
+        or model_scores.get("trend_following", 100.0) <= RISK_CONTROL_SELL_THRESHOLD
+        or model_scores.get("volatility_filter", 100.0) <= RISK_CONTROL_SELL_THRESHOLD
+    )
+    return RiskControlSignal(should_alert=should_alert, score=risk_score, reasons=tuple(reasons))
+
+
 def has_weekly_crossed(
     prev_ma_30w: float,
     prev_ma_60w: float,
@@ -364,6 +443,21 @@ def compute_snapshot_metrics(
         triggered_labels.append("30周线下穿60周线")
     if weekly_breakout_above_ma60w:
         triggered_labels.append("有效突破60周线")
+    breakdown_scores = _parse_quant_breakdown_scores(quant_model_breakdown)
+    timing_score = (
+        breakdown_scores.get("trend_following", 0.0)
+        + breakdown_scores.get("weekly_resonance", 0.0)
+        + breakdown_scores.get("support_strength", 0.0)
+    ) / 3
+    risk_score = (
+        breakdown_scores.get("trend_following", 100.0)
+        + breakdown_scores.get("volatility_filter", 100.0)
+        + breakdown_scores.get("risk_reward", 100.0)
+    ) / 3
+    if quant_probability >= BUY_ALERT_MIN_QUANT_PROBABILITY and timing_score >= TIMING_QUANT_TRIGGER_THRESHOLD:
+        triggered_labels.append("择时量化")
+    if quant_probability <= 45.0 or risk_score <= RISK_CONTROL_SELL_THRESHOLD:
+        triggered_labels.append("风险控制卖出")
 
     trigger_state = "、".join(triggered_labels) if triggered_labels else "正常"
     trigger_detail = (
@@ -958,6 +1052,24 @@ class StockMonitor:
                         email_settings=email_settings,
                         required_hits=1,
                     )
+                    timing_quant_signal = build_timing_quant_signal(snapshot)
+                    self._process_intraday_signal(
+                        owner_username=owner_username,
+                        symbol=symbol,
+                        display_name=snapshot.display_name,
+                        trigger_type="择时量化",
+                        trade_marker=trade_marker,
+                        condition_met=bool(timing_quant_signal.should_alert and self._should_emit_buy_alert(snapshot, "择时量化", stock_advice)),
+                        detail=f"{snapshot.trigger_detail} | 择时量化：{'；'.join(timing_quant_signal.reasons)}",
+                        current_price=snapshot.latest_price,
+                        indicator_values={
+                            "timing_quant_score": timing_quant_signal.score,
+                            "quant_probability": snapshot.quant_probability,
+                            "reasons": "；".join(timing_quant_signal.reasons),
+                        },
+                        email_settings=email_settings,
+                        required_hits=1,
+                    )
                     quant_sell_signal = build_quant_sell_signal(snapshot)
                     self._process_intraday_signal(
                         owner_username=owner_username,
@@ -977,10 +1089,32 @@ class StockMonitor:
                         email_settings=email_settings,
                         required_hits=1,
                     )
+                    risk_control_signal = build_risk_control_signal(snapshot)
+                    self._process_intraday_signal(
+                        owner_username=owner_username,
+                        symbol=symbol,
+                        display_name=snapshot.display_name,
+                        trigger_type="风险控制卖出",
+                        trade_marker=trade_marker,
+                        condition_met=bool(risk_control_signal.should_alert and self._should_emit_sell_alert(position_summary, snapshot, "风险控制卖出", stock_advice)),
+                        detail=f"{snapshot.trigger_detail} | 风险控制：{'；'.join(risk_control_signal.reasons)}",
+                        current_price=snapshot.latest_price,
+                        indicator_values={
+                            "risk_control_score": risk_control_signal.score,
+                            "quant_probability": snapshot.quant_probability,
+                            "reasons": "；".join(risk_control_signal.reasons),
+                        },
+                        email_settings=email_settings,
+                        required_hits=1,
+                    )
                 self.last_refresh_at = datetime.now(UTC)
                 self.last_error_message = None
             except Exception as exc:
-                self.last_error_message = f"{owner_username}/{symbol} 刷新失败：{exc}"
+                message = str(exc)
+                if "RemoteDisconnected" in message or "Connection aborted" in message:
+                    self.last_error_message = f"{owner_username}/{symbol} 刷新失败：行情源临时断连，稍后会自动重试。"
+                else:
+                    self.last_error_message = f"{owner_username}/{symbol} 刷新失败：{exc}"
 
     def _resolve_owner_position_map(self, owner_username: str) -> dict[str, dict[str, Any]]:
         position_map: dict[str, dict[str, Any]] = {}
@@ -1067,6 +1201,12 @@ class StockMonitor:
 
         if trigger_type == "量化盈利概率":
             return bool(len(support_triggers) >= 2 or has_dividend_support or has_weekly_support)
+        if trigger_type == "择时量化":
+            return bool(
+                support_triggers
+                or has_weekly_support
+                or quant_probability >= BUY_ALERT_STRONG_QUANT_PROBABILITY
+            )
         if trigger_type in PRICE_SUPPORT_TRIGGER_TYPES:
             return (
                 len(support_triggers) >= 2
@@ -1140,19 +1280,30 @@ class StockMonitor:
                     or position_concentration_pct >= 30
                 )
             )
+        if trigger_type == "风险控制卖出":
+            return (
+                sell_level >= max(SELL_ALERT_MIN_LEVEL - 1, 4)
+                and (
+                    action == "偏卖出"
+                    or len(sell_signals) >= 1
+                    or quant_probability <= 45
+                    or position_concentration_pct >= 25
+                )
+            )
         return False
 
     def _send_post_close_holding_reviews(self, trade_date: date) -> None:
         marker = trade_date.isoformat()
-        owners = sorted({row["owner_username"] for row in get_monitored_stocks(self.settings.db_path)})
+        owners = sorted(row["username"] for row in list_users(self.settings.db_path))
         for owner_username in owners:
+            owner_trade_records = list_trade_records(self.settings.db_path, owner_username, None)
+            owner_monitored_stocks = get_monitored_stocks(self.settings.db_path, owner_username)
+            if not owner_trade_records and not owner_monitored_stocks:
+                continue
             job_state = get_job_state(self.settings.db_path, owner_username, "post_close_holding_review")
             if job_state and job_state["last_run_marker"] == marker:
                 continue
             position_map = self._resolve_owner_position_map(owner_username)
-            if not position_map:
-                set_job_state(self.settings.db_path, owner_username, "post_close_holding_review", marker)
-                continue
             email_settings = get_email_settings(self.settings.db_path, owner_username)
             snapshots: list[dict[str, Any]] = []
             for symbol in sorted(position_map):
@@ -1166,12 +1317,9 @@ class StockMonitor:
                     snapshot = self._snapshot_from_row(fallback_row)
                     self.last_error_message = f"{owner_username}/{symbol} 收盘复盘沿用最近快照：{exc}"
                 snapshots.append(self._snapshot_payload(snapshot))
-            if not snapshots:
-                set_job_state(self.settings.db_path, owner_username, "post_close_holding_review", marker)
-                continue
             portfolio_settings = get_portfolio_settings(self.settings.db_path, owner_username)
             portfolio_profile = build_portfolio_profile(
-                list_trade_records(self.settings.db_path, owner_username, None),
+                owner_trade_records,
                 snapshots,
                 float(portfolio_settings["total_investment_amount"] or 0.0),
             )

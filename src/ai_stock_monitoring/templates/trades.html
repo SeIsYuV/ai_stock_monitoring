@@ -44,6 +44,7 @@
         <p>持仓数量：{{ position_summary['position_quantity'] }}</p>
         <p>持仓均价：{{ '%.2f'|format(position_summary['average_cost']) }}</p>
         <p>累计已实现盈亏：<span class="{% if position_summary['realized_pnl'] > 0 %}pnl-profit{% elif position_summary['realized_pnl'] < 0 %}pnl-loss{% else %}muted{% endif %}">{{ '%.2f'|format(position_summary['realized_pnl']) }}</span></p>
+        <p>累计手续费：{{ '%.2f'|format(position_summary.get('total_commission_fee', 0.0)) }}</p>
         <p>异常卖出数量：{{ position_summary['invalid_sell_quantity'] }}</p>
         {% endif %}
     </div>
@@ -215,9 +216,71 @@
             </tbody>
         </table>
     </div>
+    {% if portfolio_profile.get('closed_positions') %}
+    <h3>清仓记录</h3>
+    <div class="table-scroll">
+        <table class="wide-table compact-table">
+            <thead>
+            <tr>
+                <th>股票</th>
+                <th>最后成交时间</th>
+                <th>买入总额</th>
+                <th>卖出净额</th>
+                <th>累计手续费</th>
+                <th>已实现盈亏</th>
+                <th>交易笔数</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in portfolio_profile.get('closed_positions', []) %}
+            <tr>
+                <td>{{ item['symbol'] }} {{ item['display_name'] }}</td>
+                <td>{{ format_full_timestamp(item['last_traded_at']) }}</td>
+                <td>{{ '%.2f'|format(item['total_buy_amount']) }}</td>
+                <td>{{ '%.2f'|format(item['total_sell_amount']) }}</td>
+                <td>{{ '%.2f'|format(item['total_commission_fee']) }}</td>
+                <td class="{% if item['realized_pnl'] > 0 %}pnl-profit{% elif item['realized_pnl'] < 0 %}pnl-loss{% else %}muted{% endif %}">{{ '%.2f'|format(item['realized_pnl']) }}</td>
+                <td>{{ item['trade_count'] }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
     {% else %}
     <p>{{ portfolio_profile['comprehensive_advice'] }}</p>
     <p class="muted">{{ portfolio_profile['analysis_note'] }}</p>
+    {% if portfolio_profile.get('closed_positions') %}
+    <h3>清仓记录</h3>
+    <div class="table-scroll">
+        <table class="wide-table compact-table">
+            <thead>
+            <tr>
+                <th>股票</th>
+                <th>最后成交时间</th>
+                <th>买入总额</th>
+                <th>卖出净额</th>
+                <th>累计手续费</th>
+                <th>已实现盈亏</th>
+                <th>交易笔数</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in portfolio_profile.get('closed_positions', []) %}
+            <tr>
+                <td>{{ item['symbol'] }} {{ item['display_name'] }}</td>
+                <td>{{ format_full_timestamp(item['last_traded_at']) }}</td>
+                <td>{{ '%.2f'|format(item['total_buy_amount']) }}</td>
+                <td>{{ '%.2f'|format(item['total_sell_amount']) }}</td>
+                <td>{{ '%.2f'|format(item['total_commission_fee']) }}</td>
+                <td class="{% if item['realized_pnl'] > 0 %}pnl-profit{% elif item['realized_pnl'] < 0 %}pnl-loss{% else %}muted{% endif %}">{{ '%.2f'|format(item['realized_pnl']) }}</td>
+                <td>{{ item['trade_count'] }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
     {% endif %}
 </section>
 {% endif %}
@@ -318,6 +381,7 @@
             <th>股票</th>
             <th>方向</th>
             <th>价格</th>
+            <th>手续费</th>
             <th>数量</th>
             <th>备注</th>
             <th>操作</th>
@@ -330,6 +394,7 @@
             <td><a class="inline-link" href="/trades?symbol={{ trade['symbol'] }}">{{ trade['symbol'] }}</a></td>
             <td>{{ '买入' if trade['side'] == 'buy' else '卖出' }}</td>
             <td>{{ '%.5f'|format(trade['price']) }}</td>
+            <td>{{ '%.2f'|format(trade.get('commission_fee', 0.0)) }}</td>
             <td>{{ trade['quantity'] }}</td>
             <td>{{ trade['note'] or '-' }}</td>
             <td>
@@ -340,7 +405,7 @@
         </tr>
         {% else %}
         <tr>
-            <td colspan="7">当前账号还没有交易记录，可以先录入一笔买入或卖出。</td>
+            <td colspan="8">当前账号还没有交易记录，可以先录入一笔买入或卖出。</td>
         </tr>
         {% endfor %}
         </tbody>

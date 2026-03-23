@@ -149,6 +149,7 @@ def initialize_database(settings: AppSettings) -> None:
                 symbol TEXT NOT NULL,
                 side TEXT NOT NULL,
                 price REAL NOT NULL,
+                commission_fee REAL NOT NULL DEFAULT 0,
                 quantity INTEGER NOT NULL,
                 traded_at TEXT NOT NULL,
                 note TEXT,
@@ -543,6 +544,18 @@ def _ensure_schema_migrations(connection: sqlite3.Connection) -> None:
         connection.execute(
             "UPDATE user_quant_settings SET strategy_params = ? WHERE strategy_params IS NULL OR strategy_params = ''",
             (json.dumps(DEFAULT_QUANT_STRATEGY_PARAMS, ensure_ascii=False),),
+        )
+    if _table_exists(connection, "user_trade_record") and not _column_exists(connection, "user_trade_record", "commission_fee"):
+        connection.execute(
+            "ALTER TABLE user_trade_record ADD COLUMN commission_fee REAL NOT NULL DEFAULT 0"
+        )
+    if _table_exists(connection, "user_trade_record"):
+        connection.execute(
+            """
+            UPDATE user_trade_record
+            SET commission_fee = ROUND(CASE WHEN price * quantity * 0.0003 < 5 THEN 5 ELSE price * quantity * 0.0003 END, 5)
+            WHERE commission_fee IS NULL OR commission_fee <= 0
+            """
         )
 
 
@@ -976,6 +989,21 @@ def add_monitored_stock(db_path: str, owner_username: str, symbol: str, display_
         )
 
 
+def update_monitored_stock_display_name(db_path: str, owner_username: str, symbol: str, display_name: str) -> None:
+    normalized_display_name = str(display_name or "").strip()
+    if not normalized_display_name:
+        return
+    with get_connection(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE user_monitored_stock
+            SET display_name = ?
+            WHERE owner_username = ? AND symbol = ? AND (display_name IS NULL OR display_name = '' OR display_name = symbol)
+            """,
+            (normalized_display_name, owner_username, symbol),
+        )
+
+
 def remove_monitored_stock(db_path: str, owner_username: str, symbol: str) -> None:
     with get_connection(db_path) as connection:
         connection.execute("DELETE FROM user_monitored_stock WHERE owner_username = ? AND symbol = ?", (owner_username, symbol))
@@ -1318,17 +1346,33 @@ def add_trade_record(
     quantity: int,
     traded_at: str | None = None,
     note: str = "",
+    commission_fee: float | None = None,
 ) -> None:
     created_at = datetime.now(UTC).isoformat()
     normalized_price = round(float(price), 5)
+    gross_amount = normalized_price * int(quantity)
+    normalized_commission_fee = round(
+        float(commission_fee) if commission_fee is not None else max(gross_amount * 0.0003, 5.0),
+        5,
+    )
     normalized_traded_at = traded_at or datetime.now(UTC).isoformat()
     with get_connection(db_path) as connection:
         connection.execute(
             """
-            INSERT INTO user_trade_record (owner_username, symbol, side, price, quantity, traded_at, note, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO user_trade_record (owner_username, symbol, side, price, commission_fee, quantity, traded_at, note, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (owner_username, symbol, side, normalized_price, quantity, normalized_traded_at, note, created_at),
+            (
+                owner_username,
+                symbol,
+                side,
+                normalized_price,
+                normalized_commission_fee,
+                quantity,
+                normalized_traded_at,
+                note,
+                created_at,
+            ),
         )
 
 
@@ -1345,7 +1389,7 @@ def count_trade_records(db_path: str, owner_username: str, symbol: str | None = 
 
 def list_trade_records(db_path: str, owner_username: str, symbol: str | None = None) -> list[sqlite3.Row]:
     query = """
-        SELECT id, owner_username, symbol, side, price, quantity, traded_at, note, created_at
+        SELECT id, owner_username, symbol, side, price, commission_fee, quantity, traded_at, note, created_at
         FROM user_trade_record
         WHERE owner_username = ?
     """
@@ -1369,7 +1413,7 @@ def list_trade_records_paginated(
     normalized_page_size = max(1, min(100, int(page_size)))
     total = count_trade_records(db_path, owner_username, symbol)
     query = """
-        SELECT id, owner_username, symbol, side, price, quantity, traded_at, note, created_at
+        SELECT id, owner_username, symbol, side, price, commission_fee, quantity, traded_at, note, created_at
         FROM user_trade_record
         WHERE owner_username = ?
     """
@@ -1389,7 +1433,7 @@ def list_trade_records_for_symbol(db_path: str, owner_username: str, symbol: str
         return list(
             connection.execute(
                 """
-                SELECT id, owner_username, symbol, side, price, quantity, traded_at, note, created_at
+                SELECT id, owner_username, symbol, side, price, commission_fee, quantity, traded_at, note, created_at
                 FROM user_trade_record
                 WHERE owner_username = ? AND symbol = ?
                 ORDER BY datetime(traded_at) ASC, id ASC

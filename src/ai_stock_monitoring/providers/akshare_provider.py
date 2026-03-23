@@ -11,6 +11,7 @@ from __future__ import annotations
 """
 
 from datetime import UTC, date, datetime, timedelta
+import time
 from typing import Any, Callable
 
 import akshare as ak
@@ -56,7 +57,7 @@ class AkshareMarketDataProvider(MarketDataProvider):
         """Load the latest quote and display name for one symbol."""
         item_map = self._load_symbol_item_map(symbol)
         latest_price = _to_float(item_map.get("最新") or item_map.get("最新价"))
-        name = str(item_map.get("股票简称") or symbol)
+        name = self._extract_symbol_name(item_map, symbol)
         return Quote(
             symbol=symbol,
             name=name,
@@ -161,7 +162,10 @@ class AkshareMarketDataProvider(MarketDataProvider):
     def get_symbol_profile(self, symbol: str) -> dict[str, Any]:
         item_map = self._load_symbol_item_map(symbol)
         industry_name = str(item_map.get("行业") or item_map.get("所属行业") or "")
-        return {"industry_name": industry_name}
+        return {
+            "industry_name": industry_name,
+            "display_name": self._extract_symbol_name(item_map, symbol),
+        }
 
     def get_symbol_fundamentals(self, symbol: str) -> dict[str, float | None]:
         item_map = self._load_symbol_item_map(symbol)
@@ -234,14 +238,29 @@ class AkshareMarketDataProvider(MarketDataProvider):
         cached_item = self._cache.get(key)
         if cached_item and cached_item[0] > now:
             return cached_item[1]
-        try:
-            value = builder()
-        except Exception:
-            if cached_item is not None:
-                return cached_item[1]
-            raise
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                value = builder()
+                break
+            except Exception as exc:
+                last_error = exc
+                if cached_item is not None:
+                    return cached_item[1]
+                if attempt == 0:
+                    time.sleep(0.2)
+        else:
+            raise last_error if last_error is not None else RuntimeError("AKShare data builder failed")
         self._cache[key] = (now + timedelta(seconds=ttl_seconds), value)
         return value
+
+    @staticmethod
+    def _extract_symbol_name(item_map: dict[str, Any], symbol: str) -> str:
+        for key in ("股票简称", "股票名称", "证券简称", "名称", "简称"):
+            raw_value = str(item_map.get(key) or "").strip()
+            if raw_value and raw_value != symbol:
+                return raw_value
+        return symbol
 
     @staticmethod
     def _to_bars(frame: pd.DataFrame) -> list[PriceBar]:

@@ -53,7 +53,6 @@ from .database import (
     list_recent_login_events,
     list_trade_records,
     list_trade_records_for_symbol,
-    list_trade_records_paginated,
     list_users,
     mark_alert_as_read,
     record_failed_login,
@@ -63,6 +62,7 @@ from .database import (
     save_email_settings,
     save_login_unlock_code,
     save_quant_settings,
+    update_monitored_stock_display_name,
     update_user_password,
     delete_trade_record,
     delete_trade_records_for_symbol,
@@ -130,6 +130,17 @@ def _format_stock_display_name(name: str | None, chunk_size: int = 4) -> str:
     if not all("一" <= char <= "鿿" for char in name):
         return escaped
     return "<wbr>".join(html.escape(name[index : index + chunk_size]) for index in range(0, len(name), chunk_size))
+
+
+def _resolve_symbol_display_name(monitor: StockMonitor, symbol: str) -> str:
+    try:
+        profile = monitor.provider.get_symbol_profile(symbol) or {}
+    except Exception:
+        return ""
+    display_name = str(profile.get("display_name") or "").strip()
+    if not display_name or display_name == symbol:
+        return ""
+    return display_name
 
 
 templates.env.globals["format_snapshot_timestamp"] = _format_snapshot_timestamp
@@ -390,13 +401,12 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         selected_symbol = (symbol or "").strip()
         owner_username = current_user["username"]
         portfolio_settings = get_portfolio_settings(resolved_settings.db_path, owner_username)
-        trade_records, total_trade_records = list_trade_records_paginated(
+        trade_records = list_trade_records(
             resolved_settings.db_path,
             owner_username,
             selected_symbol or None,
-            page=page,
-            page_size=10,
         )
+        total_trade_records = len(trade_records)
         all_trade_records = list_trade_records(resolved_settings.db_path, owner_username, None)
         snapshots = get_snapshots(resolved_settings.db_path, owner_username)
         latest_analysis_row = get_latest_trade_analysis(
@@ -406,13 +416,12 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         )
         latest_analysis = None
         position_summary = None
-        if latest_analysis_row is not None:
-            latest_analysis = _serialize_latest_analysis_row(latest_analysis_row)
-            position_summary = json.loads(latest_analysis_row["position_summary"])
-        elif selected_symbol:
+        if selected_symbol:
             position_summary = build_position_summary(
                 list_trade_records_for_symbol(resolved_settings.db_path, owner_username, selected_symbol)
             )
+        if latest_analysis_row is not None:
+            latest_analysis = _serialize_latest_analysis_row(latest_analysis_row)
 
         portfolio_profile = build_portfolio_profile(all_trade_records, snapshots, float(portfolio_settings["total_investment_amount"] or 0.0))
 
@@ -433,10 +442,10 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 portfolio_profile=portfolio_profile,
                 portfolio_settings=portfolio_settings,
                 trade_pagination={
-                    "page": max(page, 1),
-                    "page_size": 10,
+                    "page": 1,
+                    "page_size": max(total_trade_records, 1),
                     "total": total_trade_records,
-                    "total_pages": max((total_trade_records + 9) // 10, 1),
+                    "total_pages": 1,
                 },
             ),
         )
@@ -493,7 +502,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         workbook = Workbook()
         worksheet = workbook.active
         worksheet.title = "交易流水"
-        worksheet.append(["成交时间", "股票代码", "方向", "价格", "数量", "备注", "录入时间"])
+        worksheet.append(["成交时间", "股票代码", "方向", "价格", "手续费", "数量", "备注", "录入时间"])
         trade_records = list_trade_records(resolved_settings.db_path, owner_username, selected_symbol)
         for trade in trade_records:
             worksheet.append(
@@ -502,6 +511,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                     trade["symbol"],
                     "买入" if trade["side"] == "buy" else "卖出",
                     float(trade["price"]),
+                    float(trade["commission_fee"] or 0.0),
                     int(trade["quantity"]),
                     trade["note"] or "",
                     trade["created_at"],
@@ -700,15 +710,25 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         refresh_failed_symbols: list[str] = []
         for symbol in valid_symbols:
             add_monitored_stock(resolved_settings.db_path, owner_username, symbol)
+            resolved_display_name = ""
             try:
-                await asyncio.to_thread(
+                snapshot = await asyncio.to_thread(
                     app.state.monitor.refresh_symbol_snapshot,
                     owner_username,
                     symbol,
                     True,
                 )
+                resolved_display_name = str(snapshot.display_name or "").strip()
             except Exception:
                 refresh_failed_symbols.append(symbol)
+            if not resolved_display_name or resolved_display_name == symbol:
+                resolved_display_name = await asyncio.to_thread(_resolve_symbol_display_name, app.state.monitor, symbol)
+            update_monitored_stock_display_name(
+                resolved_settings.db_path,
+                owner_username,
+                symbol,
+                resolved_display_name,
+            )
         if invalid_symbols:
             return _redirect_with_message(
                 "/settings",
@@ -787,9 +807,37 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 quantity=quantity,
                 note=note.strip(),
             )
+            resolved_display_name = ""
+            try:
+                snapshot = await asyncio.to_thread(
+                    app.state.monitor.refresh_symbol_snapshot,
+                    owner_username,
+                    symbol,
+                    True,
+                )
+                resolved_display_name = str(snapshot.display_name or "").strip()
+            except Exception:
+                pass
+            if not resolved_display_name or resolved_display_name == symbol:
+                resolved_display_name = await asyncio.to_thread(_resolve_symbol_display_name, app.state.monitor, symbol)
+            update_monitored_stock_display_name(
+                resolved_settings.db_path,
+                owner_username,
+                symbol,
+                resolved_display_name,
+            )
         except Exception:
             return _redirect_with_message(f"/trades?symbol={symbol}", "保存交易记录失败，请重试")
-        return _redirect_with_message(f"/trades?symbol={symbol}", "交易记录已保存")
+        updated_position_summary = build_position_summary(
+            list_trade_records_for_symbol(resolved_settings.db_path, owner_username, symbol)
+        )
+        if side == "sell" and int(updated_position_summary.get("position_quantity") or 0) <= 0:
+            remove_monitored_stock(resolved_settings.db_path, owner_username, symbol)
+            return _redirect_with_message(
+                "/trades",
+                f"{symbol} 交易记录已保存，当前仓位已清零、已移入清仓记录，并从监控列表移除。",
+            )
+        return _redirect_with_message("/trades", f"{symbol} 交易记录已保存")
 
     @app.post("/trades/analyze")
     async def analyze_trade_plan(
