@@ -73,6 +73,17 @@ REAL_TRADE_TIMEOUT_DAYS = 30
 REAL_TRADE_FEEDBACK_MIN_SCORE = 55.0
 
 
+def _value(payload: object, key: str, default: Any = None) -> Any:
+    if payload is None:
+        return default
+    if isinstance(payload, dict):
+        return payload.get(key, default)
+    try:
+        return payload[key]  # type: ignore[index]
+    except Exception:
+        return default
+
+
 def split_trigger_signals(trigger_state: str | None) -> list[str]:
     if not trigger_state or trigger_state == "正常":
         return []
@@ -1069,7 +1080,7 @@ def build_portfolio_profile(
                         "total_sell_amount": float(position_summary["total_sell_amount"]),
                         "total_commission_fee": float(position_summary.get("total_commission_fee") or 0.0),
                         "trade_count": int(position_summary["trade_count"]),
-                        "last_traded_at": max((str(item.get("traded_at") or "") for item in rows), default=""),
+                        "last_traded_at": max((str(_value(item, "traded_at") or "") for item in rows), default=""),
                     }
                 )
             continue
@@ -1363,7 +1374,7 @@ def build_position_summary(trades: Sequence[Mapping[str, Any]]) -> dict[str, Any
         quantity = int(trade["quantity"])
         price = float(trade["price"])
         amount = price * quantity
-        commission_fee = float(trade.get("commission_fee") or max(amount * 0.0003, 5.0))
+        commission_fee = float(_value(trade, "commission_fee") or max(amount * 0.0003, 5.0))
         total_commission_fee += commission_fee
 
         if side == "buy":
@@ -1604,18 +1615,18 @@ def build_trade_reconciliation(
         sorted_rows = sorted(
             rows,
             key=lambda item: (
-                _parse_datetime_value(item.get("traded_at")) or datetime.min.replace(tzinfo=UTC),
-                int(item.get("id") or 0),
+                _parse_datetime_value(_value(item, "traded_at")) or datetime.min.replace(tzinfo=UTC),
+                int(_value(item, "id") or 0),
             ),
         )
         display_name = str(snapshot_map.get(symbol, {}).get("display_name") or symbol)
         buy_lots: list[dict[str, Any]] = []
         for trade in sorted_rows:
-            trade_time = _parse_datetime_value(trade.get("traded_at"))
-            side = str(trade.get("side") or "")
-            quantity = int(trade.get("quantity") or 0)
-            price = float(trade.get("price") or 0.0)
-            commission_fee = float(trade.get("commission_fee") or max(price * quantity * 0.0003, 5.0))
+            trade_time = _parse_datetime_value(_value(trade, "traded_at"))
+            side = str(_value(trade, "side") or "")
+            quantity = int(_value(trade, "quantity") or 0)
+            price = float(_value(trade, "price") or 0.0)
+            commission_fee = float(_value(trade, "commission_fee") or max(price * quantity * 0.0003, 5.0))
             analysis_context = _find_latest_analysis_context(analysis_lookup, symbol, trade_time)
             reference_key = "buy_reference_price" if side == "buy" else "sell_reference_price"
             reference_label_key = "buy_reference_label" if side == "buy" else "sell_reference_label"
@@ -1624,15 +1635,15 @@ def build_trade_reconciliation(
             slippage_pct = round((price - reference_price) / reference_price * 100, 2) if reference_price > 0 else None
             execution_rows.append(
                 {
-                    "trade_id": int(trade.get("id") or 0),
+                    "trade_id": int(_value(trade, "id") or 0),
                     "symbol": symbol,
                     "display_name": display_name,
                     "side": side,
                     "price": price,
                     "quantity": quantity,
                     "commission_fee": round(commission_fee, 2),
-                    "traded_at": str(trade.get("traded_at") or ""),
-                    "note": str(trade.get("note") or ""),
+                    "traded_at": str(_value(trade, "traded_at") or ""),
+                    "note": str(_value(trade, "note") or ""),
                     "reference_price": round(reference_price, 4) if reference_price > 0 else None,
                     "reference_label": reference_label,
                     "slippage_pct": slippage_pct,
@@ -1648,7 +1659,7 @@ def build_trade_reconciliation(
                         "entry_price": price,
                         "entry_commission_remaining": commission_fee,
                         "entry_time": trade_time,
-                        "entry_note": str(trade.get("note") or ""),
+                        "entry_note": str(_value(trade, "note") or ""),
                         "buy_slippage_pct": slippage_pct,
                         "buy_reference_price": round(reference_price, 4) if reference_price > 0 else None,
                         "buy_reference_label": reference_label,
@@ -1684,7 +1695,7 @@ def build_trade_reconciliation(
                 if isinstance(entry_time, datetime) and trade_time is not None:
                     holding_days = max(0, (trade_time.date() - entry_time.date()).days)
                 exit_category, exit_label, exit_reason = _classify_real_trade_exit(
-                    exit_note=str(trade.get("note") or ""),
+                    exit_note=str(_value(trade, "note") or ""),
                     holding_days=holding_days,
                     net_return_pct=net_return_pct,
                     exit_price=price,

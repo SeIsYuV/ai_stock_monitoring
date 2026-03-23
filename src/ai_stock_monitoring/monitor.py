@@ -77,8 +77,11 @@ from .database import (
     upsert_snapshot,
 )
 from .mailer import (
+    EmailDeliveryResult,
     build_alert_email_body,
     build_alert_email_html_body,
+    build_periodic_review_email_body,
+    build_periodic_review_email_html_body,
     build_portfolio_review_email_body,
     build_portfolio_review_email_html_body,
     send_message,
@@ -98,6 +101,7 @@ from .trade_advisor import (
     build_position_summary,
     build_real_trade_feedback,
     build_stock_comprehensive_advice,
+    build_trade_reconciliation,
 )
 
 
@@ -345,6 +349,16 @@ def build_risk_control_signal(snapshot: SnapshotComputation) -> RiskControlSigna
         or model_scores.get("volatility_filter", 100.0) <= RISK_CONTROL_SELL_THRESHOLD
     )
     return RiskControlSignal(should_alert=should_alert, score=risk_score, reasons=tuple(reasons))
+
+
+def _safe_date_from_iso(raw_value: str) -> date | None:
+    text = str(raw_value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text).date()
+    except ValueError:
+        return None
 
 
 def has_weekly_crossed(
@@ -883,6 +897,7 @@ class StockMonitor:
                 self._refresh_open_session(trade_date)
             if status.is_post_close:
                 self._send_post_close_holding_reviews(trade_date)
+                self._send_scheduled_periodic_reviews(trade_date)
                 if self.trade_calendar.is_last_trading_day_of_week(trade_date):
                     self._prepare_weekly_cross_alerts(trade_date)
         except Exception as exc:  # pragma: no cover
@@ -1299,60 +1314,263 @@ class StockMonitor:
         return False
 
     def _send_post_close_holding_reviews(self, trade_date: date) -> None:
-        marker = trade_date.isoformat()
         owners = sorted(row["username"] for row in list_users(self.settings.db_path))
         for owner_username in owners:
-            owner_trade_records = list_trade_records(self.settings.db_path, owner_username, None)
-            owner_monitored_stocks = get_monitored_stocks(self.settings.db_path, owner_username)
-            if not owner_trade_records and not owner_monitored_stocks:
-                continue
-            job_state = get_job_state(self.settings.db_path, owner_username, "post_close_holding_review")
-            if job_state and job_state["last_run_marker"] == marker:
-                continue
-            position_map = self._resolve_owner_position_map(owner_username)
-            email_settings = get_email_settings(self.settings.db_path, owner_username)
-            snapshots: list[dict[str, Any]] = []
-            for symbol in sorted(position_map):
-                try:
-                    snapshot = self.refresh_symbol_snapshot(owner_username, symbol)
-                except Exception as exc:
-                    fallback_row = get_snapshot(self.settings.db_path, owner_username, symbol)
-                    if fallback_row is None:
-                        self.last_error_message = f"{owner_username}/{symbol} 收盘复盘快照刷新失败：{exc}"
-                        continue
-                    snapshot = self._snapshot_from_row(fallback_row)
-                    self.last_error_message = f"{owner_username}/{symbol} 收盘复盘沿用最近快照：{exc}"
-                snapshots.append(self._snapshot_payload(snapshot))
-            portfolio_settings = get_portfolio_settings(self.settings.db_path, owner_username)
-            portfolio_profile = build_portfolio_profile(
-                owner_trade_records,
-                snapshots,
-                float(portfolio_settings["total_investment_amount"] or 0.0),
-            )
-            model_learning = self._build_model_learning_summary(owner_username, snapshots)
-            email_result = send_message(
-                email_settings,
-                subject=f"[收盘持仓复盘] {owner_username} {marker}",
-                body=build_portfolio_review_email_body(
-                    {
-                        "owner_username": owner_username,
-                        "trade_date": marker,
-                        "portfolio_profile": portfolio_profile,
-                        "model_learning": model_learning,
-                    }
-                ),
-                html_body=build_portfolio_review_email_html_body(
-                    {
-                        "owner_username": owner_username,
-                        "trade_date": marker,
-                        "portfolio_profile": portfolio_profile,
-                        "model_learning": model_learning,
-                    }
-                ),
-            )
-            if not email_result.success:
-                self.last_error_message = f"{owner_username} 收盘持仓复盘邮件发送失败：{email_result.error}"
+            result = self.send_review_email(owner_username, "daily", trade_date, force=False)
+            if not result.success and result.status not in {"已发送", "跳过"}:
+                self.last_error_message = f"{owner_username} 收盘持仓复盘邮件发送失败：{result.error or result.status}"
+
+    def _send_scheduled_periodic_reviews(self, trade_date: date) -> None:
+        period_types: list[str] = []
+        if self.trade_calendar.is_last_trading_day_of_week(trade_date):
+            period_types.append("weekly")
+        if self.trade_calendar.is_last_trading_day_of_month(trade_date):
+            period_types.append("monthly")
+        if self.trade_calendar.is_last_trading_day_of_year(trade_date):
+            period_types.append("yearly")
+        if not period_types:
+            return
+        owners = sorted(row["username"] for row in list_users(self.settings.db_path))
+        for owner_username in owners:
+            for period_type in period_types:
+                result = self.send_review_email(owner_username, period_type, trade_date, force=False)
+                if not result.success and result.status not in {"已发送", "跳过"}:
+                    self.last_error_message = f"{owner_username} {period_type} 周期复盘邮件发送失败：{result.error or result.status}"
+
+    def send_review_email(
+        self,
+        owner_username: str,
+        period_type: str,
+        reference_date: date | None = None,
+        *,
+        force: bool = False,
+    ) -> EmailDeliveryResult:
+        resolved_date = reference_date or datetime.now(UTC).date()
+        if period_type == "daily":
+            return self._send_daily_review_email(owner_username, resolved_date, force=force)
+        return self._send_periodic_review_email(owner_username, period_type, resolved_date, force=force)
+
+    def _send_daily_review_email(
+        self,
+        owner_username: str,
+        trade_date: date,
+        *,
+        force: bool = False,
+    ) -> EmailDeliveryResult:
+        marker = trade_date.isoformat()
+        owner_trade_records = list_trade_records(self.settings.db_path, owner_username, None)
+        owner_monitored_stocks = get_monitored_stocks(self.settings.db_path, owner_username)
+        if not owner_trade_records and not owner_monitored_stocks:
+            return EmailDeliveryResult(False, "跳过", "当前账号暂无持仓或交易记录")
+        job_state = get_job_state(self.settings.db_path, owner_username, "post_close_holding_review")
+        if not force and job_state and job_state["last_run_marker"] == marker:
+            return EmailDeliveryResult(False, "已发送", "当日收盘复盘邮件已发送")
+        snapshots = self._collect_owner_snapshots_for_review(owner_username)
+        portfolio_settings = get_portfolio_settings(self.settings.db_path, owner_username)
+        portfolio_profile = build_portfolio_profile(
+            owner_trade_records,
+            snapshots,
+            float(portfolio_settings["total_investment_amount"] or 0.0),
+        )
+        model_learning = self._build_model_learning_summary(owner_username, snapshots)
+        email_settings = get_email_settings(self.settings.db_path, owner_username)
+        email_result = send_message(
+            email_settings,
+            subject=f"[收盘持仓复盘] {owner_username} {marker}",
+            body=build_portfolio_review_email_body(
+                {
+                    "owner_username": owner_username,
+                    "trade_date": marker,
+                    "portfolio_profile": portfolio_profile,
+                    "model_learning": model_learning,
+                }
+            ),
+            html_body=build_portfolio_review_email_html_body(
+                {
+                    "owner_username": owner_username,
+                    "trade_date": marker,
+                    "portfolio_profile": portfolio_profile,
+                    "model_learning": model_learning,
+                }
+            ),
+        )
+        if email_result.success:
             set_job_state(self.settings.db_path, owner_username, "post_close_holding_review", marker)
+        return email_result
+
+    def _send_periodic_review_email(
+        self,
+        owner_username: str,
+        period_type: str,
+        reference_date: date,
+        *,
+        force: bool = False,
+    ) -> EmailDeliveryResult:
+        period_label_map = {
+            "weekly": "每周复盘",
+            "monthly": "每月复盘",
+            "yearly": "每年复盘",
+        }
+        start_date, end_date = self._resolve_period_bounds(period_type, reference_date)
+        job_name = f"{period_type}_holding_review"
+        marker = end_date.isoformat()
+        owner_trade_records = list_trade_records(self.settings.db_path, owner_username, None)
+        owner_monitored_stocks = get_monitored_stocks(self.settings.db_path, owner_username)
+        if not owner_trade_records and not owner_monitored_stocks:
+            return EmailDeliveryResult(False, "跳过", "当前账号暂无持仓或交易记录")
+        job_state = get_job_state(self.settings.db_path, owner_username, job_name)
+        if not force and job_state and job_state["last_run_marker"] == marker:
+            return EmailDeliveryResult(False, "已发送", f"{period_label_map.get(period_type, period_type)}邮件已发送")
+        snapshots = self._collect_owner_snapshots_for_review(owner_username)
+        portfolio_settings = get_portfolio_settings(self.settings.db_path, owner_username)
+        portfolio_profile = build_portfolio_profile(
+            owner_trade_records,
+            snapshots,
+            float(portfolio_settings["total_investment_amount"] or 0.0),
+        )
+        period_trade_records = [
+            row for row in owner_trade_records
+            if (
+                (traded_at := _safe_date_from_iso(str(row["traded_at"] or ""))) is not None
+                and start_date <= traded_at <= end_date
+            )
+        ]
+        try:
+            trade_reconciliation = build_trade_reconciliation(
+                period_trade_records,
+                list_trade_analyses(self.settings.db_path, owner_username, None),
+                snapshots,
+            )
+        except Exception as exc:
+            self.last_error_message = f"{owner_username} 周期复盘对账构建失败：{exc}"
+            trade_reconciliation = {
+                "summary": {
+                    "closed_round_trips": 0,
+                    "open_lots": 0,
+                    "win_rate": 0.0,
+                    "avg_return_pct": 0.0,
+                    "avg_holding_days": 0.0,
+                    "total_commission_fee": 0.0,
+                    "avg_buy_slippage_pct": None,
+                    "avg_sell_slippage_pct": None,
+                    "exit_summaries": [],
+                },
+                "closed_round_trips": [],
+                "open_lots": [],
+                "execution_rows": [],
+            }
+        lookback_days = 90 if period_type == "weekly" else 180 if period_type == "monthly" else 365
+        model_learning = self._build_model_learning_summary(owner_username, snapshots, lookback_days=lookback_days)
+        payload = self._build_periodic_review_payload(
+            owner_username=owner_username,
+            period_type=period_type,
+            start_date=start_date,
+            end_date=end_date,
+            portfolio_profile=portfolio_profile,
+            trade_reconciliation=trade_reconciliation,
+            model_learning=model_learning,
+        )
+        email_settings = get_email_settings(self.settings.db_path, owner_username)
+        email_result = send_message(
+            email_settings,
+            subject=f"[{period_label_map.get(period_type, period_type)}] {owner_username} {start_date.isoformat()}~{end_date.isoformat()}",
+            body=build_periodic_review_email_body(payload),
+            html_body=build_periodic_review_email_html_body(payload),
+        )
+        if email_result.success:
+            set_job_state(self.settings.db_path, owner_username, job_name, marker)
+        return email_result
+
+    def _collect_owner_snapshots_for_review(self, owner_username: str) -> list[dict[str, Any]]:
+        position_map = self._resolve_owner_position_map(owner_username)
+        snapshots: list[dict[str, Any]] = []
+        for symbol in sorted(position_map):
+            try:
+                snapshot = self.refresh_symbol_snapshot(owner_username, symbol)
+            except Exception as exc:
+                fallback_row = get_snapshot(self.settings.db_path, owner_username, symbol)
+                if fallback_row is None:
+                    self.last_error_message = f"{owner_username}/{symbol} 复盘快照刷新失败：{exc}"
+                    continue
+                snapshot = self._snapshot_from_row(fallback_row)
+                self.last_error_message = f"{owner_username}/{symbol} 复盘沿用最近快照：{exc}"
+            snapshots.append(self._snapshot_payload(snapshot))
+        return snapshots
+
+    @staticmethod
+    def _resolve_period_bounds(period_type: str, reference_date: date) -> tuple[date, date]:
+        if period_type == "weekly":
+            return reference_date - timedelta(days=reference_date.weekday()), reference_date
+        if period_type == "monthly":
+            return reference_date.replace(day=1), reference_date
+        if period_type == "yearly":
+            return date(reference_date.year, 1, 1), reference_date
+        return reference_date, reference_date
+
+    def _build_periodic_review_payload(
+        self,
+        *,
+        owner_username: str,
+        period_type: str,
+        start_date: date,
+        end_date: date,
+        portfolio_profile: dict[str, Any],
+        trade_reconciliation: dict[str, Any],
+        model_learning: dict[str, Any],
+    ) -> dict[str, Any]:
+        period_label_map = {
+            "weekly": "每周复盘",
+            "monthly": "每月复盘",
+            "yearly": "每年复盘",
+        }
+        summary = dict(trade_reconciliation.get("summary") or {})
+        exit_summaries = list(summary.get("exit_summaries") or [])
+        operation_highlights: list[str] = []
+        closed_round_trips = list(trade_reconciliation.get("closed_round_trips") or [])
+        if closed_round_trips:
+            best_trade = max(closed_round_trips, key=lambda item: float(item.get("net_pnl") or 0.0))
+            worst_trade = min(closed_round_trips, key=lambda item: float(item.get("net_pnl") or 0.0))
+            operation_highlights.append(
+                f"本周期最佳回合是 {best_trade.get('display_name', best_trade.get('symbol', '-'))}，净收益 {float(best_trade.get('net_pnl', 0.0)):.2f}。"
+            )
+            operation_highlights.append(
+                f"本周期最弱回合是 {worst_trade.get('display_name', worst_trade.get('symbol', '-'))}，净收益 {float(worst_trade.get('net_pnl', 0.0)):.2f}。"
+            )
+        if summary.get("avg_buy_slippage_pct") is not None or summary.get("avg_sell_slippage_pct") is not None:
+            operation_highlights.append(
+                f"执行质量方面，买入平均滑点 {float(summary.get('avg_buy_slippage_pct') or 0.0):.2f}% ，卖出平均滑点 {float(summary.get('avg_sell_slippage_pct') or 0.0):.2f}% 。"
+            )
+        review_highlights: list[str] = []
+        if float(summary.get("win_rate") or 0.0) >= 60:
+            review_highlights.append("本周期交易胜率较高，执行纪律整体有效。")
+        elif int(summary.get("closed_round_trips") or 0) > 0:
+            review_highlights.append("本周期交易胜率一般，建议重点复盘亏损回合和执行偏差。")
+        if exit_summaries:
+            dominant_exit = max(exit_summaries, key=lambda item: int(item.get("count") or 0))
+            review_highlights.append(
+                f"本周期最常见离场类型是 {dominant_exit.get('exit_label', '-')}，共 {int(dominant_exit.get('count') or 0)} 次。"
+            )
+        if str(portfolio_profile.get("risk_level") or "") == "高":
+            review_highlights.append("当前组合风险仍偏高，下一周期要优先控制仓位集中度。")
+        cycle_advice = list(portfolio_profile.get("professional_advice") or [])[:3]
+        if float(summary.get("avg_buy_slippage_pct") or 0.0) > 0.8:
+            cycle_advice.append("买入滑点偏高，下一周期尽量减少追价成交，优先按计划区间分批挂单。")
+        if float(summary.get("avg_sell_slippage_pct") or 0.0) < -0.8:
+            cycle_advice.append("卖出执行偏慢，下一周期需要更严格执行止盈止损，不要等信号钝化后再处理。")
+        if not cycle_advice:
+            cycle_advice.append("下一周期继续按计划交易，优先保持交易节奏和仓位纪律的一致性。")
+        return {
+            "owner_username": owner_username,
+            "period_type": period_type,
+            "period_label": period_label_map.get(period_type, period_type),
+            "period_range": f"{start_date.isoformat()} 至 {end_date.isoformat()}",
+            "portfolio_profile": portfolio_profile,
+            "trade_reconciliation": trade_reconciliation,
+            "model_learning": model_learning,
+            "operation_highlights": operation_highlights,
+            "review_highlights": review_highlights,
+            "cycle_advice": cycle_advice,
+        }
 
     @staticmethod
     def _snapshot_payload(snapshot: SnapshotComputation) -> dict[str, Any]:
@@ -1423,12 +1641,16 @@ class StockMonitor:
                 "avg_return_pct": round(sum(returns) / sample_size, 2),
                 "avg_drawdown_pct": round(sum(drawdowns.get(key, [0.0])) / sample_size, 2),
             }
-        real_feedback = build_real_trade_feedback(
-            list_trade_records(self.settings.db_path, owner_username, None),
-            list_trade_analyses(self.settings.db_path, owner_username, None),
-            get_snapshots(self.settings.db_path, owner_username),
-            lookback_days=lookback_days,
-        )
+        try:
+            real_feedback = build_real_trade_feedback(
+                list_trade_records(self.settings.db_path, owner_username, None),
+                list_trade_analyses(self.settings.db_path, owner_username, None),
+                get_snapshots(self.settings.db_path, owner_username),
+                lookback_days=lookback_days,
+            )
+        except Exception as exc:
+            self.last_error_message = f"{owner_username} 真实交易反馈构建失败：{exc}"
+            real_feedback = {}
         merged_feedback: dict[str, dict[str, float | int]] = {}
         for key in sorted(set(feedback) | set(real_feedback)):
             paper_item = feedback.get(key, {})

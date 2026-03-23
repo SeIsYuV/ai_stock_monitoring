@@ -436,11 +436,32 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             latest_analysis = _serialize_latest_analysis_row(latest_analysis_row)
 
         portfolio_profile = build_portfolio_profile(all_trade_records, snapshots, float(portfolio_settings["total_investment_amount"] or 0.0))
-        trade_reconciliation = build_trade_reconciliation(
-            trade_records,
-            trade_analyses,
-            snapshots,
-        )
+        try:
+            trade_reconciliation = build_trade_reconciliation(
+                trade_records,
+                trade_analyses,
+                snapshots,
+            )
+        except Exception as exc:
+            trade_reconciliation = {
+                "summary": {
+                    "closed_round_trips": 0,
+                    "open_lots": 0,
+                    "win_rate": 0.0,
+                    "realized_pnl": 0.0,
+                    "avg_return_pct": 0.0,
+                    "avg_holding_days": 0.0,
+                    "total_commission_fee": 0.0,
+                    "avg_buy_slippage_pct": None,
+                    "avg_sell_slippage_pct": None,
+                    "exit_summaries": [],
+                },
+                "closed_round_trips": [],
+                "open_lots": [],
+                "execution_rows": [],
+            }
+            message = message or f"交易对账构建失败，已回退基础视图：{exc}"
+            message_type = "warning"
 
         return templates.TemplateResponse(
             request,
@@ -538,7 +559,24 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 ]
             )
 
-        reconciliation = build_trade_reconciliation(trade_records, trade_analyses, snapshots)
+        try:
+            reconciliation = build_trade_reconciliation(trade_records, trade_analyses, snapshots)
+        except Exception:
+            reconciliation = {
+                "summary": {
+                    "closed_round_trips": 0,
+                    "open_lots": 0,
+                    "win_rate": 0.0,
+                    "realized_pnl": 0.0,
+                    "avg_return_pct": 0.0,
+                    "avg_holding_days": 0.0,
+                    "total_commission_fee": 0.0,
+                    "avg_buy_slippage_pct": None,
+                    "avg_sell_slippage_pct": None,
+                    "exit_summaries": [],
+                },
+                "closed_round_trips": [],
+            }
         reconcile_sheet = workbook.create_sheet(title="交易对账")
         reconcile_sheet.append(["已闭环回合", reconciliation["summary"]["closed_round_trips"]])
         reconcile_sheet.append(["开放批次", reconciliation["summary"]["open_lots"]])
@@ -1007,6 +1045,36 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         if result_message is None:
             result_message = "请先生成至少一条复盘分析后再发送"
         return _redirect_with_message(f"/trades?symbol={symbol}", result_message)
+
+    @app.post("/reviews/email")
+    async def email_review_report(
+        request: Request,
+        period_type: str = Form(...),
+    ) -> RedirectResponse:
+        current_user = _require_login(request, resolved_settings)
+        if isinstance(current_user, RedirectResponse):
+            return current_user
+
+        if period_type not in {"daily", "weekly", "monthly", "yearly"}:
+            return _redirect_with_message("/trades", "复盘邮件类型无效")
+
+        review_date = datetime.now(ZoneInfo(resolved_settings.timezone_name)).date()
+        result = await asyncio.to_thread(
+            app.state.monitor.send_review_email,
+            current_user["username"],
+            period_type,
+            review_date,
+            force=True,
+        )
+        period_label_map = {
+            "daily": "收盘复盘",
+            "weekly": "周复盘",
+            "monthly": "月复盘",
+            "yearly": "年复盘",
+        }
+        if result.success:
+            return _redirect_with_message("/trades", f"{period_label_map[period_type]}邮件已手动补发")
+        return _redirect_with_message("/trades", f"{period_label_map[period_type]}邮件补发失败：{result.error or result.status}")
 
     @app.post("/settings/email")
     async def update_email_settings(

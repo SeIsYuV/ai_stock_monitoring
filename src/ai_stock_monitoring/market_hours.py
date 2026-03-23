@@ -49,6 +49,18 @@ class TradeCalendar:
             return True
         return next_day.isocalendar()[:2] != current_date.isocalendar()[:2]
 
+    def is_last_trading_day_of_month(self, current_date: date) -> bool:
+        next_day = self.next_trading_day(current_date)
+        if next_day is None:
+            return True
+        return (next_day.year, next_day.month) != (current_date.year, current_date.month)
+
+    def is_last_trading_day_of_year(self, current_date: date) -> bool:
+        next_day = self.next_trading_day(current_date)
+        if next_day is None:
+            return True
+        return next_day.year != current_date.year
+
 
 def get_market_status(
     refresh_interval_seconds: int,

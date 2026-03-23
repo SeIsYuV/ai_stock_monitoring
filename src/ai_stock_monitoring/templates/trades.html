@@ -37,6 +37,26 @@
             <input type="text" name="symbol" maxlength="6" value="{{ selected_symbol }}" placeholder="例如 600519" required>
             <button type="submit" class="secondary">发送最新复盘到当前账号邮箱</button>
         </form>
+        <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 16px 0;">
+        <h3>手动补发复盘邮件</h3>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <form method="post" action="/reviews/email">
+                <input type="hidden" name="period_type" value="daily">
+                <button type="submit" class="secondary">补发收盘复盘</button>
+            </form>
+            <form method="post" action="/reviews/email">
+                <input type="hidden" name="period_type" value="weekly">
+                <button type="submit" class="secondary">补发周复盘</button>
+            </form>
+            <form method="post" action="/reviews/email">
+                <input type="hidden" name="period_type" value="monthly">
+                <button type="submit" class="secondary">补发月复盘</button>
+            </form>
+            <form method="post" action="/reviews/email">
+                <input type="hidden" name="period_type" value="yearly">
+                <button type="submit" class="secondary">补发年复盘</button>
+            </form>
+        </div>
         <a class="inline-link" href="/trades/export{% if selected_symbol %}?symbol={{ selected_symbol }}{% endif %}">导出当前账号交易记录为 Excel</a>
         {% if position_summary %}
         <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 16px 0;">

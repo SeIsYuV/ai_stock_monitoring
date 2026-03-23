@@ -753,3 +753,163 @@ def build_portfolio_review_email_html_body(payload: dict[str, Any]) -> str:
         sections_html="".join(sections),
         accent="#1d4ed8",
     )
+
+
+def build_periodic_review_email_body(payload: dict[str, Any]) -> str:
+    portfolio_profile = payload["portfolio_profile"]
+    model_learning = dict(payload.get("model_learning") or {})
+    trade_reconciliation = dict(payload.get("trade_reconciliation") or {})
+    summary = dict(trade_reconciliation.get("summary") or {})
+    period_label = str(payload.get("period_label") or "周期")
+    period_range = str(payload.get("period_range") or "-")
+    active_positions = list(portfolio_profile.get("active_positions") or [])
+    closed_positions = list(portfolio_profile.get("closed_positions") or [])
+    cycle_advice = list(payload.get("cycle_advice") or [])
+    operation_highlights = list(payload.get("operation_highlights") or [])
+    review_highlights = list(payload.get("review_highlights") or [])
+
+    lines = [
+        f"账号：{payload['owner_username']}",
+        f"复盘周期：{period_label}",
+        f"统计区间：{period_range}",
+        "=" * 18,
+        "【持仓情况】",
+        f"- 当前持仓数：{len(active_positions)}",
+        f"- 当前持仓比例：{float(portfolio_profile.get('holding_ratio', 0.0)):.2f}%",
+        f"- 当前持仓市值：{float(portfolio_profile.get('total_market_value', 0.0)):.2f}",
+        f"- 未实现盈亏：{float(portfolio_profile.get('total_unrealized_pnl', 0.0)):.2f}（{float(portfolio_profile.get('total_unrealized_pnl_pct', 0.0)):.2f}%）",
+        f"- 已实现盈亏：{float(portfolio_profile.get('total_realized_pnl', 0.0)):.2f}",
+        f"- 综合建议：{portfolio_profile.get('comprehensive_advice', '-')}",
+    ]
+    if active_positions:
+        lines.extend(["", "【当前持仓拆解】"])
+        for item in active_positions[:8]:
+            lines.append(
+                f"- {item.get('display_name', item.get('symbol', '-'))}：仓位 {float(item.get('weight_pct', 0.0)):.2f}% ｜ 动作 {item.get('action', '-')} ｜ 结论 {item.get('decision_summary', item.get('comprehensive_advice', '-'))}"
+            )
+    if closed_positions:
+        lines.extend(["", "【清仓情况】"])
+        for item in closed_positions[:8]:
+            lines.append(
+                f"- {item.get('display_name', item.get('symbol', '-'))}：已实现盈亏 {float(item.get('realized_pnl', 0.0)):.2f} ｜ 手续费 {float(item.get('total_commission_fee', 0.0)):.2f}"
+            )
+
+    lines.extend([
+        "",
+        "【操作情况】",
+        f"- 已闭环交易回合：{int(summary.get('closed_round_trips') or 0)}",
+        f"- 开放批次：{int(summary.get('open_lots') or 0)}",
+        f"- 胜率：{float(summary.get('win_rate') or 0.0):.2f}%",
+        f"- 平均收益：{float(summary.get('avg_return_pct') or 0.0):.2f}%",
+        f"- 平均持有天数：{float(summary.get('avg_holding_days') or 0.0):.1f}",
+        f"- 累计手续费：{float(summary.get('total_commission_fee') or 0.0):.2f}",
+    ])
+    if summary.get("avg_buy_slippage_pct") is not None or summary.get("avg_sell_slippage_pct") is not None:
+        lines.append(
+            f"- 执行偏差：买入滑点 {float(summary.get('avg_buy_slippage_pct') or 0.0):.2f}% ｜ 卖出滑点 {float(summary.get('avg_sell_slippage_pct') or 0.0):.2f}%"
+        )
+    if operation_highlights:
+        lines.extend(["", "【操作亮点】"])
+        lines.extend(f"- {item}" for item in operation_highlights)
+
+    exit_summaries = list(summary.get("exit_summaries") or [])
+    if exit_summaries:
+        lines.extend(["", "【离场结构】"])
+        for item in exit_summaries:
+            lines.append(
+                f"- {item.get('exit_label', '-')}：{int(item.get('count') or 0)} 次 ｜ 胜率 {float(item.get('win_rate') or 0.0):.2f}% ｜ 平均收益 {float(item.get('avg_return_pct') or 0.0):.2f}%"
+            )
+
+    if review_highlights:
+        lines.extend(["", "【周期复盘】"])
+        lines.extend(f"- {item}" for item in review_highlights)
+
+    if cycle_advice:
+        lines.extend(["", "【周期建议】"])
+        lines.extend(f"- {item}" for item in cycle_advice)
+
+    lines.extend(_build_model_learning_text_lines(model_learning))
+    lines.extend(["", "本系统仅为监控参考，不构成任何投资建议。"])
+    return "\n".join(lines)
+
+
+def build_periodic_review_email_html_body(payload: dict[str, Any]) -> str:
+    portfolio_profile = payload["portfolio_profile"]
+    model_learning = dict(payload.get("model_learning") or {})
+    trade_reconciliation = dict(payload.get("trade_reconciliation") or {})
+    summary = dict(trade_reconciliation.get("summary") or {})
+    active_positions = list(portfolio_profile.get("active_positions") or [])
+    closed_positions = list(portfolio_profile.get("closed_positions") or [])
+    cycle_advice = list(payload.get("cycle_advice") or [])
+    operation_highlights = list(payload.get("operation_highlights") or [])
+    review_highlights = list(payload.get("review_highlights") or [])
+
+    sections = [
+        _render_email_section(
+            "周期总览",
+            _render_metric_cards(
+                [
+                    ("复盘周期", str(payload.get("period_label") or "-")),
+                    ("统计区间", str(payload.get("period_range") or "-")),
+                    ("当前持仓比例", f"{float(portfolio_profile.get('holding_ratio', 0.0)):.2f}%"),
+                    ("已实现盈亏", f"{float(portfolio_profile.get('total_realized_pnl', 0.0)):.2f}"),
+                    ("未实现盈亏", f"{float(portfolio_profile.get('total_unrealized_pnl', 0.0)):.2f}"),
+                    ("组合建议", str(portfolio_profile.get("comprehensive_advice", "-"))),
+                ]
+            ),
+        ),
+        _render_email_section(
+            "操作概览",
+            _render_metric_cards(
+                [
+                    ("闭环回合", f"{int(summary.get('closed_round_trips') or 0)}"),
+                    ("开放批次", f"{int(summary.get('open_lots') or 0)}"),
+                    ("胜率", f"{float(summary.get('win_rate') or 0.0):.2f}%"),
+                    ("平均收益", f"{float(summary.get('avg_return_pct') or 0.0):.2f}%"),
+                    ("平均持有天数", f"{float(summary.get('avg_holding_days') or 0.0):.1f}"),
+                    ("累计手续费", f"{float(summary.get('total_commission_fee') or 0.0):.2f}"),
+                ]
+            ),
+        ),
+    ]
+    if operation_highlights:
+        sections.append(_render_email_section("操作亮点", _render_bullet_list(operation_highlights)))
+    if active_positions:
+        sections.append(_render_email_section("当前持仓", _render_positions_table(active_positions)))
+    if closed_positions:
+        sections.append(
+            _render_email_section(
+                "清仓回顾",
+                _render_bullet_list(
+                    [
+                        f"{item.get('display_name', item.get('symbol', '-'))}：已实现盈亏 {float(item.get('realized_pnl', 0.0)):.2f} ｜ 手续费 {float(item.get('total_commission_fee', 0.0)):.2f}"
+                        for item in closed_positions[:8]
+                    ]
+                ),
+            )
+        )
+    exit_summaries = list(summary.get("exit_summaries") or [])
+    if exit_summaries:
+        sections.append(
+            _render_email_section(
+                "离场结构",
+                _render_bullet_list(
+                    [
+                        f"{item.get('exit_label', '-')}：{int(item.get('count') or 0)} 次 ｜ 胜率 {float(item.get('win_rate') or 0.0):.2f}% ｜ 平均收益 {float(item.get('avg_return_pct') or 0.0):.2f}%"
+                        for item in exit_summaries
+                    ]
+                ),
+            )
+        )
+    if review_highlights:
+        sections.append(_render_email_section("周期复盘", _render_bullet_list(review_highlights)))
+    if cycle_advice:
+        sections.append(_render_email_section("周期建议", _render_bullet_list(cycle_advice)))
+    sections.extend(_render_model_learning_html(model_learning))
+    sections.append("<div style=\"margin-top:10px;font-size:12px;color:#94a3b8;line-height:1.7;\">本系统仅为监控参考，不构成任何投资建议。</div>")
+    return _render_email_shell(
+        title=f"{payload['owner_username']} {payload.get('period_label', '周期')}复盘",
+        subtitle=f"统计区间：{payload.get('period_range', '-')}",
+        sections_html="".join(sections),
+        accent="#0f766e",
+    )
